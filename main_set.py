@@ -3242,7 +3242,7 @@ class MultiSetApp:
             _default_venv_candidates = [
                 os.path.join(os.path.dirname(DATA_DIR), ".venv313", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv", "Scripts", "python.exe"),
-                r"C:\\Users\\ad341\\amir2000\\.venv\\Scripts\\python.exe",
+                r"PATH\TO\\.venv\\Scripts\\python.exe",
             ]
 
             def _pick_python() -> str:
