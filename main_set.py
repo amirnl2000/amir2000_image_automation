@@ -110,24 +110,24 @@ _cfg = _load_config()
 PATHS = getattr(_cfg, "PATHS", {}) if _cfg else {}
 
 DATA_DIR = PATHS.get(
-    "DATA_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\data"
+    "DATA_DIR", r"Path\to\amir2000_image_automation\data"
 )
 DB_PATH = os.environ.get(
     "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
 )
 INCOMING_DIR = PATHS.get(
-    "INCOMING_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\incoming"
+    "INCOMING_DIR", r"Path\to\\amir2000_image_automation\incoming"
 )
 LOCAL_SITE_IMAGES_BASE = PATHS.get(
     "LOCAL_SITE_IMAGES_BASE",
-    r"C:\Users\ad341\amir2000\amir2000.nl\pic\images\new",
+    r"Path\to\l\pic\images\new",
 )
 
 BASE_PICK_DIR = PATHS.get(
-    "BASE_PICK_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded"
+    "BASE_PICK_DIR", r"Path\to\_images to be uploaded"
 )
 STAGED_DIR = PATHS.get(
-    "STAGED_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded\staged"
+    "STAGED_DIR", r"Path\to\_images to be uploaded\staged"
 )
 
 # Keep relative “data/…” paths stable like main.py does
@@ -211,7 +211,7 @@ RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", r"C:\Users\ad341\amir2000\Alamy\data\alamy_local.db"
+    "CAPTION_TERMS_DB", r"Path\to\alamy_local.db"
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
