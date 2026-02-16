@@ -110,24 +110,24 @@ _cfg = _load_config()
 PATHS = getattr(_cfg, "PATHS", {}) if _cfg else {}
 
 DATA_DIR = PATHS.get(
-    "DATA_DIR", r"YOUR_PATH_HERE"
+    "DATA_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\data"
 )
 DB_PATH = os.environ.get(
     "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
 )
 INCOMING_DIR = PATHS.get(
-    "INCOMING_DIR", r"YOUR_PATH_HERE"
+    "INCOMING_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\incoming"
 )
 LOCAL_SITE_IMAGES_BASE = PATHS.get(
     "LOCAL_SITE_IMAGES_BASE",
-    r"YOUR_PATH_HERE",
+    r"C:\Users\ad341\amir2000\amir2000.nl\pic\images\new",
 )
 
 BASE_PICK_DIR = PATHS.get(
-    "BASE_PICK_DIR", r"YOUR_PATH_HERE to be uploaded"
+    "BASE_PICK_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded"
 )
 STAGED_DIR = PATHS.get(
-    "STAGED_DIR", r"YOUR_PATH_HERE to be uploaded\staged"
+    "STAGED_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded\staged"
 )
 
 # Keep relative “data/…” paths stable like main.py does
@@ -211,7 +211,7 @@ RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", r"YOUR_PATH_HERE"
+    "CAPTION_TERMS_DB", r"C:\Users\ad341\amir2000\Alamy\data\alamy_local.db"
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
@@ -224,6 +224,8 @@ CAPTION_NATIVE_CRASH_RETRIES = int(
     os.getenv("CAPTION_NATIVE_CRASH_RETRIES", str(max(8, CAPTION_MAX_RETRIES + 2)))
 )
 SESSION_SCOPE_ONLY = os.getenv("AMIR_SESSION_SCOPE_ONLY", "1") == "1"
+AUTO_AI_SUBJECT_ON_SELECT = os.getenv("AUTO_AI_SUBJECT_ON_SELECT", "1") == "1"
+ADD_SET_EXIF_PREVIEW = os.getenv("ADD_SET_EXIF_PREVIEW", "0") == "1"
 
 # Stage-6 QC scan (duplicates + suspicious text) before review editor opens
 PREFILL_QC_ENABLED = os.getenv("PREFILL_QC_ENABLED", "1") == "1"
@@ -649,12 +651,21 @@ def _b64_image_for_ollama(path: str) -> str:
     # shrink and base64 so the request is small
     from io import BytesIO
 
-    with Image.open(path) as im:
-        im = im.convert("RGB")
-        im.thumbnail((SUBJECT_THUMB_MAX, SUBJECT_THUMB_MAX))
-        buf = BytesIO()
-        im.save(buf, format="JPEG", quality=SUBJECT_JPEG_QUALITY)
-        return base64.b64encode(buf.getvalue()).decode("ascii")
+    with warnings.catch_warnings():
+        try:
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        except Exception:
+            pass
+        with Image.open(path) as im:
+            try:
+                im.draft("RGB", (SUBJECT_THUMB_MAX, SUBJECT_THUMB_MAX))
+            except Exception:
+                pass
+            im = im.convert("RGB")
+            im.thumbnail((SUBJECT_THUMB_MAX, SUBJECT_THUMB_MAX))
+            buf = BytesIO()
+            im.save(buf, format="JPEG", quality=SUBJECT_JPEG_QUALITY)
+            return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 _LAST_OLLAMA_ERROR = ""
@@ -1137,6 +1148,7 @@ def resource_path(rel):
 # Let helpers read the canonical used_filenames.json (unchanged)
 USED_NAMES = os.path.join(DATA_DIR, "used_filenames.json")
 os.environ["AMIR_USED_FILENAMES_JSON"] = USED_NAMES
+RUNTIME_CRASH_LOG = os.path.join(DATA_DIR, "crash_runtime.log")
 
 
 # ---------- DB helpers (same schema guard as main.py) ----------
@@ -1334,6 +1346,20 @@ def _fmt_exposure(x) -> str | None:
         return None
 
 
+def _append_runtime_crash(kind: str, exc_type, exc_value, exc_tb):
+    """Best-effort append-only crash log for runtime callback/thread failures."""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(RUNTIME_CRASH_LOG, "a", encoding="utf-8", errors="replace") as f:
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            en = getattr(exc_type, "__name__", str(exc_type))
+            f.write(f"\n[{ts}] kind={kind} error={en}: {exc_value}\n")
+            f.write("".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+            f.write("\n")
+    except Exception:
+        pass
+
+
 # ---------- UI ----------
 class MultiSetApp:
     def __init__(self, root: tk.Tk):
@@ -1361,6 +1387,14 @@ class MultiSetApp:
         )
 
         self._ui_disabled = False
+        self._ai_subject_busy = False
+        self._ai_subject_paths_sig: set[str] = set()
+
+        try:
+            # Capture Tk callback exceptions in a stable file instead of silent exits.
+            self.root.report_callback_exception = self._tk_callback_exception
+        except Exception:
+            pass
 
 
         # run log
@@ -1811,6 +1845,26 @@ class MultiSetApp:
         except Exception:
             pass
 
+    def _tk_callback_exception(self, exc, val, tb):
+        """Tk callback crash handler: log + keep app alive with actionable message."""
+        _append_runtime_crash("tk_callback", exc, val, tb)
+        try:
+            self._runlog(
+                "TK_CALLBACK_EXCEPTION",
+                f"{getattr(exc, '__name__', str(exc))}: {val}",
+            )
+        except Exception:
+            pass
+        try:
+            messagebox.showerror(
+                "Unexpected UI error",
+                "An unexpected UI error occurred.\n\n"
+                "Your session is still preserved.\n"
+                f"Crash log:\n{RUNTIME_CRASH_LOG}",
+            )
+        except Exception:
+            pass
+
     def _ui_ask_retry_cancel(self, title: str, message: str) -> bool:
         try:
             if not self.root.winfo_exists():
@@ -2130,7 +2184,7 @@ class MultiSetApp:
         self._pending_files = list(files)
 
         # Default behavior: auto-run AI subject suggestion (non-blocking)
-        if not (self._subject_get() or "").strip():
+        if AUTO_AI_SUBJECT_ON_SELECT and not (self._subject_get() or "").strip():
             self._ai_suggest_subject_for_current()
 
         self._update_ready_status()
@@ -2149,7 +2203,7 @@ class MultiSetApp:
         self._pending_files = list(files)
 
         # Default behavior: auto-run AI subject suggestion (non-blocking)
-        if not (self._subject_get() or "").strip():
+        if AUTO_AI_SUBJECT_ON_SELECT and not (self._subject_get() or "").strip():
             self._ai_suggest_subject_for_current()
 
         self._update_ready_status()
@@ -2166,51 +2220,93 @@ class MultiSetApp:
 
     def _add_current_set(self):
         """Finalize the current pending selection into a set after user review."""
-        if not self._pending_files:
-            messagebox.showwarning(
-                "No files",
-                "Pick images first (Select images… or Import set from folder…).",
-            )
-            return
-
-        # warn but allow continue if spelling issues remain
         try:
-            self._subject_spellcheck_update()
-        except Exception:
-            pass
-        try:
-            self._location_spellcheck_update()
-        except Exception:
-            pass
-
-        subj_issues = getattr(self, "_subject_issues", []) or []
-        loc_issues = getattr(self, "_location_issues", []) or []
-        if subj_issues or loc_issues:
-            words = []
-            words += [it.get("word", "") for it in subj_issues if it.get("word")]
-            words += [it.get("word", "") for it in loc_issues if it.get("word")]
-            preview = ", ".join(words[:8])
-            if len(words) > 8:
-                preview += " ..."
-            if preview:
+            if not self._pending_files:
                 messagebox.showwarning(
-                    "Spelling warning",
-                    "Subject or Location still contains underlined terms.\n\n"
-                    f"{preview}\n\n"
-                    "Tip: right click red words to Replace or Keep term.\n\n"
-                    "Continuing anyway.",
+                    "No files",
+                    "Pick images first (Select images… or Import set from folder…).",
                 )
+                return
 
-        ok = self._add_set(list(self._pending_files))
-        if ok:
-            self._clear_form()
-        else:
-            self._update_ready_status()
+            try:
+                self._runlog("ADD_SET_START", f"pending={len(self._pending_files)}")
+            except Exception:
+                pass
+
+            # warn but allow continue if spelling issues remain
+            try:
+                self._subject_spellcheck_update()
+            except Exception:
+                pass
+            try:
+                self._location_spellcheck_update()
+            except Exception:
+                pass
+
+            subj_issues = getattr(self, "_subject_issues", []) or []
+            loc_issues = getattr(self, "_location_issues", []) or []
+            if subj_issues or loc_issues:
+                words = []
+                words += [it.get("word", "") for it in subj_issues if it.get("word")]
+                words += [it.get("word", "") for it in loc_issues if it.get("word")]
+                preview = ", ".join(words[:8])
+                if len(words) > 8:
+                    preview += " ..."
+                if preview:
+                    messagebox.showwarning(
+                        "Spelling warning",
+                        "Subject or Location still contains underlined terms.\n\n"
+                        f"{preview}\n\n"
+                        "Tip: right click red words to Replace or Keep term.\n\n"
+                        "Continuing anyway.",
+                    )
+
+            ok = self._add_set(list(self._pending_files))
+            if ok:
+                self._clear_form()
+                try:
+                    self._runlog(
+                        "ADD_SET_OK",
+                        f"sets={len(self.batches)} pending={len(self._pending_files)}",
+                    )
+                except Exception:
+                    pass
+            else:
+                self._update_ready_status()
+        except Exception as e:
+            _append_runtime_crash("add_current_set", type(e), e, e.__traceback__)
+            try:
+                self._runlog("ADD_SET_EXCEPTION", f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
+            try:
+                self._update_ready_status()
+            except Exception:
+                pass
+            try:
+                messagebox.showerror(
+                    "Add set failed",
+                    "An unexpected error happened while adding the set.\n\n"
+                    "Your staged queue/session is preserved.\n"
+                    f"Crash log:\n{RUNTIME_CRASH_LOG}\n\n"
+                    f"Details:\n{type(e).__name__}: {e}",
+                )
+            except Exception:
+                pass
 
     def _ai_suggest_subject_for_current(self):
         if not self._pending_files:
             messagebox.showinfo("No images selected", "Select images first.")
             return
+
+        # Prevent overlapping suggestion workers when selecting many sets quickly.
+        if getattr(self, "_ai_subject_busy", False):
+            return
+
+        paths = list(self._pending_files)
+        paths_sig = {self._norm_path(p) for p in paths if p}
+        self._ai_subject_busy = True
+        self._ai_subject_paths_sig = paths_sig
 
         # Never block the Tk main thread (prevents "Not Responding")
         try:
@@ -2223,8 +2319,6 @@ class MultiSetApp:
             self.stage_lbl["text"] = "AI subject: working..."
         except Exception:
             pass
-
-        paths = list(self._pending_files)
 
         def _worker():
             try:
@@ -2240,12 +2334,22 @@ class MultiSetApp:
                         self.ai_subject_btn.configure(state="normal")
                 except Exception:
                     pass
+                finally:
+                    self._ai_subject_busy = False
+                    self._ai_subject_paths_sig = set()
 
                 g = (guess or "").strip()
                 if not g:
-                    messagebox.showinfo(
-                        "AI suggestion", err or "Could not suggest a subject."
-                    )
+                    if err:
+                        messagebox.showinfo(
+                            "AI suggestion", err or "Could not suggest a subject."
+                        )
+                    self._update_ready_status()
+                    return
+
+                current_sig = {self._norm_path(p) for p in (self._pending_files or []) if p}
+                if current_sig != paths_sig:
+                    # Selection changed while background suggestion was running.
                     self._update_ready_status()
                     return
 
@@ -2293,8 +2397,8 @@ class MultiSetApp:
             )
         )
 
-        # Match real pipeline behavior by checking with the first file's EXIF camera/year too.
-        if files:
+        # Optional EXIF preview check (disabled by default for add-set stability).
+        if ADD_SET_EXIF_PREVIEW and files:
             try:
                 exif = get_exif_data(files[0]) or {}
                 cam = get_camera_model(exif) or DEFAULT_CAMERA_TOKEN
@@ -3138,7 +3242,7 @@ class MultiSetApp:
             _default_venv_candidates = [
                 os.path.join(os.path.dirname(DATA_DIR), ".venv313", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv", "Scripts", "python.exe"),
-                r"YOUR_PATH_HERE",
+                r"C:\\Users\\ad341\\amir2000\\.venv\\Scripts\\python.exe",
             ]
 
             def _pick_python() -> str:
@@ -4613,8 +4717,56 @@ if __name__ == "__main__":
         # Keep this minimal: it helps locate the log without spamming the UI.
         print(f"[INFO] Log file: {log_path}")
 
+    def _install_runtime_crash_hooks():
+        try:
+            _prev_sys_hook = sys.excepthook
+        except Exception:
+            _prev_sys_hook = None
+
+        def _sys_hook(exc_type, exc_value, exc_tb):
+            _append_runtime_crash("sys_excepthook", exc_type, exc_value, exc_tb)
+            if callable(_prev_sys_hook):
+                try:
+                    _prev_sys_hook(exc_type, exc_value, exc_tb)
+                except Exception:
+                    pass
+
+        try:
+            sys.excepthook = _sys_hook
+        except Exception:
+            pass
+
+        if hasattr(threading, "excepthook"):
+            try:
+                _prev_thread_hook = threading.excepthook
+            except Exception:
+                _prev_thread_hook = None
+
+            def _thread_hook(args):
+                try:
+                    tname = getattr(getattr(args, "thread", None), "name", "unknown")
+                except Exception:
+                    tname = "unknown"
+                _append_runtime_crash(
+                    f"thread_excepthook:{tname}",
+                    getattr(args, "exc_type", Exception),
+                    getattr(args, "exc_value", Exception("unknown thread error")),
+                    getattr(args, "exc_traceback", None),
+                )
+                if callable(_prev_thread_hook):
+                    try:
+                        _prev_thread_hook(args)
+                    except Exception:
+                        pass
+
+            try:
+                threading.excepthook = _thread_hook
+            except Exception:
+                pass
+
     try:
         _enable_run_log()
+        _install_runtime_crash_hooks()
         print("\n========= Amir2000 Image Automation: MULTI-SET START =========")
         print(f"[INFO] Using DB at: {DB_PATH}")
         print(f"[INFO] Using used_filenames at: {USED_NAMES}")
@@ -4623,7 +4775,7 @@ if __name__ == "__main__":
         try:
             root.mainloop()
         except KeyboardInterrupt:
-            print("\n[WARN] Stopped by user (Ctrl+C). Exiting cleanly.\")")
+            print("\n[WARN] Stopped by user (Ctrl+C). Exiting cleanly.")
             try:
                 root.destroy()
             except Exception:
@@ -4639,4 +4791,3 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
-

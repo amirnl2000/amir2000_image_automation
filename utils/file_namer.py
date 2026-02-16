@@ -4,6 +4,7 @@ import json
 import time
 import shutil
 import tempfile
+import warnings
 from datetime import datetime
 
 from PIL import Image
@@ -93,16 +94,31 @@ def slugify(text: str) -> str:
 # -------------------------
 
 def get_exif_data(image_path: str) -> dict:
+    if not image_path or not os.path.exists(image_path):
+        return {}
     try:
-        img = Image.open(image_path)
-        exif_raw = getattr(img, "_getexif", lambda: None)()
-        if not exif_raw:
-            return {}
-        exif = {}
-        for tag_id, value in exif_raw.items():
-            tag = TAGS.get(tag_id, tag_id)
-            exif[tag] = value
-        return exif
+        # Read EXIF via context manager so file handles are always released.
+        with warnings.catch_warnings():
+            try:
+                warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            except Exception:
+                pass
+
+            with Image.open(image_path) as img:
+                try:
+                    exif_raw = img.getexif()
+                except Exception:
+                    exif_raw = getattr(img, "_getexif", lambda: None)()
+
+                if not exif_raw:
+                    return {}
+
+                exif = {}
+                items = exif_raw.items() if hasattr(exif_raw, "items") else exif_raw
+                for tag_id, value in items:
+                    tag = TAGS.get(tag_id, tag_id)
+                    exif[tag] = value
+                return exif
     except Exception:
         return {}
 

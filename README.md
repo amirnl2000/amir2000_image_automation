@@ -162,8 +162,14 @@ The recovery restores queued set rows and pending file lists from the previous r
 Recovery/session files used by the workflow:
 
 - `data/multiset_session.json` (saved queue + pending state)
+- `data/crash_runtime.log` (runtime callback/thread exceptions, including add-set path)
 - `logs/latest_run.log` (latest run details in source mode)
 - `dist/logs/latest_run.log` (latest run details in EXE mode)
+
+Optional stability flags for large queue-building sessions:
+
+- `AUTO_AI_SUBJECT_ON_SELECT=0` to disable automatic AI subject suggestion on file selection
+- `ADD_SET_EXIF_PREVIEW=0` (default) to skip add-time EXIF preview filename check
 
 ## What To Adjust In Files
 
