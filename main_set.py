@@ -1,5 +1,5 @@
 # main_set.py — Multi-set launcher (keeps your pipeline intact)
-import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math
+import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math, glob
 
 # Make console output robust on Windows (avoid UnicodeEncodeError on emoji etc.)
 try:
@@ -171,6 +171,22 @@ OLLAMA_MODEL = os.getenv(
 OLLAMA_MODEL_CAPTION = os.getenv(
     "OLLAMA_MODEL_CAPTION", "minicpm-v:latest"
 )  # caption/keywords/alt prefill default (better grounding for mixed sets)
+SUBJECT_MODEL_CANDIDATES_ENV = os.getenv(
+    "OLLAMA_MODEL_SUBJECT_CANDIDATES", f"{OLLAMA_MODEL_CAPTION},{OLLAMA_MODEL}"
+)
+SUBJECT_MODEL_CANDIDATES = tuple(
+    dict.fromkeys(
+        [x.strip() for x in str(SUBJECT_MODEL_CANDIDATES_ENV or "").split(",") if x.strip()]
+    )
+)
+SUBJECT_MIN_CONFIDENCE = max(
+    0, min(100, int(os.getenv("SUBJECT_MIN_CONFIDENCE", "68")))
+)
+SUBJECT_MAX_CHARS = max(30, int(os.getenv("SUBJECT_MAX_CHARS", "60")))
+SUBJECT_THUMB_MAX = max(640, int(os.getenv("SUBJECT_THUMB_MAX", "1344")))
+SUBJECT_JPEG_QUALITY = max(
+    70, min(95, int(os.getenv("SUBJECT_JPEG_QUALITY", "90")))
+)
 THUMB_MAX = 1024  # more detail for species and fine subjects (slower)
 # Caption stage opts only (34b on 8GB GPU benefits from smaller ctx)
 OLLAMA_OPTS = {
@@ -248,33 +264,67 @@ def _ensure_ollama_running():
     return False
 
 
-def _ensure_ollama_model(model: str) -> bool:
-    """Return True if the exact model tag exists locally.
+def _ollama_model_names(*, timeout: float = 3.0) -> set[str]:
+    try:
+        with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags", timeout=timeout) as resp:
+            tags = json.loads(resp.read().decode("utf-8")).get("models", [])
+        return {str(t.get("name", "")).strip() for t in tags if isinstance(t, dict)}
+    except Exception:
+        return set()
 
-    IMPORTANT: never auto-pull here. Pulling large models can take a long time and
-    would freeze the Tk UI if triggered from a button click.
-    """
+
+def _resolve_ollama_model_alias(model: str, names: set[str]) -> str | None:
+    model = (model or "").strip()
+    if not model:
+        return None
+    if model in names:
+        return model
+
+    want_base = model.split(":", 1)[0].strip().lower()
+    if not want_base:
+        return None
+
+    for n in names:
+        if n.split(":", 1)[0].strip().lower() == want_base:
+            return n
+    return None
+
+
+_SUBJECT_MODEL_CACHE = ""
+
+
+def _pick_subject_model() -> str:
+    """Pick the best available local model for subject detection."""
+    global _SUBJECT_MODEL_CACHE
+    if _SUBJECT_MODEL_CACHE:
+        return _SUBJECT_MODEL_CACHE
+
+    names = _ollama_model_names(timeout=3)
+    if names:
+        for cand in SUBJECT_MODEL_CANDIDATES:
+            resolved = _resolve_ollama_model_alias(cand, names)
+            if resolved:
+                _SUBJECT_MODEL_CACHE = resolved
+                return resolved
+        # /api/tags worked but none matched candidates. Fall back to configured subject model.
+        _SUBJECT_MODEL_CACHE = OLLAMA_MODEL
+        return _SUBJECT_MODEL_CACHE
+
+    # /api/tags unavailable: do not cache fallback so a later call can still pick better.
+    return OLLAMA_MODEL
+
+
+def _ensure_ollama_model(model: str) -> bool:
+    """Return True if the model tag exists locally (or tag check is unavailable)."""
     model = (model or "").strip()
     if not model:
         return True
-    try:
-        with request.urlopen(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/tags", timeout=3
-        ) as resp:
-            tags = json.loads(resp.read().decode("utf-8")).get("models", [])
-            names = {str(t.get("name", "")).strip() for t in tags if isinstance(t, dict)}
-        if model in names:
-            return True
 
-        # Accept base-name aliasing: minicpm-v == minicpm-v:latest
-        want_base = model.split(":", 1)[0].strip().lower()
-        for n in names:
-            if n.split(":", 1)[0].strip().lower() == want_base:
-                return True
-        return False
-    except Exception:
+    names = _ollama_model_names(timeout=3)
+    if not names:
         # If we can't check, don't block the workflow; let the next call try.
         return True
+    return _resolve_ollama_model_alias(model, names) is not None
 
 
 def _warm_ollama_model(model: str, *, timeout: int = OLLAMA_WARM_TIMEOUT_SEC) -> tuple[bool, str]:
@@ -601,9 +651,9 @@ def _b64_image_for_ollama(path: str) -> str:
 
     with Image.open(path) as im:
         im = im.convert("RGB")
-        im.thumbnail((THUMB_MAX, THUMB_MAX))
+        im.thumbnail((SUBJECT_THUMB_MAX, SUBJECT_THUMB_MAX))
         buf = BytesIO()
-        im.save(buf, format="JPEG", quality=85)
+        im.save(buf, format="JPEG", quality=SUBJECT_JPEG_QUALITY)
         return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -611,12 +661,12 @@ _LAST_OLLAMA_ERROR = ""
 
 # Domain-aware subject prompt for single or group selections (ONE line output).
 _SUBJECT_ROLE_PROMPT = (
-    "You are a precise subject line titleer with domain awareness across: "
+    "You are a precise subject line titler with domain awareness across: "
     "botany and entomology; birds and mammals; buildings and architecture; "
-    "city and travel scenes; landscapes, weather, and night sky.\n"
+    "cars, trucks, aircraft, and boats; city and travel scenes; landscapes, weather, and night sky.\n"
     "From the selected photo or photos, output ONE concise SEO subject line. "
     "If the selection shows the same main subject in the same setting, write one line that fits the group.\n"
-    "Rules: English, ASCII only. Ideal length 45 to 65 characters, max 75. "
+    "Rules: English, ASCII only. Ideal length 35 to 55 characters, max 60. "
     "Subject first, then one concrete detail. No hype. Title Case.\n"
     "If the main subject is a bird, use the specific common species name ONLY if clearly identifiable. "
     "If not certain, use a broader accurate group like Gull, Heron, Raptor, Duck, Goose, Songbird.\n"
@@ -636,6 +686,86 @@ _BANNED_SUBJECT_WORDS = {
     "alt",
     "hdr",
 }
+
+_SUBJECT_CATEGORY_FALLBACK = {
+    "bird": "Bird In Natural Habitat",
+    "mammal": "Wild Animal In Habitat",
+    "plant": "Plant In Natural Habitat",
+    "flower": "Flower Close Up View",
+    "tree": "Tree In Natural Habitat",
+    "insect": "Insect In Natural Habitat",
+    "reptile": "Reptile In Natural Habitat",
+    "fish": "Fish In Water Habitat",
+    "car": "Car On Road",
+    "truck": "Truck On Road",
+    "motorcycle": "Motorcycle On Road",
+    "vehicle": "Vehicle On Road",
+    "aircraft": "Aircraft In Flight",
+    "boat": "Boat On Water",
+    "building": "Building Exterior View",
+    "architecture": "Architectural Detail View",
+    "landscape": "Natural Landscape Scene",
+    "cityscape": "Urban City Scene",
+    "industrial": "Industrial Facility Scene",
+    "people": "People Outdoor Scene",
+    "food": "Food Detail Scene",
+    "object": "Everyday Object Detail",
+    "other": "Outdoor Scene Detail",
+}
+_SUBJECT_CATEGORY_SET = set(_SUBJECT_CATEGORY_FALLBACK.keys())
+_SUBJECT_CATEGORY_ALIASES = {
+    "birds": "bird",
+    "avian": "bird",
+    "animals": "mammal",
+    "wildlife": "mammal",
+    "plants": "plant",
+    "flora": "plant",
+    "flowers": "flower",
+    "trees": "tree",
+    "insects": "insect",
+    "reptiles": "reptile",
+    "fishes": "fish",
+    "cars": "car",
+    "automobile": "car",
+    "auto": "car",
+    "trucks": "truck",
+    "motorbike": "motorcycle",
+    "bikes": "motorcycle",
+    "vehicles": "vehicle",
+    "plane": "aircraft",
+    "planes": "aircraft",
+    "airplane": "aircraft",
+    "airplanes": "aircraft",
+    "boats": "boat",
+    "ships": "boat",
+    "buildings": "building",
+    "city": "cityscape",
+    "cities": "cityscape",
+    "person": "people",
+    "humans": "people",
+}
+_SUBJECT_ANALYZE_PROMPT_BASE = (
+    "Classify the main visual subject in the provided image data.\n"
+    "Return ONLY strict one-line JSON with this exact schema:\n"
+    '{"primary_subject":"","category":"","detail":"","confidence":0}\n'
+    "Rules:\n"
+    "1) category must be one of: "
+    "bird, mammal, plant, flower, tree, insect, reptile, fish, "
+    "car, truck, motorcycle, vehicle, aircraft, boat, building, architecture, "
+    "landscape, cityscape, industrial, people, food, object, other.\n"
+    "2) Use common names only.\n"
+    "3) Use specific species/brand/model only if clearly visible.\n"
+    "4) If uncertain, keep primary_subject broad and confidence <= 60.\n"
+    "5) detail should be 2 to 5 words of visible context.\n"
+    "6) No markdown, no commentary, no extra keys."
+)
+_SUBJECT_ANALYZE_PROMPT_SINGLE = (
+    _SUBJECT_ANALYZE_PROMPT_BASE + "\nThis is one photo. Return JSON only."
+)
+_SUBJECT_ANALYZE_PROMPT_MULTI = (
+    _SUBJECT_ANALYZE_PROMPT_BASE
+    + "\nThese photos are one set. Find the common main subject across the set. Return JSON only."
+)
 
 
 def _smart_title_case(words: list[str]) -> str:
@@ -677,9 +807,186 @@ def _normalize_subject_line(
     line = _smart_title_case(words)
 
     if len(line) > max_chars:
-        line = line[:max_chars].rstrip()
+        trailing_joiners = {
+            "a",
+            "an",
+            "and",
+            "at",
+            "by",
+            "for",
+            "from",
+            "in",
+            "near",
+            "of",
+            "on",
+            "over",
+            "the",
+            "to",
+            "under",
+            "with",
+        }
+        cut = line[:max_chars].rstrip()
+        # Avoid chopping words in the middle when we enforce max chars.
+        space_at = cut.rfind(" ")
+        if space_at >= max(1, int(max_chars * 0.6)):
+            cut = cut[:space_at].rstrip()
+        parts = cut.split()
+        while len(parts) > max(1, min_words) and parts[-1].lower() in trailing_joiners:
+            parts.pop()
+        cut = " ".join(parts).strip()
+        line = cut
 
     return line
+
+
+def _subject_to_int(v, default: int = 0) -> int:
+    try:
+        n = int(float(v))
+    except Exception:
+        n = default
+    return max(0, min(100, n))
+
+
+def _normalize_subject_category(raw: str) -> str:
+    s = re.sub(r"[^a-z]+", "", str(raw or "").lower())
+    if s in _SUBJECT_CATEGORY_SET:
+        return s
+    if s in _SUBJECT_CATEGORY_ALIASES:
+        return _SUBJECT_CATEGORY_ALIASES[s]
+    if "bird" in s:
+        return "bird"
+    if "plant" in s or "flora" in s:
+        return "plant"
+    if "car" in s:
+        return "car"
+    if "truck" in s:
+        return "truck"
+    if "motor" in s or "bike" in s:
+        return "motorcycle"
+    if "vehicle" in s:
+        return "vehicle"
+    if "air" in s or "plane" in s:
+        return "aircraft"
+    if "boat" in s or "ship" in s:
+        return "boat"
+    if "build" in s or "architect" in s:
+        return "building"
+    if "city" in s or "urban" in s:
+        return "cityscape"
+    if "landscape" in s or "nature" in s:
+        return "landscape"
+    return "other"
+
+
+def _extract_json_object(raw: str) -> dict | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        obj = json.loads(s)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _subject_generate(
+    *,
+    model: str,
+    prompt: str,
+    images: list[str],
+    temperature: float,
+    num_predict: int,
+    timeout_sec: int,
+) -> str | None:
+    global _LAST_OLLAMA_ERROR
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "images": images,
+        "stream": False,
+        "options": {
+            "temperature": float(temperature),
+            "num_predict": int(num_predict),
+            "top_p": 0.9,
+            "top_k": 40,
+            "repeat_penalty": 1.1,
+            "repeat_last_n": 64,
+            "seed": 42,
+            "stop": ["\n"],
+        },
+    }
+
+    try:
+        req = request.Request(
+            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=max(20, int(timeout_sec))) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        _LAST_OLLAMA_ERROR = f"Ollama request failed: {e}"
+        return None
+
+    if isinstance(data, dict) and data.get("error"):
+        _LAST_OLLAMA_ERROR = str(data.get("error"))
+        return None
+
+    raw = (data.get("response") or "").strip() if isinstance(data, dict) else ""
+    if not raw:
+        _LAST_OLLAMA_ERROR = "Model returned empty response."
+        return None
+    return raw
+
+
+def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
+    data = _extract_json_object(raw)
+    if not data:
+        return None
+
+    category = _normalize_subject_category(str(data.get("category") or ""))
+    confidence = _subject_to_int(data.get("confidence"), default=0)
+    primary = _normalize_subject_line(
+        str(data.get("primary_subject") or ""),
+        max_chars=max_chars,
+        max_words=8,
+        min_words=1,
+    )
+    detail = _normalize_subject_line(
+        str(data.get("detail") or ""),
+        max_chars=max_chars,
+        max_words=5,
+        min_words=1,
+    )
+
+    if confidence < SUBJECT_MIN_CONFIDENCE:
+        primary = None
+    if not primary:
+        primary = _SUBJECT_CATEGORY_FALLBACK.get(
+            category, _SUBJECT_CATEGORY_FALLBACK["other"]
+        )
+
+    if detail:
+        pw = {w.lower() for w in primary.split()}
+        dw = [w for w in detail.split() if w.lower() not in pw]
+        detail = " ".join(dw).strip()
+
+    line_raw = f"{primary} {detail}".strip() if detail else primary
+    out = _normalize_subject_line(line_raw, max_chars=max_chars, max_words=None, min_words=3)
+    if out:
+        return out
+    return _normalize_subject_line(primary, max_chars=max_chars, max_words=None, min_words=1)
 
 
 def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
@@ -696,9 +1003,11 @@ def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
         _LAST_OLLAMA_ERROR = f"Ollama is not responding on {OLLAMA_HOST}:{OLLAMA_PORT}."
         return None
 
-    if not _ensure_ollama_model(OLLAMA_MODEL):
+    subject_model = _pick_subject_model()
+    if not _ensure_ollama_model(subject_model):
+        wanted = ", ".join(SUBJECT_MODEL_CANDIDATES or (OLLAMA_MODEL,))
         _LAST_OLLAMA_ERROR = (
-            f"Model '{OLLAMA_MODEL}' is not installed. Run: ollama pull {OLLAMA_MODEL}"
+            f"No usable subject model found. Install one of: {wanted}"
         )
         return None
 
@@ -717,48 +1026,38 @@ def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
         _LAST_OLLAMA_ERROR = f"Failed to read image: {e}"
         return None
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": _SUBJECT_ROLE_PROMPT,
-        "images": imgs,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "num_predict": 40,
-            "top_p": 0.9,
-            "top_k": 30,
-            "repeat_penalty": 1.1,
-            "repeat_last_n": 64,
-            "seed": 42,
-            "stop": ["\n"],
-        },
-    }
+    timeout_sec = int(os.getenv("SUBJECT_TIMEOUT_SEC", "120"))
 
-    try:
-        req = request.Request(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with request.urlopen(
-            req, timeout=int(os.getenv("SUBJECT_TIMEOUT_SEC", "120"))
-        ) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        if isinstance(data, dict) and data.get("error"):
-            _LAST_OLLAMA_ERROR = str(data.get("error"))
-            return None
-        raw = (data.get("response") or "").strip() if isinstance(data, dict) else ""
-    except Exception as e:
-        _LAST_OLLAMA_ERROR = f"Ollama request failed: {e}"
-        return None
+    # First pass: strict JSON classification for reliable category grounding.
+    analysis_prompt = (
+        _SUBJECT_ANALYZE_PROMPT_MULTI if len(imgs) > 1 else _SUBJECT_ANALYZE_PROMPT_SINGLE
+    )
+    analysis_raw = _subject_generate(
+        model=subject_model,
+        prompt=analysis_prompt,
+        images=imgs,
+        temperature=0.0,
+        num_predict=180,
+        timeout_sec=timeout_sec,
+    )
+    line = _subject_line_from_analysis(analysis_raw or "", max_chars=SUBJECT_MAX_CHARS)
+    if line:
+        return line
 
+    # Fallback: free-form one-line subject prompt.
+    raw = _subject_generate(
+        model=subject_model,
+        prompt=_SUBJECT_ROLE_PROMPT,
+        images=imgs,
+        temperature=0.1,
+        num_predict=48,
+        timeout_sec=timeout_sec,
+    )
     if not raw:
-        _LAST_OLLAMA_ERROR = "Model returned an empty response."
         return None
-
-    # first line only, ASCII only, strip punctuation
-    line = _normalize_subject_line(raw, max_chars=75, max_words=None, min_words=3)
+    line = _normalize_subject_line(
+        raw, max_chars=SUBJECT_MAX_CHARS, max_words=None, min_words=3
+    )
     if not line:
         _LAST_OLLAMA_ERROR = "Model output was not usable after sanitizing."
         return None
@@ -767,68 +1066,49 @@ def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
 
 
 def ai_suggest_subject(image_path: str) -> str | None:
-    """Return a 3–5 word Subject suggestion via Ollama (vision model)."""
+    """Return a short subject suggestion via Ollama (vision model)."""
     global _LAST_OLLAMA_ERROR
 
     if not os.path.isfile(image_path):
         return None
     if not _ensure_ollama_running():
         return None
-    if not _ensure_ollama_model(OLLAMA_MODEL):
+    subject_model = _pick_subject_model()
+    if not _ensure_ollama_model(subject_model):
+        wanted = ", ".join(SUBJECT_MODEL_CANDIDATES or (OLLAMA_MODEL,))
         _LAST_OLLAMA_ERROR = (
-            f"Model '{OLLAMA_MODEL}' is not installed. Run: ollama pull {OLLAMA_MODEL}"
+            f"No usable subject model found. Install one of: {wanted}"
         )
         return None
 
-    prompt = (
-        "Look at the image and return ONLY a short subject title.\n"
-        "Rules:\n"
-        "1) 3 to 5 words.\n"
-        "2) Title Case.\n"
-        "3) No punctuation. No hashtags.\n"
-        "4) Use the most specific COMMON name you can clearly see.\n"
-        "5) If a bird is shown, use species ONLY if clearly identifiable.\n"
-        "6) Do NOT guess. If uncertain, use a broader label like Gull In Flight, Raptor In Flight, Duck On Water.\n"
-        "Return ONLY the title text."
+    imgs = [_b64_image_for_ollama(image_path)]
+    timeout_sec = int(os.getenv("SUBJECT_TIMEOUT_SEC", "120"))
+
+    analysis_raw = _subject_generate(
+        model=subject_model,
+        prompt=_SUBJECT_ANALYZE_PROMPT_SINGLE,
+        images=imgs,
+        temperature=0.0,
+        num_predict=160,
+        timeout_sec=timeout_sec,
     )
+    line = _subject_line_from_analysis(analysis_raw or "", max_chars=SUBJECT_MAX_CHARS)
+    if line:
+        return line
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "images": [_b64_image_for_ollama(image_path)],
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-            "num_predict": 40,
-            "top_p": 0.9,
-            "top_k": 30,
-            "repeat_penalty": 1.1,
-            "repeat_last_n": 64,
-            "seed": 42,
-            "stop": ["\n"],
-        },
-    }
-
-    try:
-        req = request.Request(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        timeout_sec = int(os.getenv("SUBJECT_TIMEOUT_SEC", "120"))
-        with request.urlopen(req, timeout=timeout_sec) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw = (data.get("response") or "").strip()
-    except Exception as e:
-        _LAST_OLLAMA_ERROR = f"Ollama request failed: {e}"
-        return None
-
+    raw = _subject_generate(
+        model=subject_model,
+        prompt=_SUBJECT_ROLE_PROMPT,
+        images=imgs,
+        temperature=0.1,
+        num_predict=40,
+        timeout_sec=timeout_sec,
+    )
     if not raw:
-        _LAST_OLLAMA_ERROR = "Model returned empty response."
         return None
-
-    return _normalize_subject_line(raw, max_chars=60, max_words=5, min_words=3)
+    return _normalize_subject_line(
+        raw, max_chars=SUBJECT_MAX_CHARS, max_words=6, min_words=3
+    )
 
 
 # ---------- Utilities you already have ----------
@@ -1059,6 +1339,16 @@ class MultiSetApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Amir2000 Image Automation — Multi-Set")
+        try:
+            sw = int(self.root.winfo_screenwidth() or 0)
+            sh = int(self.root.winfo_screenheight() or 0)
+            w = min(max(980, int(sw * 0.78)), 1500) if sw > 0 else 1180
+            h = min(max(620, int(sh * 0.72)), 980) if sh > 0 else 740
+            self.root.geometry(f"{w}x{h}")
+            self.root.minsize(980, 620)
+            self.root.resizable(True, True)
+        except Exception:
+            pass
         self.batches: list[dict] = (
             []
         )  # each: {subject, location, folder, files: [paths]}
@@ -1153,6 +1443,9 @@ class MultiSetApp:
         self.location_txt.bind("<Tab>", self._on_location_tab, add="+")
         self.location_txt.bind("<Down>", self._on_location_down, add="+")
         self.location_txt.bind("<Up>", self._on_location_up, add="+")
+        self.location_txt.bind("<MouseWheel>", self._on_location_mousewheel, add="+")
+        self.location_txt.bind("<Button-4>", self._on_location_mousewheel, add="+")
+        self.location_txt.bind("<Button-5>", self._on_location_mousewheel, add="+")
         self.location_txt.bind("<Escape>", self._on_location_escape, add="+")
         self.location_txt.bind("<FocusOut>", lambda e: self._loc_ac_hide(), add="+")
 
@@ -1184,7 +1477,7 @@ class MultiSetApp:
 
         # Buttons row
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 4))
+        btns.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 4))
         ttk.Button(
             btns, text="Import set from folder…", command=self._import_set_from_folder
         ).pack(side="left", padx=(0, 8))
@@ -1198,17 +1491,19 @@ class MultiSetApp:
         )
         self.ai_subject_btn.pack(side="left")
         ttk.Button(btns, text="Add set", command=self._add_current_set).pack(
-            side="left", padx=(8, 0)
+            side="left", padx=(28, 0)
         )
         self.spell_warn_lbl = ttk.Label(btns, text="", foreground="#c08000")
         self.spell_warn_lbl.pack(side="left", padx=(6, 0))
 
         # Sets table
+        tree_wrap = ttk.Frame(frm)
+        tree_wrap.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(8, 4))
         self.tree = ttk.Treeview(
-            frm,
+            tree_wrap,
             columns=("count", "subject", "location", "folder"),
             show="headings",
-            height=8,
+            height=14,
         )
         for c, w in (
             ("count", "#"),
@@ -1217,11 +1512,20 @@ class MultiSetApp:
             ("folder", "Folder"),
         ):
             self.tree.heading(c, text=w)
-        self.tree.column("count", width=50, anchor="center")
-        self.tree.column("subject", width=260)
-        self.tree.column("location", width=200)
-        self.tree.column("folder", width=200)
-        self.tree.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(8, 4))
+        self.tree.column("count", width=50, anchor="center", stretch=False)
+        self.tree.column("subject", width=420, stretch=True)
+        self.tree.column("location", width=260, stretch=True)
+        self.tree.column("folder", width=280, stretch=True)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        tree_vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.tree.yview)
+        tree_hsb = ttk.Scrollbar(
+            tree_wrap, orient="horizontal", command=self.tree.xview
+        )
+        self.tree.configure(yscrollcommand=tree_vsb.set, xscrollcommand=tree_hsb.set)
+        tree_vsb.grid(row=0, column=1, sticky="ns")
+        tree_hsb.grid(row=1, column=0, sticky="ew")
+        tree_wrap.columnconfigure(0, weight=1)
+        tree_wrap.rowconfigure(0, weight=1)
         self.tree.bind("<Double-1>", lambda e: self._edit_selected_set())
 
         delrow = ttk.Frame(frm)
@@ -1235,6 +1539,10 @@ class MultiSetApp:
         ttk.Button(delrow, text="Clear all", command=self._clear_sets).pack(
             side="left", padx=8
         )
+        self.recover_btn = ttk.Button(
+            delrow, text="Recover crash session", command=self._recover_session_button
+        )
+        self.recover_btn.pack(side="left", padx=(8, 0))
 
         # Progress
         self.progress = ttk.Progressbar(
@@ -1252,6 +1560,7 @@ class MultiSetApp:
         self.start_btn = ttk.Button(frm, text="Start Batch", command=self.proceed)
         self.start_btn.grid(row=8, column=0, columnspan=2, pady=(10, 2))
 
+        frm.rowconfigure(4, weight=1)
         frm.columnconfigure(1, weight=1)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
@@ -1260,7 +1569,12 @@ class MultiSetApp:
             {v: k for k, v in self.folder_map.items()} if self.folder_map else {}
         )
 
-        self._restore_session_state()
+        recovered_sets, recovered_pending = self._restore_session_state()
+        if recovered_sets or recovered_pending:
+            self._runlog(
+                "SESSION_RECOVER_AUTO",
+                f"sets={recovered_sets} pending={recovered_pending} file={os.path.basename(MULTISET_SESSION_FILE)}",
+            )
         self._update_ready_status()
 
     def proceed(self):
@@ -1338,13 +1652,74 @@ class MultiSetApp:
         except Exception:
             pass
 
-    def _restore_session_state(self):
+    def _latest_session_backup(self) -> str | None:
         try:
-            if not os.path.exists(MULTISET_SESSION_FILE):
+            pattern = os.path.join(DATA_DIR, "multiset_session.backup_*.json")
+            backups = sorted(glob.glob(pattern), reverse=True)
+            return backups[0] if backups else None
+        except Exception:
+            return None
+
+    def _recover_session_button(self):
+        try:
+            session_path = MULTISET_SESSION_FILE
+            if not os.path.exists(session_path):
+                session_path = self._latest_session_backup() or ""
+
+            if not session_path or not os.path.exists(session_path):
+                messagebox.showwarning(
+                    "Recover session",
+                    "No recovery snapshot was found.\n\n"
+                    f"Expected:\n{MULTISET_SESSION_FILE}",
+                )
                 return
-            data = self._load_json_any(MULTISET_SESSION_FILE)
+
+            current_sets = len(self.batches)
+            current_pending = len(self._pending_files)
+            if current_sets or current_pending:
+                ok = messagebox.askyesno(
+                    "Recover session",
+                    "Replace current queue with the saved recovery session?\n\n"
+                    f"Current queue: {current_sets} set(s), {current_pending} pending file(s).",
+                )
+                if not ok:
+                    return
+
+            recovered_sets, recovered_pending = self._restore_session_state(
+                session_path=session_path, show_dialog=False
+            )
+            self._update_ready_status()
+
+            if recovered_sets or recovered_pending:
+                self._runlog(
+                    "SESSION_RECOVER_MANUAL",
+                    f"sets={recovered_sets} pending={recovered_pending} file={os.path.basename(session_path)}",
+                )
+                messagebox.showinfo(
+                    "Session recovered",
+                    f"Recovered {recovered_sets} set(s) and {recovered_pending} pending file(s)\n"
+                    f"from:\n{session_path}",
+                )
+            else:
+                messagebox.showwarning(
+                    "Recover session",
+                    "Recovery file was found, but no valid files were found on disk.\n\n"
+                    f"{session_path}",
+                )
+        except Exception as ex:
+            messagebox.showerror(
+                "Recover session failed", f"{type(ex).__name__}: {ex}"
+            )
+
+    def _restore_session_state(
+        self, session_path: str = MULTISET_SESSION_FILE, show_dialog: bool = True
+    ) -> tuple[int, int]:
+        try:
+            if not session_path or not os.path.exists(session_path):
+                return 0, 0
+            data = self._load_json_any(session_path)
             if not isinstance(data, dict):
-                return
+                return 0, 0
 
             restored_batches: list[dict] = []
             for row in (data.get("batches") or []):
@@ -1385,6 +1760,9 @@ class MultiSetApp:
                 if p and os.path.exists(str(p))
             ]
 
+            if not (restored_batches or restored_pending):
+                return 0, 0
+
             form = data.get("form") or {}
             if isinstance(form, dict):
                 self._subject_set((form.get("subject") or "").strip())
@@ -1396,14 +1774,15 @@ class MultiSetApp:
             self._pending_files = restored_pending
             self._refresh_tree()
 
-            if restored_batches or restored_pending:
+            if show_dialog:
                 messagebox.showinfo(
                     "Session recovered",
                     f"Recovered {len(restored_batches)} set(s) and {len(restored_pending)} pending file(s) "
                     "from previous session.",
                 )
+            return len(restored_batches), len(restored_pending)
         except Exception:
-            pass
+            return 0, 0
 
     def _get_build_stamp(self) -> str:
         try:
@@ -1874,9 +2253,13 @@ class MultiSetApp:
                 g2 = (g2 or "").strip()
 
                 g2n = _normalize_subject_line(
-                    g2, max_chars=75, max_words=None, min_words=3
+                    g2, max_chars=SUBJECT_MAX_CHARS, max_words=None, min_words=3
                 )
-                g2 = g2n or g2
+                if not g2n:
+                    g2n = _normalize_subject_line(
+                        g2, max_chars=SUBJECT_MAX_CHARS, max_words=None, min_words=1
+                    )
+                g2 = g2n or ""
 
                 if g2:
                     self._subject_set(g2)
@@ -3846,16 +4229,80 @@ class MultiSetApp:
         else:
             self._spell_tip_hide()
 
+    def _location_candidates(self, typed: str = "", limit: int = 0) -> list[str]:
+        vals: list[str] = []
+        seen: set[str] = set()
+        for raw in (self.location_all or []):
+            v = str(raw or "").replace("_", " ").strip()
+            if not v:
+                continue
+            key = v.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            vals.append(v)
+
+        t = (typed or "").strip().lower()
+        if t:
+            starts = [v for v in vals if v.lower().startswith(t)]
+            contains = [v for v in vals if t in v.lower() and v not in starts]
+            vals = starts + contains
+
+        if limit and limit > 0:
+            vals = vals[:limit]
+        return vals
+
+    def _location_cycle_value(self, step: int):
+        try:
+            cur = (self._location_get() or "").strip()
+            # Cycle through the full ordered location list (like folder combobox behavior).
+            vals = self._location_candidates("", limit=0)
+            if not vals:
+                return
+
+            cur_l = cur.lower()
+            idx = -1
+            for i, v in enumerate(vals):
+                if v.lower() == cur_l:
+                    idx = i
+                    break
+
+            if idx < 0:
+                new_idx = 0 if step >= 0 else len(vals) - 1
+            else:
+                new_idx = max(0, min(len(vals) - 1, idx + step))
+
+            self._location_set(vals[new_idx])
+            try:
+                self.location_txt.mark_set("insert", "end-1c")
+            except Exception:
+                pass
+            self._loc_ac_update()
+        except Exception:
+            pass
+
+    def _on_location_mousewheel(self, ev=None):
+        try:
+            delta = int(getattr(ev, "delta", 0) or 0)
+            if delta == 0:
+                num = int(getattr(ev, "num", 0) or 0)
+                if num == 4:
+                    delta = 120
+                elif num == 5:
+                    delta = -120
+            if delta == 0:
+                return "break"
+
+            step = -1 if delta > 0 else 1
+            self._location_cycle_value(step)
+        except Exception:
+            pass
+        return "break"
+
     def _location_pick_menu(self):
         try:
-            typed = (self._location_get() or "").strip().lower()
-            vals = list(self.location_all or [])
-            if typed:
-                starts = [v for v in vals if v.lower().startswith(typed)]
-                contains = [v for v in vals if typed in v.lower() and v not in starts]
-                vals = starts + contains
-
-            vals = vals[:40]  # keep menu sane
+            typed = (self._location_get() or "").strip()
+            vals = self._location_candidates(typed, limit=40)  # keep menu sane
             menu = tk.Menu(self.root, tearoff=0)
 
             if not vals:
@@ -3912,8 +4359,14 @@ class MultiSetApp:
                         pass
                     return "break"
 
+                def _wheel(_ev=None):
+                    return self._on_location_mousewheel(_ev)
+
                 self._loc_ac_list.bind("<Double-1>", _pick, add="+")
                 self._loc_ac_list.bind("<Return>", _pick, add="+")
+                self._loc_ac_list.bind("<MouseWheel>", _wheel, add="+")
+                self._loc_ac_list.bind("<Button-4>", _wheel, add="+")
+                self._loc_ac_list.bind("<Button-5>", _wheel, add="+")
 
             if self._loc_ac_list:
                 self._loc_ac_list.delete(0, "end")
@@ -3939,12 +4392,40 @@ class MultiSetApp:
                 self._loc_ac_hide()
                 return
 
-            t = typed.lower().replace(" ", "_")
-            vals = list(self.location_all or [])
-            starts = [v for v in vals if v.lower().startswith(t)]
-            contains = [v for v in vals if t in v.lower() and v not in starts]
-            out = (starts + contains)[:30]
+            out = self._location_candidates(typed, limit=30)
             self._loc_ac_show(out)
+        except Exception:
+            pass
+
+    def _loc_inline_autocomplete(self, ev=None):
+        try:
+            ks = str(getattr(ev, "keysym", ""))
+            if ks in ("BackSpace", "Delete", "Left", "Right", "Home", "End", "Prior", "Next"):
+                return
+
+            typed = (self._location_get() or "").strip()
+            if not typed:
+                return
+
+            vals = self._location_candidates(typed, limit=30)
+            if not vals:
+                return
+
+            suggestion = vals[0]
+            if not suggestion.lower().startswith(typed.lower()):
+                return
+            if suggestion.lower() == typed.lower():
+                self.location_var.set(suggestion)
+                return
+
+            self.location_txt.delete("1.0", "end")
+            self.location_txt.insert("1.0", suggestion)
+            i1 = f"1.0+{len(typed)}c"
+            self.location_txt.tag_remove("sel", "1.0", "end")
+            self.location_txt.tag_add("sel", i1, "end-1c")
+            self.location_txt.mark_set("insert", i1)
+            self.location_var.set(suggestion)
+            self._location_spellcheck_update()
         except Exception:
             pass
 
@@ -3960,6 +4441,7 @@ class MultiSetApp:
         except Exception:
             pass
 
+        self._loc_inline_autocomplete(ev)
         self._loc_ac_update()
 
     def _on_location_return(self, _ev=None):

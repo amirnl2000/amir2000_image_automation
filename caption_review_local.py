@@ -21,7 +21,7 @@ from PIL import Image
 from tqdm import tqdm
 
 # ============================================================
-# Goals 
+# Goals (your requirements)
 # - READ images from ollama_path column (fallback to Path)
 # - OUTPUT: basic acceptable quality, human readable
 # - NO duplicates (strict global + series prefix guards)

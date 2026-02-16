@@ -84,14 +84,14 @@ Do not publish with placeholders still present.
 Preferred (installs all runtime deps + Torch CPU/CUDA auto-detect):
 
 ```powershell
-Set-Location "YOUR_PATH_HERE"
+Set-Location "C:\path\to\amir2000_image_automation"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\setup_venv313_full.ps1
 ```
 
 Manual alternative:
 
 ```powershell
-Set-Location "YOUR_PATH_HERE"
+Set-Location "C:\path\to\amir2000_image_automation"
 py -3.13 -m venv .venv313
 .\.venv313\Scripts\Activate.ps1
 python -m pip install -U pip
@@ -108,7 +108,7 @@ python -m pip install -U torch torchvision --index-url https://download.pytorch.
 3. Initialize local DB files:
 
 ```powershell
-Set-Location "YOUR_PATH_HERE"
+Set-Location "C:\path\to\amir2000_image_automation"
 .\.venv313\Scripts\Activate.ps1
 python .\init_db.py
 ```
@@ -137,7 +137,7 @@ ollama pull minicpm-v:latest
 2. Activate environment:
 
 ```powershell
-Set-Location "YOUR_PATH_HERE"
+Set-Location "C:\path\to\amir2000_image_automation"
 .\.venv313\Scripts\Activate.ps1
 ```
 
@@ -149,6 +149,22 @@ python .\main_set.py
 
 4. Process sets -> review in editor -> publish approved rows.
 
+## Crash Recovery (Multi-Set)
+
+If the app closes unexpectedly during a batch:
+
+1. Re-open `main_set.py` (or the Multi-Set EXE).
+2. Click `Recover crash session`.
+3. Confirm the recovery message, then continue with `Start Batch`.
+
+The recovery restores queued set rows and pending file lists from the previous run.
+
+Recovery/session files used by the workflow:
+
+- `data/multiset_session.json` (saved queue + pending state)
+- `logs/latest_run.log` (latest run details in source mode)
+- `dist/logs/latest_run.log` (latest run details in EXE mode)
+
 ## What To Adjust In Files
 
 - Required:
@@ -158,12 +174,16 @@ python .\main_set.py
 ## Build EXE
 
 ```powershell
-Set-Location "YOUR_PATH_HERE"
+Set-Location "C:\path\to\amir2000_image_automation"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clean -BuildProfile Lite
 ```
+
+## Backup and GitHub-Safe Export
+
+- Create a curated runnable backup pack:
+  - `helpers/copy_pack.ps1`
 
 ## Documentation Index
 
 - `docs/init/review_queue.sql`
 - `docs/init/photos_info_revamp.sql`
-

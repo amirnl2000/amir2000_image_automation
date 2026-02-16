@@ -87,6 +87,7 @@ $piArgs = @(
     "--noconfirm",
     "--clean",
     "--onefile",                # matches your old -F
+    "--noupx",                  # avoid BEX64/0xc0000005 crashes seen with compressed EXEs
     "--icon",$IconPath,
     "--workpath",$buildDir,
     "--specpath",$root,
