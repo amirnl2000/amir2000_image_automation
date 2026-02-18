@@ -89,6 +89,24 @@ def slugify(text: str) -> str:
     return s
 
 
+def _title_case_token(t: str) -> str:
+    t = (t or "").strip()
+    if not t:
+        return ""
+    if t.isupper():
+        return t
+    if t[:1].islower():
+        return t[:1].upper() + t[1:]
+    return t
+
+
+def _title_case_slug_tokens(s: str) -> str:
+    parts = [p for p in (s or "").split("_") if p]
+    if not parts:
+        return ""
+    return "_".join(_title_case_token(p) for p in parts)
+
+
 # -------------------------
 # EXIF helpers (used by main_set)
 # -------------------------
@@ -194,7 +212,7 @@ def generate_unique_filename(subject, location, folder, camera, year):
     used_ci = {str(u).casefold() for u in used if isinstance(u, str)}
 
     subject_s = slugify(subject)
-    location_s = slugify(location)
+    location_s = _title_case_slug_tokens(slugify(location))
     camera_s = slugify(camera) or "Canon_EOS_R5_Mark_II"
 
     # Defensive canonicalization (in case a raw camera string bypassed get_camera_model)
@@ -207,7 +225,7 @@ def generate_unique_filename(subject, location, folder, camera, year):
     year_s = str(year) if str(year).isdigit() else str(datetime.now().year)
 
     # normalize folder token (but preserve case from input)
-    folder_clean = slugify(folder)
+    folder_clean = _title_case_slug_tokens(slugify(folder))
     if folder_clean and not folder_clean.lower().endswith("photography"):
         folder_clean = f"{folder_clean}_Photography"
 

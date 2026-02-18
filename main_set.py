@@ -14,7 +14,12 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import base64, re, difflib
-from utils.autofix import autofix_subject, find_misspellings, add_spell_exception
+from utils.autofix import (
+    autofix_subject,
+    find_misspellings,
+    add_spell_exception,
+    spellcheck_status,
+)
 
 
 _UDUP = re.compile(r"_+")
@@ -52,6 +57,19 @@ def _normalize_camera_token(camera: str) -> str:
     return camera_s
 
 
+def _title_case_slug_token(s: str) -> str:
+    parts = [p for p in (s or "").split("_") if p]
+    out = []
+    for p in parts:
+        if p.isupper():
+            out.append(p)
+        elif p[:1].islower():
+            out.append(p[:1].upper() + p[1:])
+        else:
+            out.append(p)
+    return "_".join(out)
+
+
 def build_preview_filename(
     subject: str,
     location: str,
@@ -61,8 +79,8 @@ def build_preview_filename(
     index: int = 1,
 ) -> str:
     subject_s = slugify(subject)
-    location_s = slugify(location)
-    folder_s = slugify(folder)
+    location_s = _title_case_slug_token(slugify(location))
+    folder_s = _title_case_slug_token(slugify(folder))
     if folder_s and not folder_s.lower().endswith("photography"):
         folder_s = f"{folder_s}_Photography"
     camera_s = _normalize_camera_token(camera or DEFAULT_CAMERA_TOKEN)
@@ -1653,6 +1671,7 @@ class MultiSetApp:
         )
         self.spell_warn_lbl = ttk.Label(btns, text="", foreground="#c08000")
         self.spell_warn_lbl.pack(side="left", padx=(6, 0))
+        self._refresh_spellcheck_status()
 
         # Sets table
         tree_wrap = ttk.Frame(frm)
@@ -4258,6 +4277,19 @@ class MultiSetApp:
 
     def _on_subject_change(self, event=None):
         self._subject_spellcheck_update()
+
+    def _refresh_spellcheck_status(self):
+        try:
+            ok, reason = spellcheck_status(DATA_DIR)
+            if ok:
+                self.spell_warn_lbl.configure(text="Spellcheck: ON", foreground="#2a7a2a")
+            else:
+                self.spell_warn_lbl.configure(
+                    text=f"Spellcheck: OFF ({reason})", foreground="#c00000"
+                )
+                self._runlog("SPELLCHECK_OFF", reason)
+        except Exception:
+            pass
 
     def _on_subject_change(self, _ev=None):
         s = self._subject_get()
