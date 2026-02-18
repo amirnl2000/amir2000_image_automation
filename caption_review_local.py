@@ -358,26 +358,8 @@ _URBAN_KEYWORD_TERMS: Set[str] = {
     "roadway",
 }
 
-_NATURE_KEYWORD_POOL: Sequence[str] = (
-    "trees",
-    "foliage",
-    "autumn",
-    "leaves",
-    "sky",
-    "sunlight",
-    "mountains",
-    "forest",
-    "rock",
-    "river",
-    "creek",
-    "water",
-    "trail",
-    "valley",
-    "hills",
-    "terrain",
-    "shoreline",
-    "landform",
-)
+# Keep empty: do not force generic terrain keywords into the output.
+_NATURE_KEYWORD_POOL: Sequence[str] = ()
 
 _STRONG_NATURE_KEYWORD_TERMS: Set[str] = {
     "mountain",
@@ -432,6 +414,36 @@ _TERRAIN_HEAVY_TERMS: Set[str] = {
     "tundra",
     "basin",
     "shoreline",
+}
+
+_EVIDENCE_SENSITIVE_KEYWORDS: Set[str] = {
+    "usa",
+    "united states",
+    "colorado",
+    "mountain",
+    "mountains",
+    "lake",
+    "lakes",
+    "forest",
+    "river",
+    "rivers",
+    "valley",
+    "trail",
+}
+
+_EVIDENCE_TERM_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "usa": ("usa", "u s a", "united states"),
+    "united states": ("united states", "usa", "u s a"),
+    "colorado": ("colorado",),
+    "mountain": ("mountain", "mountains"),
+    "mountains": ("mountain", "mountains"),
+    "lake": ("lake", "lakes"),
+    "lakes": ("lake", "lakes"),
+    "forest": ("forest", "forests"),
+    "river": ("river", "rivers"),
+    "rivers": ("river", "rivers"),
+    "valley": ("valley", "valleys"),
+    "trail": ("trail", "trails"),
 }
 
 _AVIATION_HINTS: Set[str] = {
@@ -3352,6 +3364,95 @@ def _force_keyword_replacements(
     return _clean_keywords_list(out)[:keywords_n]
 
 
+def _has_term_evidence(evidence_blob: str, term: str) -> bool:
+    forms = _EVIDENCE_TERM_ALIASES.get(term, (term,))
+    for form in forms:
+        fs = _norm_text_strict(form)
+        if not fs:
+            continue
+        if re.search(rf"(^|[^a-z]){re.escape(fs)}($|[^a-z])", evidence_blob):
+            return True
+    return False
+
+
+def _evidence_refill_candidates(
+    *,
+    folder: str,
+    subject: str,
+    location: str,
+    caption: str,
+    alt_text: str,
+) -> List[str]:
+    pool: List[str] = []
+    pool.extend(_extract_phrase_keywords(folder, subject, location, f"{caption} {alt_text}"))
+    pool.extend(_visual_keyword_candidates(caption, alt_text, location))
+
+    evidence = _norm_text_strict(f"{folder} {subject} {location} {caption} {alt_text}")
+    for tok in evidence.split():
+        if len(tok) < 3:
+            continue
+        if tok in _KW_STOPWORDS or tok in _KW_BANNED:
+            continue
+        pool.append(tok)
+
+    return _clean_keywords_list(pool)
+
+
+def _apply_evidence_keyword_guardrails(
+    *,
+    kw_list: Sequence[str],
+    folder: str,
+    subject: str,
+    location: str,
+    caption: str,
+    alt_text: str,
+    keywords_n: int,
+) -> List[str]:
+    evidence_blob = _norm_text_strict(f"{folder} {subject} {location} {caption} {alt_text}")
+    is_amsterdam = "amsterdam" in evidence_blob
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in _clean_keywords_list(kw_list):
+        kn = _norm_text_strict(raw)
+        if not kn or kn in seen:
+            continue
+
+        if kn in _EVIDENCE_SENSITIVE_KEYWORDS and not _has_term_evidence(evidence_blob, kn):
+            continue
+
+        # Amsterdam guardrail: do not inject river/lake terms unless explicitly evidenced.
+        if is_amsterdam and kn in {"river", "rivers", "lake", "lakes"}:
+            if not _has_term_evidence(evidence_blob, kn):
+                continue
+
+        out.append(kn)
+        seen.add(kn)
+
+    if len(out) < int(keywords_n):
+        for cand in _evidence_refill_candidates(
+            folder=folder,
+            subject=subject,
+            location=location,
+            caption=caption,
+            alt_text=alt_text,
+        ):
+            if len(out) >= int(keywords_n):
+                break
+            kn = _norm_text_strict(cand)
+            if not kn or kn in seen:
+                continue
+            if kn in _EVIDENCE_SENSITIVE_KEYWORDS and not _has_term_evidence(evidence_blob, kn):
+                continue
+            if is_amsterdam and kn in {"river", "rivers", "lake", "lakes"}:
+                if not _has_term_evidence(evidence_blob, kn):
+                    continue
+            out.append(kn)
+            seen.add(kn)
+
+    return _clean_keywords_list(out)[: int(keywords_n)]
+
+
 def _finalize_keywords(
     *,
     kw_list: Sequence[str],
@@ -3435,6 +3536,16 @@ def _finalize_keywords(
             seen_kw.add(kn)
 
     kw_work = _apply_scene_keyword_guardrails(
+        kw_list=kw_work,
+        folder=folder,
+        subject=subject,
+        location=location,
+        caption=caption,
+        alt_text=alt_text,
+        keywords_n=keywords_n,
+    )
+
+    kw_work = _apply_evidence_keyword_guardrails(
         kw_list=kw_work,
         folder=folder,
         subject=subject,
@@ -3970,6 +4081,7 @@ def build_prompt(
     lines.append("J) Sun in sky is not a street light; trees are not buildings.")
     lines.append("K) Do not add mountain, lake, forest, or river keywords unless clearly visible or explicit in context.")
     lines.append("L) Do not add country/state/city names unless present in provided location or clearly visible context.")
+    lines.append("M) If context is Amsterdam, do not output river/lake unless explicitly evidenced; prefer canal only when actually supported.")
     lines.append("")
     lines.append("Context (assist only, do not copy blindly):")
     if folder:
@@ -4032,6 +4144,7 @@ def build_rewrite_prompt(
     lines.append("6) Avoid repetitive phrasing and avoid generic filler words.")
     lines.append("6b) Do not inject mountain/lake/forest/river keywords unless clearly visible or in context.")
     lines.append("6c) Do not inject country/state/city names unless present in provided location or context.")
+    lines.append("6d) If context is Amsterdam, do not inject river/lake unless explicitly evidenced; use canal only when supported.")
     lines.append("7) Do not start every caption with A/An/The; vary opening style.")
     lines.append("8) Avoid 'features ... that ...' and malformed punctuation like ',.'.")
     lines.append("")

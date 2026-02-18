@@ -163,6 +163,24 @@ def _get_spellchecker(data_dir: str):
     return sp
 
 
+def spellcheck_status(data_dir: str) -> Tuple[bool, str]:
+    """Return spellcheck availability and short reason."""
+    if os.getenv("AMIR_SPELLCHECK", "1").strip() in ("0", "false", "False"):
+        return False, "disabled by AMIR_SPELLCHECK"
+    if SpellChecker is None:
+        return False, "pyspellchecker not installed"
+    sp = _get_spellchecker(data_dir)
+    if sp is None:
+        return False, "spellchecker init failed"
+    try:
+        probe = sp.correction("teh")
+        if not probe:
+            return False, "dictionary not loaded"
+    except Exception:
+        return False, "spellchecker runtime error"
+    return True, "ready"
+
+
 def _apply_case(original: str, corrected: str) -> str:
     if not corrected:
         return original
