@@ -751,6 +751,9 @@ class ReviewApp:
             justify="right",
         )
 
+        self.image_progress_var = StringVar(value=f"Image 0/{max(1, len(self.images))}")
+        Label(self.left_frame, textvariable=self.image_progress_var, font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
         # image preview + QR guide
         # Fixed-size preview area so the UI never shifts between landscape/portrait
         self.preview_frame = Frame(self.left_frame, width=620, height=620)

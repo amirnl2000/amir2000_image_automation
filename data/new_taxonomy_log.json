@@ -1,116 +1,14 @@
 [
   {
-    "kind": "location",
     "ts": "2025-12-27 01:06:46",
-    "key": "Test",
-    "display": "Test"
+    "display": "Test",
+    "kind": "location",
+    "key": "Test"
   },
   {
-    "kind": "location",
     "ts": "2025-12-27 15:13:56",
-    "key": "amber",
-    "display": "amber"
-  },
-  {
+    "display": "amber",
     "kind": "location",
-    "ts": "2025-12-28 16:11:54",
-    "key": "Sedona_Arizona_USA",
-    "display": "Sedona Arizona USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-01-01 17:30:06",
-    "key": "New_Mexico_USA",
-    "display": "New Mexico USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-01-05 00:17:31",
-    "key": "Colorado_USA",
-    "display": "Colorado USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-01-05 21:06:18",
-    "key": "Colorado_Springs_Colorado_USA",
-    "display": "Colorado Springs Colorado USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-01-05 21:20:25",
-    "key": "Cortez_Colorado_USA",
-    "display": "Cortez Colorado USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-01-06 21:03:02",
-    "key": "Colorado_Springs_USA",
-    "display": "Colorado Springs USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-01-27 19:49:25",
-    "key": "Denver_Colorado_USA",
-    "display": "Denver Colorado USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-01 13:11:32",
-    "key": "Estes_Park_Colorado_USA",
-    "display": "Estes Park Colorado USA"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-08 21:54:44",
-    "key": "Rocky_Mountain_National_Park_Colorado",
-    "display": "Rocky Mountain National Park Colorado"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-09 18:38:07",
-    "key": "Avon_Eagle_County_Colorado",
-    "display": "Avon Eagle County Colorado"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-14 10:55:15",
-    "key": "Maroon_Bells_Aspen_Colorado",
-    "display": "Maroon Bells Aspen Colorado"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-15 20:14:08",
-    "key": "St._George_Utah",
-    "display": "St. George Utah"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-16 19:15:50",
-    "key": "Mycography",
-    "display": "Mycography"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-16 22:13:11",
-    "key": "Zandvoort_Netherlands",
-    "display": "Zandvoort Netherlands"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-18 00:15:52",
-    "key": "Galilee_Ha_Galil_Israel",
-    "display": "Galilee Ha Galil Israel"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-18 16:33:35",
-    "key": "North_Israel",
-    "display": "North Israel"
-  },
-  {
-    "kind": "location",
-    "ts": "2026-02-19 18:49:46",
-    "key": "Double_Exposure_Experiment",
-    "display": "Double Exposure Experiment"
+    "key": "amber"
   }
 ]

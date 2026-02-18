@@ -35,6 +35,7 @@ $ErrLog  = Join-Path $logDir "build_multiset.err.log"
 
 # Pick venv python
 $py = Get-FirstExistingPath @(
+    (Join-Path $root ".venv_cuda\Scripts\python.exe"),
     (Join-Path $root ".venv313\Scripts\python.exe"),
     (Join-Path $root ".venv_cuda\Scripts\python.exe"),
     (Join-Path $root ".venv\Scripts\python.exe")
