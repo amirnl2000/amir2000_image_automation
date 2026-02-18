@@ -105,19 +105,34 @@ def get_exif_data(image_path: str) -> dict:
                 pass
 
             with Image.open(image_path) as img:
-                try:
-                    exif_raw = img.getexif()
-                except Exception:
-                    exif_raw = getattr(img, "_getexif", lambda: None)()
-
-                if not exif_raw:
-                    return {}
-
                 exif = {}
-                items = exif_raw.items() if hasattr(exif_raw, "items") else exif_raw
-                for tag_id, value in items:
-                    tag = TAGS.get(tag_id, tag_id)
-                    exif[tag] = value
+
+                def _collect(raw):
+                    if not raw:
+                        return
+                    try:
+                        items = raw.items() if hasattr(raw, "items") else raw
+                        for tag_id, value in items:
+                            tag = TAGS.get(tag_id, tag_id)
+                            # Keep richer values already discovered (often from _getexif).
+                            if tag not in exif or exif.get(tag) in (None, ""):
+                                exif[tag] = value
+                    except Exception:
+                        pass
+
+                # Prefer _getexif first; on many JPEGs this includes ExifIFD tags
+                # (LensModel, ISO, FNumber, FocalLength, dimensions) that getexif()
+                # can omit when only top-level tags are exposed.
+                try:
+                    _collect(getattr(img, "_getexif", lambda: None)())
+                except Exception:
+                    pass
+
+                try:
+                    _collect(img.getexif())
+                except Exception:
+                    pass
+
                 return exif
     except Exception:
         return {}

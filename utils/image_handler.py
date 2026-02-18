@@ -14,7 +14,7 @@ def copy_and_rename_original(src_path, new_name, folder_key):
 
         # Construct destination folder
         dest_folder = os.path.join(
-            "Path/TO/folder", year, folder_key
+            "YOUR_PATH_HERE", year, folder_key
         )
         os.makedirs(dest_folder, exist_ok=True)
 

@@ -110,24 +110,24 @@ _cfg = _load_config()
 PATHS = getattr(_cfg, "PATHS", {}) if _cfg else {}
 
 DATA_DIR = PATHS.get(
-    "DATA_DIR", r"Path\to\amir2000_image_automation\data"
+    "DATA_DIR", r"YOUR_PATH_HERE"
 )
 DB_PATH = os.environ.get(
     "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
 )
 INCOMING_DIR = PATHS.get(
-    "INCOMING_DIR", r"Path\to\\amir2000_image_automation\incoming"
+    "INCOMING_DIR", r"YOUR_PATH_HERE"
 )
 LOCAL_SITE_IMAGES_BASE = PATHS.get(
     "LOCAL_SITE_IMAGES_BASE",
-    r"Path\to\l\pic\images\new",
+    r"YOUR_PATH_HERE",
 )
 
 BASE_PICK_DIR = PATHS.get(
-    "BASE_PICK_DIR", r"Path\to\_images to be uploaded"
+    "BASE_PICK_DIR", r"YOUR_PATH_HERE to be uploaded"
 )
 STAGED_DIR = PATHS.get(
-    "STAGED_DIR", r"Path\to\_images to be uploaded\staged"
+    "STAGED_DIR", r"YOUR_PATH_HERE to be uploaded\staged"
 )
 
 # Keep relative “data/…” paths stable like main.py does
@@ -211,7 +211,7 @@ RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", r"Path\to\alamy_local.db"
+    "CAPTION_TERMS_DB", r"YOUR_PATH_HERE"
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
@@ -1145,6 +1145,72 @@ def resource_path(rel):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
 
+def _copy_if_changed(src: str, dst: str) -> None:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        if os.path.exists(dst):
+            s1 = os.stat(src)
+            s2 = os.stat(dst)
+            if int(s1.st_size) == int(s2.st_size) and int(s1.st_mtime) <= int(s2.st_mtime):
+                return
+    except Exception:
+        pass
+    shutil.copy2(src, dst)
+
+
+def _prepare_external_script(rel_script: str) -> str:
+    """
+    In frozen onefile mode, avoid executing helper scripts directly from _MEI
+    with external Python (3.13), because _MEI contains 3.12 extension binaries.
+    """
+    src = resource_path(rel_script)
+    if not getattr(sys, "frozen", False):
+        return src
+
+    try:
+        mei = os.path.normcase(os.path.normpath(str(getattr(sys, "_MEIPASS", "") or "")))
+        src_n = os.path.normcase(os.path.normpath(str(src)))
+        if mei and src_n.startswith(mei):
+            rt_root = os.path.join(DATA_DIR, "_runtime_scripts")
+            os.makedirs(rt_root, exist_ok=True)
+
+            dst_script = os.path.join(rt_root, os.path.basename(rel_script))
+            _copy_if_changed(src, dst_script)
+
+            # Keep config available for helper scripts that probe beside __file__.
+            cfg_src = resource_path("amir2000_config.py")
+            if cfg_src and os.path.exists(cfg_src):
+                _copy_if_changed(cfg_src, os.path.join(rt_root, "amir2000_config.py"))
+
+            base_name = os.path.basename(rel_script).lower()
+
+            if base_name == "caption_review_local.py":
+                data_dst = os.path.join(rt_root, "data")
+                os.makedirs(data_dst, exist_ok=True)
+                for fn in ("location_list.json", "folder_map.json"):
+                    cand = [
+                        os.path.join(os.path.dirname(src), "data", fn),
+                        os.path.join(DATA_DIR, fn),
+                    ]
+                    for cs in cand:
+                        if cs and os.path.exists(cs):
+                            _copy_if_changed(cs, os.path.join(data_dst, fn))
+                            break
+
+            if base_name == "batch_image_quality_score.py":
+                # Optional extras to keep CLIP aesthetic path working.
+                for extra in ("simple_inference.py", "sac+logos+ava1-l14-linearMSE.pth"):
+                    ex_src = resource_path(extra)
+                    if ex_src and os.path.exists(ex_src):
+                        _copy_if_changed(ex_src, os.path.join(rt_root, os.path.basename(extra)))
+
+            return dst_script
+    except Exception as e:
+        print(f"[WARN] Could not prepare external script '{rel_script}': {e}")
+
+    return src
+
+
 # Let helpers read the canonical used_filenames.json (unchanged)
 USED_NAMES = os.path.join(DATA_DIR, "used_filenames.json")
 os.environ["AMIR_USED_FILENAMES_JSON"] = USED_NAMES
@@ -1344,6 +1410,64 @@ def _fmt_exposure(x) -> str | None:
             s = f"{fr:.3f}".rstrip("0").rstrip(".")
             return f"{s} sec"
         return None
+
+
+_EXIF_CRITICAL_KEYS = (
+    "LensModel",
+    "LensModelName",
+    "ExifImageWidth",
+    "ExifImageHeight",
+    "ExposureTime",
+    "FNumber",
+    "ISOSpeedRatings",
+    "PhotographicSensitivity",
+    "FocalLength",
+)
+
+
+def _merge_exif_with_pil_fallback(image_path: str, exif_seed: dict | None) -> dict:
+    """
+    Merge EXIF from multiple PIL paths.
+    Some files expose only top-level tags via getexif(); _getexif() may contain
+    the ExifIFD payload (lens/iso/focal/size). This keeps ingest resilient.
+    """
+    exif: dict = dict(exif_seed or {})
+    if not image_path or not os.path.exists(image_path):
+        return exif
+
+    needs_fallback = any(not exif.get(k) for k in _EXIF_CRITICAL_KEYS)
+    if not needs_fallback:
+        return exif
+
+    try:
+        from PIL.ExifTags import TAGS
+
+        with Image.open(image_path) as img:
+            raw_streams = []
+            try:
+                raw_streams.append(getattr(img, "_getexif", lambda: None)())
+            except Exception:
+                pass
+            try:
+                raw_streams.append(img.getexif())
+            except Exception:
+                pass
+
+            for raw in raw_streams:
+                if not raw:
+                    continue
+                try:
+                    items = raw.items() if hasattr(raw, "items") else raw
+                    for tag_id, value in items:
+                        tag = TAGS.get(tag_id, tag_id)
+                        if exif.get(tag) in (None, ""):
+                            exif[tag] = value
+                except Exception:
+                    continue
+    except Exception as ex:
+        print(f"[WARN] EXIF fallback parse failed for {image_path}: {ex}")
+
+    return exif
 
 
 def _append_runtime_crash(kind: str, exc_type, exc_value, exc_tb):
@@ -2800,6 +2924,25 @@ class MultiSetApp:
             env = os.environ.copy()
             env.setdefault("PYTHONUTF8", "1")
             env.setdefault("PYTHONIOENCODING", "utf-8")
+            # When running from a PyInstaller EXE, avoid leaking bundled Python
+            # runtime vars/paths into external interpreter subprocesses.
+            if getattr(sys, "frozen", False):
+                for _k in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "_MEIPASS2"):
+                    env.pop(_k, None)
+                try:
+                    _meipass = str(getattr(sys, "_MEIPASS", "") or "")
+                    if _meipass:
+                        _norm_mei = os.path.normcase(os.path.normpath(_meipass))
+                        _parts = []
+                        for _p in str(env.get("PATH", "")).split(os.pathsep):
+                            if not _p:
+                                continue
+                            if os.path.normcase(os.path.normpath(_p)) == _norm_mei:
+                                continue
+                            _parts.append(_p)
+                        env["PATH"] = os.pathsep.join(_parts)
+                except Exception:
+                    pass
 
             proc = subprocess.Popen(
                 cmd,
@@ -3040,6 +3183,7 @@ class MultiSetApp:
                         exif = get_exif_data(dst) or {}
                     except Exception as ex:
                         print(f"[WARN] EXIF parse failed for {dst}: {ex}")
+                    exif = _merge_exif_with_pil_fallback(dst, exif)
 
                     vals["DateTime"] = exif.get("DateTimeOriginal") or exif.get("DateTime")
                     cam = get_camera_model(exif)
@@ -3118,6 +3262,16 @@ class MultiSetApp:
                     h = _as_float(exif.get("ExifImageHeight"))
                     vals["Width"] = int(w) if w else None
                     vals["Height"] = int(h) if h else None
+                    if vals["Width"] is None or vals["Height"] is None:
+                        try:
+                            with Image.open(dst) as _im:
+                                _w, _h = _im.size
+                            if vals["Width"] is None and _w:
+                                vals["Width"] = int(_w)
+                            if vals["Height"] is None and _h:
+                                vals["Height"] = int(_h)
+                        except Exception:
+                            pass
                     vals["Exposure"] = _fmt_exposure(exif.get("ExposureTime"))
                     apf = _as_float(exif.get("FNumber"))
                     if apf:
@@ -3242,17 +3396,70 @@ class MultiSetApp:
             _default_venv_candidates = [
                 os.path.join(os.path.dirname(DATA_DIR), ".venv313", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv", "Scripts", "python.exe"),
-                r"PATH\TO\\.venv\\Scripts\\python.exe",
+                os.path.join(os.path.dirname(DATA_DIR), ".venv_cuda", "Scripts", "python.exe"),
+                os.path.join(os.path.dirname(DATA_DIR), ".venv312", "Scripts", "python.exe"),
+                r"YOUR_PATH_HERE",
             ]
 
+            _py_mm_cache = {}
+
+            def _python_major_minor(py_path):
+                key = str(py_path or "")
+                if key in _py_mm_cache:
+                    return _py_mm_cache[key]
+                mm = None
+                try:
+                    r = subprocess.run(
+                        [py_path, "-c", "import sys;print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+                        capture_output=True,
+                        text=True,
+                        timeout=4,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    s = (r.stdout or "").strip()
+                    m = re.match(r"^\s*(\d+)\.(\d+)\s*$", s)
+                    if r.returncode == 0 and m:
+                        mm = (int(m.group(1)), int(m.group(2)))
+                except Exception:
+                    mm = None
+                _py_mm_cache[key] = mm
+                return mm
+
             def _pick_python() -> str:
-                py = os.environ.get("AMIR_PYTHON") or sys.executable
-                if getattr(sys, "frozen", False) and not os.environ.get("AMIR_PYTHON"):
-                    for c in _default_venv_candidates:
-                        if c and os.path.exists(c):
-                            py = c
-                            break
-                return py
+                forced = os.environ.get("AMIR_PYTHON")
+                is_frozen = bool(getattr(sys, "frozen", False))
+
+                # Source runs keep honoring AMIR_PYTHON override.
+                if not is_frozen:
+                    return forced or sys.executable
+
+                # Frozen mode: still prefer explicit runtime override if it exists.
+                if forced:
+                    if os.path.exists(forced):
+                        return forced
+                    print(f"[WARN] AMIR_PYTHON not found: {forced}")
+
+                existing = []
+                for c in _default_venv_candidates:
+                    if c and os.path.exists(c):
+                        existing.append(c)
+
+                # Last resort: first available candidate, then sys.executable.
+                if existing:
+                    return existing[0]
+                return sys.executable
+
+            def _child_cwd_for_script(script_path: str) -> str:
+                if not getattr(sys, "frozen", False):
+                    return os.path.dirname(script_path)
+                try:
+                    mei = os.path.normcase(os.path.normpath(str(getattr(sys, "_MEIPASS", "") or "")))
+                    sp = os.path.normcase(os.path.normpath(str(script_path or "")))
+                    if mei and sp.startswith(mei):
+                        return APP_DIR
+                except Exception:
+                    pass
+                return os.path.dirname(script_path) or APP_DIR
 
             # Start Ollama warmup while scoring runs, so caption prefill starts faster.
             ollama_warm_thread: threading.Thread | None = None
@@ -3288,7 +3495,7 @@ class MultiSetApp:
             if score_total > 0:
                 self._set_stage(4, STAGES[4])
                 os.environ["AMIR_REVIEW_DB"] = DB_PATH
-                script_score = resource_path("batch_image_quality_score.py")
+                script_score = _prepare_external_script("batch_image_quality_score.py")
 
                 def _mark_scoring_failed(reason: str):
                     try:
@@ -3319,6 +3526,7 @@ class MultiSetApp:
                 score_ok = False
                 last_reason = ""
                 py_score = _pick_python()
+                print(f"[INFO] Score runtime python: {py_score} (ver={_python_major_minor(py_score)})")
 
                 for attempt in (1, 2):
                     self._runlog("SCORE_START", f"attempt={attempt}")
@@ -3332,7 +3540,7 @@ class MultiSetApp:
 
                         rc, ok_n, fail_n, tail = _stream_cmd_with_ok_counter(
                             score_cmd,
-                            cwd=os.path.dirname(script_score),
+                            cwd=_child_cwd_for_script(script_score),
                             total=score_total,
                             stage_num_for_ui=4,
                         )
@@ -3579,7 +3787,7 @@ class MultiSetApp:
             if queued_count <= 0:
                 print("[SKIP] No queued rows to prefill.")
             else:
-                script_prefill = resource_path("caption_review_local.py")
+                script_prefill = _prepare_external_script("caption_review_local.py")
                 if not os.path.exists(script_prefill):
                     raise RuntimeError(f"Missing prefill script: {script_prefill}")
                 else:
@@ -3677,7 +3885,7 @@ class MultiSetApp:
 
                             rc, ok_n, fail_n, tail = _stream_cmd_with_ok_counter(
                                 [py, "-u", script_prefill] + run_args,
-                                cwd=os.path.dirname(script_prefill),
+                                cwd=_child_cwd_for_script(script_prefill),
                                 total=len(run_ids),
                                 stage_num_for_ui=6,
                                 badge_prefix=f"batch={chunk_idx}/{prefill_total_chunks}",
@@ -4791,3 +4999,4 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
+

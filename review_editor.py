@@ -460,6 +460,9 @@ class ReviewApp:
         self.left_frame.grid(row=0, column=0, padx=8, pady=8, sticky="n")
         self.right_frame.grid(row=0, column=1, padx=8, pady=8, sticky="n")
 
+        self.image_progress_var = StringVar(value=f"Image 0/{max(1, len(self.images))}")
+        Label(self.left_frame, textvariable=self.image_progress_var, font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+
         # image preview + QR guide
         # Fixed-size preview area so the UI never shifts between landscape/portrait
         self.preview_frame = Frame(self.left_frame, width=620, height=620)
@@ -565,6 +568,10 @@ class ReviewApp:
 
     def load_image(self):
         img = self.images[self.idx]
+        try:
+            self.image_progress_var.set(f"Image {self.idx + 1}/{max(1, len(self.images))}")
+        except Exception:
+            pass
 
         # Fill widgets
         for k, v in img.items():

@@ -35,6 +35,13 @@ _WS_RE = re.compile(r"\s+")
 _NON_WORD_RE = re.compile(r"[^a-z0-9 ]+", re.IGNORECASE)
 _SEQ_SUFFIX_RE = re.compile(r"(?:^|[_-])(\d{1,5})$", re.IGNORECASE)
 
+_LOCATION_LIST_PATH = Path(__file__).resolve().parent / "data" / "location_list.json"
+_FOLDER_MAP_PATH = Path(__file__).resolve().parent / "data" / "folder_map.json"
+_KNOWN_LOCATION_PHRASES: Set[str] = set()
+_KNOWN_LOCATION_TOKENS: Set[str] = set()
+_KNOWN_FOLDER_TOKENS: Set[str] = set()
+_FOLDER_MAP_BY_KEY: Dict[str, str] = {}
+
 # Words we do not want in keywords (fluff, meta, and your website/gear junk)
 _KW_BANNED: Set[str] = {
     "angle",
@@ -177,10 +184,8 @@ _KW_STOPWORDS: Set[str] = {
     "less",
 }
 
-_KW_VARIANT_POOL: Sequence[str] = (
-    "colorado",
-    "usa",
-)
+# Keep empty by default: never force geography or unrelated filler tokens.
+_KW_VARIANT_POOL: Sequence[str] = ()
 
 _KW_WEAK: Set[str] = {
     "western",
@@ -249,6 +254,11 @@ _SCENE_URBAN_TERMS: Set[str] = {
     "city",
     "urban",
     "downtown",
+    "road",
+    "roads",
+    "roadway",
+    "highway",
+    "lane",
     "street",
     "intersection",
     "traffic",
@@ -257,7 +267,6 @@ _SCENE_URBAN_TERMS: Set[str] = {
     "suburb",
     "suburban",
     "neighborhood",
-    "denver",
 }
 
 _SCENE_RURAL_TERMS: Set[str] = {
@@ -273,6 +282,10 @@ _URBAN_EVIDENCE_TERMS: Set[str] = {
     "city",
     "urban",
     "downtown",
+    "road",
+    "roadway",
+    "highway",
+    "lane",
     "street",
     "intersection",
     "building",
@@ -328,6 +341,10 @@ _URBAN_KEYWORD_TERMS: Set[str] = {
     "city",
     "urban",
     "downtown",
+    "road",
+    "roads",
+    "highway",
+    "lane",
     "skyline",
     "street",
     "buildings",
@@ -388,11 +405,50 @@ _STRONG_NATURE_KEYWORD_TERMS: Set[str] = {
 }
 
 _STRONG_NATURE_KEYWORD_PHRASES: Set[str] = {
-    "rocky mountain",
-    "rocky mountain national park",
-    "trail ridge road",
-    "bear lake",
-    "lake estes",
+    "national park",
+    "national forest",
+    "state park",
+}
+
+_TERRAIN_HEAVY_TERMS: Set[str] = {
+    "mountain",
+    "mountains",
+    "ridge",
+    "ridgeline",
+    "foothill",
+    "foothills",
+    "peak",
+    "peaks",
+    "alpine",
+    "lake",
+    "lakes",
+    "river",
+    "rivers",
+    "forest",
+    "woodland",
+    "valley",
+    "trail",
+    "meadow",
+    "tundra",
+    "basin",
+    "shoreline",
+}
+
+_AVIATION_HINTS: Set[str] = {
+    "aviation",
+    "aircraft",
+    "airplane",
+    "plane",
+    "airliner",
+    "jet",
+    "boeing",
+    "airbus",
+    "helicopter",
+    "airport",
+    "runway",
+    "cockpit",
+    "fuselage",
+    "wing",
 }
 
 _WILDLIFE_BIRD_HINTS: Set[str] = {
@@ -408,6 +464,16 @@ _WILDLIFE_BIRD_HINTS: Set[str] = {
     "heron",
     "raptor",
     "avian",
+    "jay",
+    "kestrel",
+    "crow",
+    "kingfisher",
+    "wagtail",
+    "parakeet",
+    "woodpecker",
+    "bulbul",
+    "pigeon",
+    "dove",
 }
 
 _WILDLIFE_MAMMAL_HINTS: Set[str] = {
@@ -423,6 +489,10 @@ _WILDLIFE_MAMMAL_HINTS: Set[str] = {
     "bison",
     "bear",
     "wolf",
+    "jackal",
+    "cat",
+    "dog",
+    "fox",
 }
 
 _UNCERTAIN_PHRASES: Sequence[str] = (
@@ -451,23 +521,35 @@ _LOCATION_BAD_TOKENS: Set[str] = {
 }
 
 _LOCATION_GOOD_HINTS: Set[str] = {
-    "usa",
-    "united states",
-    "colorado",
-    "denver",
+    "country",
+    "state",
+    "province",
     "park",
+    "district",
+    "neighborhood",
     "county",
     "city",
     "town",
+    "street",
+    "avenue",
+    "boulevard",
+    "lane",
+    "bridge",
     "mountain",
     "lake",
     "river",
     "road",
+    "harbor",
+    "airport",
+    "island",
+    "bay",
+    "forest",
+    "valley",
 }
 
 
 def _norm_text(s: str) -> str:
-    s = (s or "").strip().lower()
+    s = (s or "").replace("_", " ").replace("-", " ").strip().lower()
     s = _WS_RE.sub(" ", s)
     return s
 
@@ -477,6 +559,57 @@ def _norm_text_strict(s: str) -> str:
     s = _NON_WORD_RE.sub("", s)
     s = _WS_RE.sub(" ", s).strip()
     return s
+
+
+def _load_taxonomy_context() -> Tuple[Set[str], Set[str], Set[str], Dict[str, str]]:
+    """
+    Load optional taxonomy context from local JSON files:
+    - data/location_list.json (list[str])
+    - data/folder_map.json (dict[str, str])
+    """
+    loc_phrases: Set[str] = set()
+    loc_tokens: Set[str] = set()
+    folder_tokens: Set[str] = set()
+    folder_map: Dict[str, str] = {}
+
+    try:
+        if _LOCATION_LIST_PATH.exists():
+            raw = json.loads(_LOCATION_LIST_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                for item in raw:
+                    norm = _norm_text_strict(str(item or "").replace("_", " "))
+                    if not norm:
+                        continue
+                    loc_phrases.add(norm)
+                    for tok in norm.split():
+                        if len(tok) >= 3 and tok not in _KW_STOPWORDS and tok not in _KW_BANNED:
+                            loc_tokens.add(tok)
+    except Exception:
+        pass
+
+    try:
+        if _FOLDER_MAP_PATH.exists():
+            raw = json.loads(_FOLDER_MAP_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for k, v in raw.items():
+                    kk = str(k or "").strip()
+                    vv = str(v or "").strip()
+                    if kk:
+                        folder_map[kk.lower()] = vv
+                    for text in (kk, vv):
+                        norm = _norm_text_strict(text.replace("_", " "))
+                        if not norm:
+                            continue
+                        for tok in norm.split():
+                            if len(tok) >= 3 and tok not in _KW_STOPWORDS and tok not in _KW_BANNED:
+                                folder_tokens.add(tok)
+    except Exception:
+        pass
+
+    return loc_phrases, loc_tokens, folder_tokens, folder_map
+
+
+_KNOWN_LOCATION_PHRASES, _KNOWN_LOCATION_TOKENS, _KNOWN_FOLDER_TOKENS, _FOLDER_MAP_BY_KEY = _load_taxonomy_context()
 
 
 def _first_words_key(s: str, n_words: int) -> str:
@@ -501,9 +634,9 @@ def _normalize_keyword(k: str) -> str:
         return ""
     joined_full = " ".join(parts)
     keep_long = False
-    if "national park" in joined_full and len(parts) <= 4:
+    if any(x in joined_full for x in ("national park", "state park", "national forest", "national monument")) and len(parts) <= 4:
         keep_long = True
-    if joined_full in {"trail ridge road", "bear lake", "lake estes", "glass ball"}:
+    if joined_full in {"glass ball"}:
         keep_long = True
     if len(parts) > 2 and not keep_long:
         parts = parts[:2]
@@ -519,9 +652,6 @@ def _normalize_keyword(k: str) -> str:
     joined = " ".join(parts)
     if joined in _KW_BANNED or joined in _KW_STOPWORDS:
         return ""
-    if len(parts) == 2:
-        if joined not in {"colorado usa", "denver colorado", "rocky mountain"} and parts[1] in {"rocky", "colorado", "denver", "usa"}:
-            return ""
     if joined in {"mountain range", "wide view", "road scene"}:
         return ""
     return joined
@@ -556,6 +686,10 @@ def _extract_phrase_keywords(folder: str, subject: str, location: str, caption: 
         seen.add(kn)
         out.append(kn)
 
+    loc_norm = _norm_text_strict(str(location or "").replace("_", " "))
+    if loc_norm and loc_norm in _KNOWN_LOCATION_PHRASES:
+        add(loc_norm)
+
     for m in re.finditer(r"\b([a-z]+(?: [a-z]+){0,3} (?:national park|state park|national forest|national monument))\b", src):
         add(m.group(1))
     for m in re.finditer(r"\b([a-z]+(?: [a-z]+){0,2} city)\b", src):
@@ -563,18 +697,15 @@ def _extract_phrase_keywords(folder: str, subject: str, location: str, caption: 
     for m in re.finditer(r"\b(downtown [a-z]+(?: [a-z]+)?)\b", src):
         add(m.group(1))
 
-    fixed_phrases = (
-        "trail ridge road",
-        "rocky mountain",
-        "rocky mountain national park",
-        "bear lake",
-        "lake estes",
-        "glass ball",
-        "colorado usa",
-    )
-    for p in fixed_phrases:
-        if p in src:
-            add(p)
+    # Generic named-place extraction for common geo/location phrase endings.
+    for m in re.finditer(
+        r"\b([a-z]+(?: [a-z]+){0,3} (?:road|street|avenue|boulevard|bridge|park|square|plaza|harbor|airport|station|tower|lake|river|district|island|bay))\b",
+        src,
+    ):
+        add(m.group(1))
+
+    if "glass ball" in src:
+        add("glass ball")
 
     return out
 
@@ -736,6 +867,8 @@ def _scene_expected_mode(folder: str, subject: str, location: str) -> str:
     kind = _infer_subject_kind(folder, subject)
     if kind == "vehicle":
         return _vehicle_scene_mode(folder, subject, location)
+    if kind == "aviation":
+        return "aviation"
     if kind in {"urban", "architecture", "structure"}:
         return "urban"
     if kind in {"landscape", "waterscape", "desert", "wildlife"}:
@@ -771,6 +904,23 @@ def _is_urban_keyword(kn: str) -> bool:
     return bool(set(k.split()) & _URBAN_KEYWORD_TERMS)
 
 
+def _is_terrain_heavy_keyword(kn: str) -> bool:
+    k = _norm_text_strict(kn)
+    if not k:
+        return False
+    if k in _STRONG_NATURE_KEYWORD_PHRASES:
+        return True
+    return bool(set(k.split()) & _TERRAIN_HEAVY_TERMS)
+
+
+def _is_wildlife_keyword(kn: str) -> bool:
+    k = _norm_text_strict(kn)
+    if not k:
+        return False
+    parts = set(k.split())
+    return bool(parts & _WILDLIFE_BIRD_HINTS) or bool(parts & _WILDLIFE_MAMMAL_HINTS)
+
+
 def _apply_scene_keyword_guardrails(
     *,
     kw_list: Sequence[str],
@@ -781,6 +931,7 @@ def _apply_scene_keyword_guardrails(
     alt_text: str,
     keywords_n: int,
 ) -> List[str]:
+    kind = _infer_subject_kind(folder, subject)
     expected = _scene_expected_mode(folder, subject, location)
     context_text = _norm_text_strict(f"{folder} {subject} {location}")
     context_tokens = set(context_text.split())
@@ -791,10 +942,26 @@ def _apply_scene_keyword_guardrails(
         kn = _norm_text_strict(raw)
         if not kn or kn in seen:
             continue
+        # Geographic tokens are only valid when supported by row context
+        # (location/subject/folder). Prevents cross-country leakage.
+        if _KNOWN_LOCATION_TOKENS and (set(kn.split()) & _KNOWN_LOCATION_TOKENS):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
         if expected in {"urban", "road"} and _is_strong_nature_keyword(kn):
             if not _keyword_matches_context(kn, context_text, context_tokens):
                 continue
         if expected in {"mountain", "nature", "rural"} and _is_urban_keyword(kn):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
+        if expected == "aviation" and _is_urban_keyword(kn):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
+        # Avoid generic terrain stuffing for non-landscape subjects unless context explicitly supports it.
+        if kind in {"wildlife", "macro", "aviation", "urban", "architecture"} and _is_terrain_heavy_keyword(kn):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
+        # Aviation should not borrow wildlife tags unless explicitly present in context.
+        if expected == "aviation" and _is_wildlife_keyword(kn):
             if not _keyword_matches_context(kn, context_text, context_tokens):
                 continue
         seen.add(kn)
@@ -807,7 +974,6 @@ def _apply_scene_keyword_guardrails(
     refill_pool.extend(_context_tail_keywords(folder, subject))
     if expected in {"mountain", "nature", "rural"}:
         refill_pool.extend(list(_NATURE_KEYWORD_POOL))
-    refill_pool.extend(["colorado", "usa"])
 
     for cand in refill_pool:
         if len(filtered) >= int(keywords_n):
@@ -815,10 +981,22 @@ def _apply_scene_keyword_guardrails(
         kn = _normalize_keyword(cand)
         if not kn or kn in seen:
             continue
+        if _KNOWN_LOCATION_TOKENS and (set(kn.split()) & _KNOWN_LOCATION_TOKENS):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
         if expected in {"urban", "road"} and _is_strong_nature_keyword(kn):
             if not _keyword_matches_context(kn, context_text, context_tokens):
                 continue
         if expected in {"mountain", "nature", "rural"} and _is_urban_keyword(kn):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
+        if expected == "aviation" and _is_urban_keyword(kn):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
+        if kind in {"wildlife", "macro", "aviation", "urban", "architecture"} and _is_terrain_heavy_keyword(kn):
+            if not _keyword_matches_context(kn, context_text, context_tokens):
+                continue
+        if expected == "aviation" and _is_wildlife_keyword(kn):
             if not _keyword_matches_context(kn, context_text, context_tokens):
                 continue
         seen.add(kn)
@@ -869,6 +1047,8 @@ def _context_keyword_pool(folder: str, subject: str) -> List[str]:
         else:
             out = ["wildlife", "animal", "habitat", "field", "ground level", "natural cover", "outdoor subject", "foraging", "behavior"]
         return out
+    if kind == "aviation":
+        return ["aviation", "aircraft", "airplane", "flight", "jet", "fuselage", "wing", "landing gear", "airliner", "sky", "clouds", "airport", "runway", "takeoff", "approach"]
     if kind == "structure":
         return ["industrial", "silos", "facility", "storage", "infrastructure", "plant", "warehouse", "yard", "metal", "construction", "utilities", "factory", "grain", "silo complex", "industrial site", "utility yard"]
     if kind == "urban":
@@ -886,8 +1066,8 @@ def _context_keyword_pool(folder: str, subject: str) -> List[str]:
     if kind == "glassball":
         return ["glass ball", "sphere", "reflection", "refraction", "lensball", "crystal", "bokeh", "optical", "macro", "closeup", "park", "mountains"]
     if kind == "landscape":
-        return ["mountain", "mountains", "lake", "forest", "river", "valley", "trail", "trees", "sky", "hills", "ridgeline", "terrain", "horizon", "foothills", "woodland", "meadow", "national park", "rocky mountain national park", "trail ridge road", "lake estes", "bear lake"]
-    return ["landscape", "trees", "sky", "road", "mountain", "lake", "forest", "river", "industrial", "trail", "wildlife", "terrain", "horizon"]
+        return ["mountain", "mountains", "lake", "forest", "river", "valley", "trail", "trees", "sky", "hills", "ridgeline", "terrain", "horizon", "foothills", "woodland", "meadow", "national park"]
+    return ["landscape", "trees", "sky", "terrain", "horizon", "outdoors", "daylight", "nature", "environment", "scenery"]
 
 
 def _context_tail_keywords(folder: str, subject: str) -> List[str]:
@@ -901,6 +1081,8 @@ def _context_tail_keywords(folder: str, subject: str) -> List[str]:
         if wmode == "mammal":
             return ["wildlife", "animal", "mammal", "rodent", "squirrel", "prairie dog", "ground squirrel", "grassland", "field", "burrow", "foraging", "habitat", "fur"]
         return ["wildlife", "animal", "habitat", "field", "ground level", "natural cover", "foraging", "behavior"]
+    if kind == "aviation":
+        return ["aviation", "aircraft", "airplane", "flight", "jet", "airliner", "fuselage", "wing", "landing gear", "airport", "runway", "takeoff", "approach", "sky", "clouds"]
     if kind == "structure":
         return ["industrial", "silos", "facility", "storage", "infrastructure", "plant", "warehouse", "construction", "factory", "grain", "silo complex", "industrial site", "utility yard"]
     if kind == "urban":
@@ -918,8 +1100,8 @@ def _context_tail_keywords(folder: str, subject: str) -> List[str]:
     if kind == "glassball":
         return ["glass ball", "sphere", "reflection", "refraction", "lensball", "crystal", "bokeh", "optical", "macro", "closeup", "park", "mountains"]
     if kind == "landscape":
-        return ["mountains", "lake", "forest", "river", "valley", "trail", "trees", "sky", "horizon", "ridgeline", "foothills", "woodland", "meadow", "terrain", "national park", "trail ridge road", "rocky mountain national park"]
-    return ["landscape", "trees", "sky", "road", "mountain", "lake", "forest", "river", "terrain", "horizon"]
+        return ["mountains", "lake", "forest", "river", "valley", "trail", "trees", "sky", "horizon", "ridgeline", "foothills", "woodland", "meadow", "terrain", "national park"]
+    return ["landscape", "trees", "sky", "terrain", "horizon", "outdoors", "daylight", "nature", "environment", "scenery"]
 
 
 def _split_keywords(raw: str) -> List[str]:
@@ -1077,7 +1259,7 @@ def _scene_flags(text: str) -> Tuple[bool, bool, bool]:
     if not low:
         return False, False, False
     toks = set(low.split())
-    has_mountain = bool(toks & _SCENE_MOUNTAIN_TERMS) or ("national park" in low) or ("trail ridge road" in low)
+    has_mountain = bool(toks & _SCENE_MOUNTAIN_TERMS) or ("national park" in low)
     has_urban = bool(toks & _SCENE_URBAN_TERMS) or ("city street" in low)
     has_rural = bool(toks & _SCENE_RURAL_TERMS)
     return has_mountain, has_urban, has_rural
@@ -1142,7 +1324,7 @@ def _rebalance_keywords_visual_context(
         return out[:keywords_n]
 
     # If text is nature-first and contains no urban evidence, remove urban-heavy tags.
-    keep_always = {"usa", "colorado", "colorado usa", "estes park", "denver", "denver colorado"}
+    keep_always: Set[str] = set()
     filtered: List[str] = []
     seen: Set[str] = set()
     for kw in out:
@@ -1163,7 +1345,6 @@ def _rebalance_keywords_visual_context(
     refill_pool.extend(_visual_keyword_candidates(caption, alt_text, location))
     refill_pool.extend(_extract_phrase_keywords(folder, subject, location, f"{caption} {alt_text}"))
     refill_pool.extend(list(_NATURE_KEYWORD_POOL))
-    refill_pool.extend(["colorado", "usa"])
 
     for cand in refill_pool:
         if len(out) >= keywords_n:
@@ -1194,11 +1375,7 @@ def _vehicle_scene_mode(folder: str, subject: str, location: str) -> str:
     toks = set(low.split())
 
     mountain_hits = len(toks & _SCENE_MOUNTAIN_TERMS)
-    if "rocky mountain" in low:
-        mountain_hits += 2
-    if "rocky mountain national park" in low:
-        mountain_hits += 2
-    if "trail ridge road" in low:
+    if "national park" in low:
         mountain_hits += 2
 
     urban_hits = len(toks & _SCENE_URBAN_TERMS)
@@ -1502,8 +1679,16 @@ def _clean_location(location: str) -> str:
 
     bad_hits = sum(1 for w in words if w in _LOCATION_BAD_TOKENS)
     good_hits = sum(1 for w in words if w in _LOCATION_GOOD_HINTS)
+    if low in _KNOWN_LOCATION_PHRASES and "photography" not in words:
+        good_hits += 2
+    if _KNOWN_LOCATION_TOKENS:
+        good_hits += sum(1 for w in words if w in _KNOWN_LOCATION_TOKENS)
 
     if bad_hits > 0 and good_hits == 0:
+        return ""
+    if "photography" in words and bad_hits >= 1 and good_hits <= 1:
+        return ""
+    if bad_hits >= max(2, (len(words) // 2) + 1) and good_hits <= 1:
         return ""
     if len(words) > 8 and good_hits == 0:
         return ""
@@ -1522,13 +1707,7 @@ def _pretty_place_name(raw: str) -> str:
     txt = _norm_text_strict(raw)
     if not txt:
         return ""
-    out: List[str] = []
-    for w in txt.split():
-        if w in {"usa", "us"}:
-            out.append("USA")
-        else:
-            out.append(w.capitalize())
-    return " ".join(out)
+    return " ".join([w.capitalize() for w in txt.split()])
 
 
 def _named_place_phrase(folder: str, subject: str, location: str) -> str:
@@ -1536,18 +1715,8 @@ def _named_place_phrase(folder: str, subject: str, location: str) -> str:
     if not phrases:
         return ""
 
-    priority = (
-        "rocky mountain national park",
-        "trail ridge road",
-        "bear lake",
-        "lake estes",
-    )
-    for p in priority:
-        if p in phrases:
-            return _pretty_place_name(p)
-
     for p in phrases:
-        if any(x in p for x in ("national park", "state park", "national forest", "national monument", "road", "lake", "downtown", "city")):
+        if any(x in p for x in ("national park", "state park", "national forest", "national monument", "road", "street", "avenue", "park", "lake", "river", "downtown", "city", "district", "airport", "harbor")):
             return _pretty_place_name(p)
     return ""
 
@@ -1612,6 +1781,19 @@ def _subject_label(folder: str, subject: str) -> str:
         if "car" in ts:
             return "a car"
         return "a vehicle"
+
+    if kind == "aviation":
+        if "helicopter" in ts:
+            return "a helicopter"
+        if "boeing" in ts:
+            return "a boeing aircraft"
+        if "airbus" in ts:
+            return "an airbus aircraft"
+        if "jet" in ts:
+            return "a passenger jet"
+        if "aircraft" in ts or "airplane" in ts or "plane" in ts:
+            return "an aircraft"
+        return "an aviation subject"
 
     if kind == "wildlife":
         if "prairie" in ts and "dog" in ts:
@@ -1915,35 +2097,21 @@ def _infer_setting_phrase(folder: str, subject: str) -> str:
 
 
 def _infer_subject_kind(folder: str, subject: str) -> str:
-    low = _norm_text_strict(f"{folder} {subject}")
+    folder_display = _FOLDER_MAP_BY_KEY.get(str(folder or "").strip().lower(), "")
+    low = _norm_text_strict(f"{folder} {folder_display} {subject}")
     if any(x in low for x in ("glassball", "glass ball", "lensball", "crystal ball", "crystalball")):
         return "glassball"
     if any(x in low for x in ("macro", "closeup", "close up", "flower", "petal", "insect", "bee", "butterfly", "spider", "texture", "droplet")):
         return "macro"
+    if any(x in low for x in _AVIATION_HINTS):
+        return "aviation"
     if any(x in low for x in ("car", "jeep", "truck", "suv", "vehicle", "bus", "van")):
         return "vehicle"
-    if any(
-        x in low
-        for x in (
-            "hawk",
-            "bird",
-            "elk",
-            "deer",
-            "wildlife",
-            "animal",
-            "squirrel",
-            "prairie dog",
-            "ground squirrel",
-            "rodent",
-            "rabbit",
-            "hare",
-            "fox",
-            "coyote",
-            "bear",
-            "moose",
-            "bison",
-            "wolf",
-        )
+    if (
+        "wildlife" in low
+        or "animal" in low
+        or any(x in low for x in _WILDLIFE_BIRD_HINTS)
+        or any(x in low for x in _WILDLIFE_MAMMAL_HINTS)
     ):
         return "wildlife"
     if any(x in low for x in ("industrial", "silo", "factory", "facility", "warehouse", "oil")):
@@ -2046,6 +2214,20 @@ def _fallback_caption_candidate(
             "a broad field backdrop",
             "sparse natural cover",
             "outdoor habitat context",
+        ),
+        "aviation": (
+            "open sky and cloud layers",
+            "airport approach corridor",
+            "runway environment in the distance",
+            "clear sky with soft cloud cover",
+            "high-altitude backdrop",
+            "airspace over an urban edge",
+            "flight-path perspective",
+            "background cloud texture",
+            "daylight sky contrast",
+            "open atmosphere detail",
+            "approach path context",
+            "airfield surroundings",
         ),
         "structure": (
             "open ground",
@@ -2250,6 +2432,19 @@ def _fallback_caption_candidate(
                 "passes along a paved travel route",
                 "travels through roadway traffic flow",
             )
+    elif kind == "aviation":
+        acts = (
+            "is captured in flight",
+            "flies through open sky",
+            "is shown on approach with landing gear visible",
+            "moves along a clear flight path",
+            "appears in an overhead flight angle",
+            "crosses the frame with wings fully extended",
+            "is seen against cloud cover",
+            "holds a stable flight profile",
+            "passes through an approach corridor",
+            "is framed in midair under daylight",
+        )
     elif kind == "wildlife":
         if wildlife_mode == "bird":
             acts = (
@@ -2588,6 +2783,16 @@ def _fallback_alt_candidate(
             "Close wildlife view of",
             "Subject-focused wildlife view of",
         ),
+        "aviation": (
+            "Aviation view of",
+            "In-flight view of",
+            "Airborne view of",
+            "Approach-path view of",
+            "Aircraft-focused view of",
+            "Skyward view of",
+            "Flight-level view of",
+            "Overhead flight view of",
+        ),
         "structure": (
             "Industrial-site view of",
             "Facility view of",
@@ -2730,6 +2935,18 @@ def _fallback_alt_candidate(
             "with natural cover and ground detail",
             "showing subject posture within habitat",
             "with environment detail and open-air context",
+        ),
+        "aviation": (
+            "with wings and fuselage detail against the sky",
+            "showing landing gear and flight posture",
+            "with cloud cover and open airspace in view",
+            "with a clear flight profile in daylight",
+            "showing aircraft structure and wing geometry",
+            "with approach-path alignment and sky contrast",
+            "with airborne perspective and cloud texture",
+            "showing in-flight detail under natural light",
+            "with visible flight attitude and clean sky backdrop",
+            "with aircraft body detail and high-contrast sky",
         ),
         "structure": (
             "with open yard space and utility lines",
@@ -3123,8 +3340,6 @@ def _force_keyword_replacements(
                 continue
             if cur in protected:
                 continue
-            if cur in {"usa", "colorado", "colorado usa"}:
-                continue
             replace_idx = i
             break
         if replace_idx is None:
@@ -3205,7 +3420,7 @@ def _finalize_keywords(
 
     if len(kw_work) < keywords_n:
         if _visual_nature_without_urban(caption, alt_text):
-            kw_fill = _visual_keyword_candidates(caption, alt_text, location) + list(_NATURE_KEYWORD_POOL) + ["colorado", "usa"]
+            kw_fill = _visual_keyword_candidates(caption, alt_text, location) + list(_NATURE_KEYWORD_POOL)
         else:
             kw_fill = _fallback_keywords(folder, subject, location, caption, keywords_n)
         for k in kw_fill:
@@ -3263,7 +3478,6 @@ def _soft_dedup_keyword_signature(
     best_sig = sig
     best_used = used_now
     protected = set(_extract_phrase_keywords(folder, subject, location, caption))
-    protected.update({"usa", "colorado", "colorado usa"})
     rotate_pool = (
         _visual_keyword_candidates(caption, "", location)
         + _fallback_keywords(folder, subject, location, caption, keywords_n + 24)
@@ -3514,10 +3728,7 @@ def _fallback_keywords(
         out.append(kn)
 
     # If still too short, add generic but safe words
-    safe_pool = _context_keyword_pool(folder, subject) + _context_tail_keywords(folder, subject) + [
-        "colorado",
-        "usa",
-    ]
+    safe_pool = _context_keyword_pool(folder, subject) + _context_tail_keywords(folder, subject)
     for k in safe_pool:
         if len(out) >= keywords_n:
             break
@@ -3737,7 +3948,7 @@ def build_prompt(
     lines.append("Hard rules (no hallucination):")
     lines.append("1) Describe ONLY what is clearly visible in the image.")
     lines.append("2) Do NOT guess species, brand, model, or exact location if not clearly visible.")
-    lines.append("3) Use generic terms if unsure: bird, raptor, animal, car, SUV, truck, building, roadway.")
+    lines.append("3) If unsure, use only conservative visible terms (for example: bird, aircraft, flower, building, tree, water, skyline).")
     lines.append("4) If location string is provided below, you MAY include it. If it is empty, do NOT invent one.")
     lines.append("5) Never use uncertainty words: maybe, possibly, likely, perhaps.")
     lines.append("")
@@ -3758,6 +3969,7 @@ def build_prompt(
     lines.append("I) Do not force urban words (city, downtown, skyline, buildings, street) unless clearly visible.")
     lines.append("J) Sun in sky is not a street light; trees are not buildings.")
     lines.append("K) Do not add mountain, lake, forest, or river keywords unless clearly visible or explicit in context.")
+    lines.append("L) Do not add country/state/city names unless present in provided location or clearly visible context.")
     lines.append("")
     lines.append("Context (assist only, do not copy blindly):")
     if folder:
@@ -3819,6 +4031,7 @@ def build_rewrite_prompt(
     lines.append("5) Do not use uncertainty words (maybe, possibly, likely, perhaps).")
     lines.append("6) Avoid repetitive phrasing and avoid generic filler words.")
     lines.append("6b) Do not inject mountain/lake/forest/river keywords unless clearly visible or in context.")
+    lines.append("6c) Do not inject country/state/city names unless present in provided location or context.")
     lines.append("7) Do not start every caption with A/An/The; vary opening style.")
     lines.append("8) Avoid 'features ... that ...' and malformed punctuation like ',.'.")
     lines.append("")

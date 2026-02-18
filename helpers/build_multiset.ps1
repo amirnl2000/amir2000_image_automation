@@ -35,11 +35,12 @@ $ErrLog  = Join-Path $logDir "build_multiset.err.log"
 
 # Pick venv python
 $py = Get-FirstExistingPath @(
+    (Join-Path $root ".venv_cuda\Scripts\python.exe"),
     (Join-Path $root ".venv313\Scripts\python.exe"),
     (Join-Path $root ".venv\Scripts\python.exe")
 )
 
-if (-not $py) { throw "Python venv not found. Looked for .venv313 and .venv under: $root" }
+if (-not $py) { throw "Python venv not found. Looked for .venv_cuda, .venv313 and .venv under: $root" }
 
 $entry = Join-Path $root "main_set.py"
 if (-not (Test-Path -LiteralPath $entry)) { throw "Entry script not found: $entry" }
@@ -64,7 +65,7 @@ if ($Clean) {
 }
 
 Write-Host "[INFO] Ensuring PyInstaller exists..."
-& $py -m pip install -q pyinstaller | Out-Null
+& $py -m pip install -q "pyinstaller==6.18.0" | Out-Null
 
 # Keep EXE lean by default (matches your old stable approach)
 $excludes = @(

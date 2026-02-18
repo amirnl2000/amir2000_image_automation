@@ -84,14 +84,14 @@ Do not publish with placeholders still present.
 Preferred (installs all runtime deps + Torch CPU/CUDA auto-detect):
 
 ```powershell
-Set-Location "C:\path\to\amir2000_image_automation"
+Set-Location "YOUR_PATH_HERE"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\setup_venv313_full.ps1
 ```
 
 Manual alternative:
 
 ```powershell
-Set-Location "C:\path\to\amir2000_image_automation"
+Set-Location "YOUR_PATH_HERE"
 py -3.13 -m venv .venv313
 .\.venv313\Scripts\Activate.ps1
 python -m pip install -U pip
@@ -108,7 +108,7 @@ python -m pip install -U torch torchvision --index-url https://download.pytorch.
 3. Initialize local DB files:
 
 ```powershell
-Set-Location "C:\path\to\amir2000_image_automation"
+Set-Location "YOUR_PATH_HERE"
 .\.venv313\Scripts\Activate.ps1
 python .\init_db.py
 ```
@@ -137,7 +137,7 @@ ollama pull minicpm-v:latest
 2. Activate environment:
 
 ```powershell
-Set-Location "C:\path\to\amir2000_image_automation"
+Set-Location "YOUR_PATH_HERE"
 .\.venv313\Scripts\Activate.ps1
 ```
 
@@ -180,7 +180,7 @@ Optional stability flags for large queue-building sessions:
 ## Build EXE
 
 ```powershell
-Set-Location "C:\path\to\amir2000_image_automation"
+Set-Location "YOUR_PATH_HERE"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clean -BuildProfile Lite
 ```
 
@@ -193,3 +193,4 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clea
 
 - `docs/init/review_queue.sql`
 - `docs/init/photos_info_revamp.sql`
+

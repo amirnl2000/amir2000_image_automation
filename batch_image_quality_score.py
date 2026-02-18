@@ -262,7 +262,7 @@ if __name__ == "__main__":
         if not os.path.isfile(path):
             alt = os.path.join(INCOMING_DIR, file_name)
             if not os.path.isfile(alt):
-                print(f"❌ Not in incoming: {orig_file_name} (id {img_id})")
+                print(f"[ERROR] Not in incoming: {orig_file_name} (id {img_id})")
                 had_error = True
                 continue
             path = alt
@@ -323,7 +323,7 @@ if __name__ == "__main__":
 
 
         except Exception as e:
-            print(f"❌ Error processing {path}: {e}")
+            print(f"[ERROR] Error processing {path}: {e}")
             had_error = True
             try:
                 cur.execute(f"UPDATE {TABLE_NAME} SET Review_Status='Error' WHERE id=?", (img_id,))
@@ -340,5 +340,5 @@ if __name__ == "__main__":
         print("\n[WARN] One or more images failed to score. Check 'Error' rows in the editor.")
 
 
-    print("\n✅ All done! Scores written to your database.")
+    print("\n[OK] All done! Scores written to your database.")
 

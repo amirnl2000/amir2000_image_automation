@@ -1,74 +1,14 @@
 [
   {
-    "display": "Test",
     "ts": "2025-12-27 01:06:46",
+    "display": "Test",
     "kind": "location",
     "key": "Test"
   },
   {
-    "display": "amber",
     "ts": "2025-12-27 15:13:56",
+    "display": "amber",
     "kind": "location",
     "key": "amber"
-  },
-  {
-    "display": "Sedona Arizona USA",
-    "ts": "2025-12-28 16:11:54",
-    "kind": "location",
-    "key": "Sedona_Arizona_USA"
-  },
-  {
-    "display": "New Mexico USA",
-    "ts": "2026-01-01 17:30:06",
-    "kind": "location",
-    "key": "New_Mexico_USA"
-  },
-  {
-    "display": "Colorado USA",
-    "ts": "2026-01-05 00:17:31",
-    "kind": "location",
-    "key": "Colorado_USA"
-  },
-  {
-    "display": "Colorado Springs Colorado USA",
-    "ts": "2026-01-05 21:06:18",
-    "kind": "location",
-    "key": "Colorado_Springs_Colorado_USA"
-  },
-  {
-    "display": "Cortez Colorado USA",
-    "ts": "2026-01-05 21:20:25",
-    "kind": "location",
-    "key": "Cortez_Colorado_USA"
-  },
-  {
-    "display": "Colorado Springs USA",
-    "ts": "2026-01-06 21:03:02",
-    "kind": "location",
-    "key": "Colorado_Springs_USA"
-  },
-  {
-    "display": "Denver Colorado USA",
-    "ts": "2026-01-27 19:49:25",
-    "kind": "location",
-    "key": "Denver_Colorado_USA"
-  },
-  {
-    "display": "Estes Park Colorado USA",
-    "ts": "2026-02-01 13:11:32",
-    "kind": "location",
-    "key": "Estes_Park_Colorado_USA"
-  },
-  {
-    "display": "Rocky Mountain National Park Colorado",
-    "ts": "2026-02-08 21:54:44",
-    "kind": "location",
-    "key": "Rocky_Mountain_National_Park_Colorado"
-  },
-  {
-    "display": "Avon Eagle County Colorado",
-    "ts": "2026-02-09 18:38:07",
-    "kind": "location",
-    "key": "Avon_Eagle_County_Colorado"
   }
 ]
