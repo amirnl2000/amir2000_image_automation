@@ -96,8 +96,21 @@ PUBLISH = getattr(_cfg, "PUBLISH", {}) if _cfg else {}
 # fallback to an empty string.
 PUBLIC_URL_BASE = PUBLISH.get("PUBLIC_URL_BASE", "")
 
+# Resolve repo-rooted defaults so sanitized code never carries machine-local paths.
+APP_DIR = (
+    os.path.dirname(sys.executable)
+    if getattr(sys, "frozen", False)
+    else os.path.dirname(os.path.abspath(__file__))
+)
+DEFAULT_DATA_DIR = os.path.join(APP_DIR, "data")
+DEFAULT_INCOMING_DIR = os.path.join(APP_DIR, "incoming")
+DEFAULT_REJECTED_DIR = os.path.join(APP_DIR, "rejected")
+DEFAULT_SITE_IMAGES_BASE = os.path.join(APP_DIR, "site_images")
+DEFAULT_EXPORT_DIR = os.path.join(APP_DIR, "export")
+DEFAULT_ARCHIVE_DIR = os.path.join(APP_DIR, "archive")
+
 # Canonical data location
-DATA_DIR = PATHS.get("DATA_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\data")
+DATA_DIR = PATHS.get("DATA_DIR", DEFAULT_DATA_DIR)
 UI_STATE_FILE = os.path.join(DATA_DIR, "ui_state.json")
 
 # DB location (allow env override)
@@ -105,11 +118,11 @@ DB_PATH = os.environ.get("AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.j
 TABLE_NAME = PUBLISH.get("REVIEW_QUEUE_TABLE", "review_queue")
 
 # Other folders
-INCOMING_DIR    = PATHS.get("INCOMING_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\incoming")
-REJECTED_FOLDER = PATHS.get("REJECTED_DIR", r"C:\Users\ad341\Desktop\xxx\rejected")
-LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", r"C:\Users\ad341\amir2000\amir2000.nl\pic\images\new")
-DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", r"C:\Users\ad341\Desktop\xxx\new")
-ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", r"C:\Users\ad341\Pictures\amir2000photos\new")
+INCOMING_DIR    = PATHS.get("INCOMING_DIR", DEFAULT_INCOMING_DIR)
+REJECTED_FOLDER = PATHS.get("REJECTED_DIR", DEFAULT_REJECTED_DIR)
+LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", DEFAULT_SITE_IMAGES_BASE)
+DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", DEFAULT_EXPORT_DIR)
+ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", DEFAULT_ARCHIVE_DIR)
 
 FONT_PATH      = resource_path(os.path.join("fonts", "Montserrat-Light.ttf"))
 WATERMARK_TEXT = "© amir2000.nl\nPhotography"
@@ -130,9 +143,9 @@ except ModuleNotFoundError as e:
         "Missing dependency while starting review_editor.\n\n"
         f"Missing module: {missing}\n\n"
         "Fix:\n"
-        "1) Install into your venv:\n"
-        "   C:\\Users\\ad341\\amir2000\\.venv\\Scripts\\python.exe -m pip install piexif\n"
-        "2) Re-run review_editor via that venv python.\n"
+        "1) Install into your active Python/venv:\n"
+        "   python -m pip install piexif\n"
+        "2) Re-run review_editor via that same Python environment.\n"
     )
     print("[ERROR] " + msg.replace("\n", " | "))
 

@@ -165,33 +165,28 @@ def _load_config():
 _cfg = _load_config()
 PATHS = getattr(_cfg, "PATHS", {}) if _cfg else {}
 
-DATA_DIR = PATHS.get(
-    "DATA_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\data"
-)
-DB_PATH = os.environ.get(
-    "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
-)
-INCOMING_DIR = PATHS.get(
-    "INCOMING_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\incoming"
-)
-LOCAL_SITE_IMAGES_BASE = PATHS.get(
-    "LOCAL_SITE_IMAGES_BASE",
-    r"C:\Users\ad341\amir2000\amir2000.nl\pic\images\new",
-)
-
-BASE_PICK_DIR = PATHS.get(
-    "BASE_PICK_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded"
-)
-STAGED_DIR = PATHS.get(
-    "STAGED_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded\staged"
-)
-
-# Keep relative “data/…” paths stable like main.py does
+# Keep relative "data/..." paths stable like main.py does
 APP_DIR = (
     os.path.dirname(sys.executable)
     if getattr(sys, "frozen", False)
     else os.path.dirname(os.path.abspath(__file__))
 )
+
+DEFAULT_DATA_DIR = os.path.join(APP_DIR, "data")
+DEFAULT_INCOMING_DIR = os.path.join(APP_DIR, "incoming")
+DEFAULT_SITE_IMAGES_BASE = os.path.join(APP_DIR, "site_images")
+DEFAULT_BASE_PICK_DIR = DEFAULT_INCOMING_DIR
+DEFAULT_STAGED_DIR = os.path.join(DEFAULT_INCOMING_DIR, "staged")
+
+DATA_DIR = PATHS.get("DATA_DIR", DEFAULT_DATA_DIR)
+DB_PATH = os.environ.get(
+    "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
+)
+INCOMING_DIR = PATHS.get("INCOMING_DIR", DEFAULT_INCOMING_DIR)
+LOCAL_SITE_IMAGES_BASE = PATHS.get("LOCAL_SITE_IMAGES_BASE", DEFAULT_SITE_IMAGES_BASE)
+
+BASE_PICK_DIR = PATHS.get("BASE_PICK_DIR", DEFAULT_BASE_PICK_DIR)
+STAGED_DIR = PATHS.get("STAGED_DIR", DEFAULT_STAGED_DIR)
 
 
 LOCATION_FILE = os.path.join(DATA_DIR, "location_list.json")
@@ -267,7 +262,7 @@ RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", r"C:\Users\ad341\amir2000\Alamy\data\alamy_local.db"
+    "CAPTION_TERMS_DB", ""
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
@@ -3459,7 +3454,7 @@ class MultiSetApp:
                 os.path.join(os.path.dirname(DATA_DIR), ".venv", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv_cuda", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv312", "Scripts", "python.exe"),
-                r"C:\\Users\\ad341\\amir2000\\.venv\\Scripts\\python.exe",
+                os.path.join(os.path.expanduser("~"), "amir2000", ".venv", "Scripts", "python.exe"),
             ]
 
             _py_mm_cache = {}

@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+set -eu
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+ps_cmd="pwsh"
+if ! command -v "$ps_cmd" >/dev/null 2>&1; then
+  ps_cmd="powershell"
+fi
+
+"$ps_cmd" -NoProfile -ExecutionPolicy Bypass -File "$repo_root/helpers/sanitize_git_repo.ps1" -RepoRoot "$repo_root" -Fix
+
+if ! git -C "$repo_root" diff --quiet; then
+  echo "[BLOCKED] Sanitizer updated tracked files. Commit those changes, then push again."
+  git -C "$repo_root" status --short
+  exit 1
+fi
+
+exit 0
