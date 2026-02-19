@@ -97,7 +97,7 @@ PUBLISH = getattr(_cfg, "PUBLISH", {}) if _cfg else {}
 PUBLIC_URL_BASE = PUBLISH.get("PUBLIC_URL_BASE", "")
 
 # Canonical data location
-DATA_DIR = PATHS.get("DATA_DIR", r"YOUR_PATH_HERE")
+DATA_DIR = PATHS.get("DATA_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\data")
 UI_STATE_FILE = os.path.join(DATA_DIR, "ui_state.json")
 
 # DB location (allow env override)
@@ -105,14 +105,14 @@ DB_PATH = os.environ.get("AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.j
 TABLE_NAME = PUBLISH.get("REVIEW_QUEUE_TABLE", "review_queue")
 
 # Other folders
-INCOMING_DIR    = PATHS.get("INCOMING_DIR", r"YOUR_PATH_HERE")
-REJECTED_FOLDER = PATHS.get("REJECTED_DIR", r"YOUR_PATH_HERE")
-LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", r"YOUR_PATH_HERE")
-DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", r"YOUR_PATH_HERE")
-ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", r"YOUR_PATH_HERE")
+INCOMING_DIR    = PATHS.get("INCOMING_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\incoming")
+REJECTED_FOLDER = PATHS.get("REJECTED_DIR", r"C:\Users\ad341\Desktop\xxx\rejected")
+LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", r"C:\Users\ad341\amir2000\amir2000.nl\pic\images\new")
+DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", r"C:\Users\ad341\Desktop\xxx\new")
+ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", r"C:\Users\ad341\Pictures\amir2000photos\new")
 
 FONT_PATH      = resource_path(os.path.join("fonts", "Montserrat-Light.ttf"))
-WATERMARK_TEXT = "© YOUR_HOST\nPhotography"
+WATERMARK_TEXT = "© amir2000.nl\nPhotography"
 
 # Use the one true JSON in DATA_DIR
 USED_FILENAMES_JSON = os.path.join(DATA_DIR, "used_filenames.json")
@@ -131,7 +131,7 @@ except ModuleNotFoundError as e:
         f"Missing module: {missing}\n\n"
         "Fix:\n"
         "1) Install into your venv:\n"
-        "   YOUR_PATH_HERE -m pip install piexif\n"
+        "   C:\\Users\\ad341\\amir2000\\.venv\\Scripts\\python.exe -m pip install piexif\n"
         "2) Re-run review_editor via that venv python.\n"
     )
     print("[ERROR] " + msg.replace("\n", " | "))
@@ -323,8 +323,8 @@ class ReviewApp:
     def __init__(self, master: Tk):
         self.master = master
         # Restore last geometry if available
-        self._apply_ui_state(default_geometry="1500x1000")
-        self.master.resizable(False, False)
+        self._apply_ui_state(default_geometry="1700x1050")
+        self.master.resizable(True, True)
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
         self.master.title("Amir2000 Image Review & Publish")
 
@@ -349,7 +349,7 @@ class ReviewApp:
             messagebox.showinfo("No Images", "No images found to review.")
             self.master.destroy()
 
-    def _apply_ui_state(self, default_geometry: str = "1500x1000"):
+    def _apply_ui_state(self, default_geometry: str = "1700x1050"):
         geo = default_geometry
         try:
             if os.path.exists(UI_STATE_FILE):
@@ -499,8 +499,8 @@ class ReviewApp:
             Label(self.right_frame, text=label).grid(row=i, column=0, sticky='e')
 
             if label in ('Keywords', 'Caption', 'alt_text'):
-                t = Text(self.right_frame, height=3, width=60, wrap='word')
-                t.grid(row=i, column=1, sticky='w')
+                t = Text(self.right_frame, height=4, width=84, wrap='word')
+                t.grid(row=i, column=1, sticky='ew')
                 self.text_widgets[label] = t
             else:
                 v = StringVar()
@@ -528,6 +528,7 @@ class ReviewApp:
                             # Place a horizontal slider right under the QR entry
                     self.qr_row = i  # remember where QR lives to place slider on next row
 
+        self.right_frame.grid_columnconfigure(1, weight=1)
 
 
         Button(self.right_frame, text="Back",    command=self.back).grid(row=99, column=0)
@@ -1020,4 +1021,3 @@ if __name__ == "__main__":
     root = Tk()
     app  = ReviewApp(root)
     root.mainloop()
-

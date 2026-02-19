@@ -518,6 +518,86 @@ _UNCERTAIN_PHRASES: Sequence[str] = (
     "seems to be",
 )
 
+_LOWLAND_CONTEXT_HINTS: Set[str] = {
+    "netherlands",
+    "amsterdam",
+    "holland",
+    "dutch",
+    "polder",
+    "kanaal",
+    "canal",
+    "frankendael",
+}
+
+_LOWLAND_MOUNTAIN_TERMS: Set[str] = {
+    "mountain",
+    "mountains",
+    "ridge",
+    "ridgeline",
+    "alpine",
+    "foothill",
+    "foothills",
+    "peak",
+    "peaks",
+    "valley",
+    "basin",
+    "lake",
+    "lakes",
+}
+
+_LOWLAND_TEXT_REPLACEMENTS: Dict[str, str] = {
+    "high-elevation": "lowland",
+    "high elevation": "lowland",
+    "elevation": "lowland",
+    "upland": "lowland",
+    "mountain road": "road",
+    "mountain landscape": "landscape",
+    "mountain terrain": "open terrain",
+    "mountain scenery": "landscape",
+    "mountain backdrop": "open backdrop",
+    "mountain slopes": "slopes",
+    "valley floor": "open fields",
+    "mountain basin": "open lowland",
+    "distant mountains": "distant horizon",
+    "distant ridges": "distant horizon",
+    "ridgeline terrain": "open horizon",
+    "alpine setting": "lowland setting",
+    "lake": "waterway",
+    "lakes": "waterways",
+    "mountains": "open terrain",
+    "mountain": "open terrain",
+    "ridges": "horizon",
+    "ridgeline": "horizon",
+    "ridge": "horizon",
+    "alpine": "lowland",
+    "foothills": "fields",
+    "foothill": "field",
+    "valley": "open ground",
+    "peaks": "horizon",
+    "peak": "horizon",
+}
+
+_SUNRISE_HINT_TERMS: Set[str] = {"sunrise", "dawn", "daybreak"}
+_SUNSET_HINT_TERMS: Set[str] = {"sunset", "dusk", "twilight", "evening"}
+
+_SUNRISE_BLOCK_TERMS: Set[str] = {"sunset", "dusk", "twilight", "evening", "night"}
+_SUNSET_BLOCK_TERMS: Set[str] = {"sunrise", "dawn", "morning"}
+
+_SUNRISE_TEXT_REPLACEMENTS: Dict[str, str] = {
+    "after sunset": "after sunrise",
+    "sunset": "sunrise",
+    "dusk": "morning",
+    "twilight": "early morning",
+    "evening": "morning",
+}
+
+_SUNSET_TEXT_REPLACEMENTS: Dict[str, str] = {
+    "sunrise": "sunset",
+    "daybreak": "sunset",
+    "dawn": "sunset",
+    "morning": "evening",
+}
+
 _LOCATION_BAD_TOKENS: Set[str] = {
     "collection",
     "photography",
@@ -1114,6 +1194,208 @@ def _context_tail_keywords(folder: str, subject: str) -> List[str]:
     if kind == "landscape":
         return ["mountains", "lake", "forest", "river", "valley", "trail", "trees", "sky", "horizon", "ridgeline", "foothills", "woodland", "meadow", "terrain", "national park"]
     return ["landscape", "trees", "sky", "terrain", "horizon", "outdoors", "daylight", "nature", "environment", "scenery"]
+
+
+def _is_lowland_nl_context(folder: str, subject: str, location: str, file_name: str = "") -> bool:
+    file_stem = _clean_phrase(Path(file_name or "").stem)
+    blob = _norm_text_strict(f"{folder} {subject} {location} {file_stem}")
+    if not blob:
+        return False
+    hint_hits = sum(1 for hint in _LOWLAND_CONTEXT_HINTS if hint in blob)
+    if hint_hits <= 0:
+        return False
+    toks = set(blob.split())
+    if toks & _LOWLAND_MOUNTAIN_TERMS:
+        return False
+    return True
+
+
+def _filename_time_hints(file_name: str) -> Tuple[bool, bool]:
+    stem = _norm_text_strict(_clean_phrase(Path(file_name or "").stem))
+    if not stem:
+        return False, False
+    toks = set(stem.split())
+    sunrise_hint = bool(toks & _SUNRISE_HINT_TERMS)
+    sunset_hint = bool(toks & _SUNSET_HINT_TERMS)
+    if sunrise_hint and sunset_hint:
+        return False, False
+    return sunrise_hint, sunset_hint
+
+
+def _apply_phrase_replacements(text: str, replacements: Dict[str, str]) -> str:
+    out = str(text or "")
+    if not out or not replacements:
+        return out
+    for src, dst in sorted(replacements.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if not src:
+            continue
+        out = re.sub(r"\b" + re.escape(src) + r"\b", dst, out, flags=re.IGNORECASE)
+    return _WS_RE.sub(" ", out).strip()
+
+
+def _cleanup_guardrail_artifacts(text: str) -> str:
+    out = str(text or "")
+    if not out:
+        return out
+    out = re.sub(
+        r"\bopen terrain\s+(?:below|above|across|near|with|and)\s+open terrain\b",
+        "open terrain",
+        out,
+        flags=re.IGNORECASE,
+    )
+    out = _WS_RE.sub(" ", out).strip()
+    return out
+
+
+def _keyword_has_blocked_term(keyword: str, blocked_terms: Set[str]) -> bool:
+    if not blocked_terms:
+        return False
+    kn = _norm_text_strict(keyword)
+    if not kn:
+        return False
+    parts = set(kn.split())
+    if parts & blocked_terms:
+        return True
+    return any((" " in term) and (term in kn) for term in blocked_terms)
+
+
+def _refill_guarded_keywords(
+    *,
+    kw_list: Sequence[str],
+    keywords_n: int,
+    folder: str,
+    subject: str,
+    location: str,
+    caption: str,
+    alt_text: str,
+    blocked_terms: Set[str],
+    preferred_terms: Sequence[str],
+    lowland_context: bool,
+) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    target_n = max(0, int(keywords_n))
+
+    for kw in _clean_keywords_list(kw_list):
+        kn = _normalize_keyword(kw)
+        if not kn or kn in seen:
+            continue
+        if _keyword_has_blocked_term(kn, blocked_terms):
+            continue
+        seen.add(kn)
+        out.append(kn)
+
+    def _try_add(candidate: str) -> None:
+        if len(out) >= target_n:
+            return
+        kn = _normalize_keyword(candidate)
+        if not kn or kn in seen:
+            return
+        if kn in _KW_BANNED or kn in _KW_STOPWORDS:
+            return
+        if _keyword_has_blocked_term(kn, blocked_terms):
+            return
+        seen.add(kn)
+        out.append(kn)
+
+    for term in preferred_terms:
+        _try_add(term)
+
+    refill_pool: List[str] = []
+    refill_pool.extend(_extract_phrase_keywords(folder, subject, location, f"{caption} {alt_text}"))
+    refill_pool.extend(_visual_keyword_candidates(caption, alt_text, location))
+    refill_pool.extend(_context_tail_keywords(folder, subject))
+    if lowland_context:
+        refill_pool.extend(
+            [
+                "canal",
+                "polder",
+                "waterway",
+                "shoreline",
+                "fields",
+                "fog",
+                "mist",
+                "trees",
+                "park",
+                "amsterdam",
+                "netherlands",
+            ]
+        )
+
+    for cand in refill_pool:
+        _try_add(cand)
+
+    return _clean_keywords_list(out)[:target_n]
+
+
+def _apply_context_guardrails(
+    *,
+    caption: str,
+    alt_text: str,
+    kw_list: Sequence[str],
+    folder: str,
+    subject: str,
+    location: str,
+    file_name: str,
+    keywords_n: int,
+) -> Tuple[str, str, List[str]]:
+    cap = _clean_text_output(caption)
+    alt = _clean_text_output(alt_text)
+    kws = _clean_keywords_list(kw_list)
+
+    blocked_terms: Set[str] = set()
+    preferred_terms: List[str] = []
+    replacement_maps: List[Dict[str, str]] = []
+
+    lowland_context = _is_lowland_nl_context(folder, subject, location, file_name)
+    sunrise_hint, sunset_hint = _filename_time_hints(file_name)
+
+    if lowland_context:
+        blocked_terms |= set(_LOWLAND_MOUNTAIN_TERMS)
+        replacement_maps.append(_LOWLAND_TEXT_REPLACEMENTS)
+
+    if sunrise_hint:
+        blocked_terms |= set(_SUNRISE_BLOCK_TERMS)
+        preferred_terms.extend(["sunrise", "morning"])
+        replacement_maps.append(_SUNRISE_TEXT_REPLACEMENTS)
+    elif sunset_hint:
+        blocked_terms |= set(_SUNSET_BLOCK_TERMS)
+        preferred_terms.extend(["sunset", "evening"])
+        replacement_maps.append(_SUNSET_TEXT_REPLACEMENTS)
+
+    for mapping in replacement_maps:
+        cap = _apply_phrase_replacements(cap, mapping)
+        alt = _apply_phrase_replacements(alt, mapping)
+    cap = _cleanup_guardrail_artifacts(cap)
+    alt = _cleanup_guardrail_artifacts(alt)
+
+    cap = _sanitize_sentence(_deawkward_sentence(cap))
+    cap = _trim_caption(cap, max_words=24)
+    alt = _sanitize_sentence(_deawkward_sentence(alt))
+    alt = _trim_or_pad_alt(alt, min_words=10, max_words=18)
+
+    # trim/pad may reintroduce generic cues from template paths; enforce guardrails again
+    for mapping in replacement_maps:
+        cap = _apply_phrase_replacements(cap, mapping)
+        alt = _apply_phrase_replacements(alt, mapping)
+    cap = _cleanup_guardrail_artifacts(cap)
+    alt = _cleanup_guardrail_artifacts(alt)
+    cap = _trim_caption(_sanitize_sentence(_deawkward_sentence(cap)), max_words=24)
+    alt = _trim_or_pad_alt(_sanitize_sentence(_deawkward_sentence(alt)), min_words=10, max_words=18)
+
+    kws = _refill_guarded_keywords(
+        kw_list=kws,
+        keywords_n=keywords_n,
+        folder=folder,
+        subject=subject,
+        location=location,
+        caption=cap,
+        alt_text=alt,
+        blocked_terms=blocked_terms,
+        preferred_terms=preferred_terms,
+        lowland_context=lowland_context,
+    )
+    return cap, alt, kws
 
 
 def _split_keywords(raw: str) -> List[str]:
@@ -3647,6 +3929,7 @@ def _fallback_unique_payload(
     keywords_n: int,
     prefix_words: int,
     sequence_no: int = 0,
+    file_name: str = "",
 ) -> Optional[Tuple[str, str, str]]:
     seed = _stable_seed(folder, subject, location, str(image_path))
     for i in range(520):
@@ -3692,6 +3975,16 @@ def _fallback_unique_payload(
             keywords_n=keywords_n,
             variant=v + 23,
             sequence_no=sequence_no,
+        )
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
         )
         if len(kw_list) != keywords_n:
             continue
@@ -4543,6 +4836,16 @@ def process_one(
         alt_text = _sanitize_sentence(_deawkward_sentence(alt_text))
         alt_text = _trim_or_pad_alt(alt_text, min_words=10, max_words=18)
         kw_list = _clean_keywords_list(kw_list)
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
 
         # Rewrite weak model output before deterministic fallbacks.
         initial_score, initial_issues = _payload_quality_score(
@@ -4584,6 +4887,16 @@ def process_one(
                 if rewritten is None:
                     continue
                 rc, ra, rk = rewritten
+                rc, ra, rk = _apply_context_guardrails(
+                    caption=rc,
+                    alt_text=ra,
+                    kw_list=rk,
+                    folder=folder,
+                    subject=subject,
+                    location=location,
+                    file_name=file_name,
+                    keywords_n=keywords_n,
+                )
                 r_score, r_issues = _payload_quality_score(
                     caption=rc,
                     alt_text=ra,
@@ -4654,6 +4967,17 @@ def process_one(
                 sequence_no=sequence_no + 2,
             )
 
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
+
         if not _caption_not_garbage(caption):
             last_reason = "caption quality check failed"
             continue
@@ -4689,6 +5013,16 @@ def process_one(
             location=location,
             caption=caption,
             alt_text=alt_text,
+            keywords_n=keywords_n,
+        )
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
             keywords_n=keywords_n,
         )
 
@@ -4740,6 +5074,16 @@ def process_one(
                     location=location,
                     caption=rc,
                     alt_text=ra,
+                    keywords_n=keywords_n,
+                )
+                rc, ra, rk = _apply_context_guardrails(
+                    caption=rc,
+                    alt_text=ra,
+                    kw_list=rk,
+                    folder=folder,
+                    subject=subject,
+                    location=location,
+                    file_name=file_name,
                     keywords_n=keywords_n,
                 )
                 r_score, r_issues = _payload_quality_score(
@@ -4887,6 +5231,17 @@ def process_one(
             last_reason = why
             continue
 
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
+
         final_score, final_issues = _payload_quality_score(
             caption=caption,
             alt_text=alt_text,
@@ -4921,6 +5276,7 @@ def process_one(
         keywords_n=keywords_n,
         prefix_words=prefix_words_eff,
         sequence_no=sequence_no,
+        file_name=file_name,
     )
     if fallback is not None:
         cap, kws, alt = fallback
@@ -4952,6 +5308,16 @@ def process_one(
             keywords_n=keywords_n,
             variant=v + 53,
             sequence_no=sequence_no + i,
+        )
+        cap, alt, kws_list = _apply_context_guardrails(
+            caption=cap,
+            alt_text=alt,
+            kw_list=kws_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
         )
         if len(kws_list) != keywords_n:
             continue
