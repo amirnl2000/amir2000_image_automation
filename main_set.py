@@ -23,6 +23,22 @@ from utils.autofix import (
 
 
 _UDUP = re.compile(r"_+")
+_SUBJECT_INPUT_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_SUBJECT_UPPER_TOKENS = {
+    "eos",
+    "rf",
+    "ef",
+    "iso",
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "vi",
+    "vii",
+    "viii",
+    "ix",
+    "x",
+}
 
 
 def clean_token(s: str) -> str:
@@ -30,6 +46,28 @@ def clean_token(s: str) -> str:
     s = (s or "").strip().replace(" ", "_")
     s = _UDUP.sub("_", s)
     return s.strip("_")
+
+
+def _title_case_subject_input_text(text: str) -> str:
+    """Title-case manual Subject input while preserving separators."""
+    src = str(text or "").replace("\r", " ").replace("\n", " ")
+
+    def _repl(match: re.Match[str]) -> str:
+        tok = match.group(0)
+        if not tok:
+            return tok
+        tl = tok.lower()
+        if tl in _SUBJECT_UPPER_TOKENS:
+            return tl.upper()
+        if tok.isupper():
+            return tok
+        if any(ch.isdigit() for ch in tok):
+            if tok[:1].isalpha():
+                return "".join(ch.upper() if ch.isalpha() else ch for ch in tok)
+            return tok
+        return tok[:1].upper() + tok[1:].lower()
+
+    return _SUBJECT_INPUT_WORD_RE.sub(_repl, src)
 
 
 def clean_filename(name: str) -> str:
@@ -128,24 +166,24 @@ _cfg = _load_config()
 PATHS = getattr(_cfg, "PATHS", {}) if _cfg else {}
 
 DATA_DIR = PATHS.get(
-    "DATA_DIR", r"YOUR_PATH_HERE"
+    "DATA_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\data"
 )
 DB_PATH = os.environ.get(
     "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
 )
 INCOMING_DIR = PATHS.get(
-    "INCOMING_DIR", r"YOUR_PATH_HERE"
+    "INCOMING_DIR", r"C:\Users\ad341\amir2000\amir2000_image_automation\incoming"
 )
 LOCAL_SITE_IMAGES_BASE = PATHS.get(
     "LOCAL_SITE_IMAGES_BASE",
-    r"YOUR_PATH_HERE",
+    r"C:\Users\ad341\amir2000\amir2000.nl\pic\images\new",
 )
 
 BASE_PICK_DIR = PATHS.get(
-    "BASE_PICK_DIR", r"YOUR_PATH_HERE to be uploaded"
+    "BASE_PICK_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded"
 )
 STAGED_DIR = PATHS.get(
-    "STAGED_DIR", r"YOUR_PATH_HERE to be uploaded\staged"
+    "STAGED_DIR", r"C:\Users\ad341\Desktop\xxx\_images to be uploaded\staged"
 )
 
 # Keep relative “data/…” paths stable like main.py does
@@ -229,7 +267,7 @@ RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", r"YOUR_PATH_HERE"
+    "CAPTION_TERMS_DB", r"C:\Users\ad341\amir2000\Alamy\data\alamy_local.db"
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
@@ -1531,6 +1569,11 @@ class MultiSetApp:
         self._ui_disabled = False
         self._ai_subject_busy = False
         self._ai_subject_paths_sig: set[str] = set()
+        self._subject_internal_edit = False
+        self._subject_spell_after_id = None
+        self._location_spell_after_id = None
+        self._subject_last_spell_text = None
+        self._location_last_spell_text = None
 
         try:
             # Capture Tk callback exceptions in a stable file instead of silent exits.
@@ -1589,9 +1632,7 @@ class MultiSetApp:
         self.subject_txt.bind("<Return>", lambda e: "break")
 
         # live underline + right click menu + hover tooltip
-        self.subject_txt.bind(
-            "<KeyRelease>", lambda e: self._subject_spellcheck_update(), add="+"
-        )
+        self.subject_txt.bind("<KeyRelease>", self._on_subject_keyrelease, add="+")
         self.subject_txt.bind(
             "<Button-3>",
             lambda e: getattr(self, "_subject_context_menu", lambda _e: None)(e),
@@ -2575,8 +2616,9 @@ class MultiSetApp:
 
     def _add_set(self, files: list[str]) -> bool:
         subject_raw = (self._subject_get() or "").strip()
-
+        subject_raw = _title_case_subject_input_text(subject_raw)
         subject_raw = autofix_subject(subject_raw, AUTOFIX_DICT_FILE)
+        subject_raw = _title_case_subject_input_text(subject_raw)
         subject = clean_token(subject_raw)
 
         location_h = (self.location_var.get() or "").strip()
@@ -3417,7 +3459,7 @@ class MultiSetApp:
                 os.path.join(os.path.dirname(DATA_DIR), ".venv", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv_cuda", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv312", "Scripts", "python.exe"),
-                r"YOUR_PATH_HERE",
+                r"C:\\Users\\ad341\\amir2000\\.venv\\Scripts\\python.exe",
             ]
 
             _py_mm_cache = {}
@@ -4265,7 +4307,7 @@ class MultiSetApp:
         return (s or "").replace("\n", " ").replace("_", " ").strip()
 
     def _subject_set(self, s: str):
-        s = (s or "").replace("\n", " ").strip()
+        s = _title_case_subject_input_text((s or "").replace("\n", " ").strip())
         try:
             self.subject_var.set(s)
         except Exception:
@@ -4273,10 +4315,67 @@ class MultiSetApp:
 
         self.subject_txt.delete("1.0", "end")
         self.subject_txt.insert("1.0", s)
+        self._subject_last_spell_text = None
         self._subject_spellcheck_update()
 
-    def _on_subject_change(self, event=None):
-        self._subject_spellcheck_update()
+    def _on_subject_keyrelease(self, _ev=None):
+        self._subject_apply_title_case()
+        self._schedule_subject_spellcheck(delay_ms=120)
+
+    def _subject_apply_title_case(self):
+        if getattr(self, "_subject_internal_edit", False):
+            return
+        try:
+            raw = self.subject_txt.get("1.0", "end-1c")
+            insert_off = int(self.subject_txt.count("1.0", "insert", "chars")[0])
+        except Exception:
+            return
+
+        titled = _title_case_subject_input_text(raw)
+        if titled != raw:
+            try:
+                self._subject_internal_edit = True
+                self.subject_txt.delete("1.0", "end")
+                self.subject_txt.insert("1.0", titled)
+                insert_off = max(0, min(insert_off, len(titled)))
+                self.subject_txt.mark_set("insert", f"1.0+{insert_off}c")
+            except Exception:
+                pass
+            finally:
+                self._subject_internal_edit = False
+
+        try:
+            self.subject_var.set((titled or "").replace("\n", " ").replace("_", " ").strip())
+        except Exception:
+            pass
+
+    def _schedule_subject_spellcheck(self, delay_ms: int = 100):
+        try:
+            if self._subject_spell_after_id is not None:
+                self.root.after_cancel(self._subject_spell_after_id)
+        except Exception:
+            pass
+        try:
+            self._subject_spell_after_id = self.root.after(
+                max(0, int(delay_ms)),
+                self._subject_spellcheck_update,
+            )
+        except Exception:
+            self._subject_spell_after_id = None
+
+    def _schedule_location_spellcheck(self, delay_ms: int = 100):
+        try:
+            if self._location_spell_after_id is not None:
+                self.root.after_cancel(self._location_spell_after_id)
+        except Exception:
+            pass
+        try:
+            self._location_spell_after_id = self.root.after(
+                max(0, int(delay_ms)),
+                self._location_spellcheck_update,
+            )
+        except Exception:
+            self._location_spell_after_id = None
 
     def _refresh_spellcheck_status(self):
         try:
@@ -4292,22 +4391,35 @@ class MultiSetApp:
             pass
 
     def _on_subject_change(self, _ev=None):
+        self._subject_apply_title_case()
         s = self._subject_get()
         self.subject_var.set(s)
+        self._subject_last_spell_text = None
         self._subject_spellcheck_update()
 
     def _subject_spellcheck_update(self):
+        self._subject_spell_after_id = None
         try:
             self.subject_txt.tag_remove("misspell", "1.0", "end")
         except Exception:
             return
 
         text = self._subject_get()
+        if self._subject_last_spell_text == text:
+            return
+        self._subject_last_spell_text = text
         try:
             self.subject_var.set(text)
         except Exception:
             pass
-        issues = find_misspellings(text, DATA_DIR)
+        try:
+            issues = find_misspellings(text, DATA_DIR)
+        except Exception as e:
+            issues = []
+            try:
+                self._runlog("SPELLCHECK_SUBJECT_ERR", f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
 
         self._subject_issues = issues
 
@@ -4434,21 +4546,33 @@ class MultiSetApp:
         except Exception:
             pass
 
+        self._location_last_spell_text = None
         self._location_spellcheck_update()
 
     def _on_location_change(self, _ev=None):
         s = self._location_get()
         self.location_var.set(s)
-        self._location_spellcheck_update()
+        self._schedule_location_spellcheck(delay_ms=120)
 
     def _location_spellcheck_update(self):
+        self._location_spell_after_id = None
         try:
             self.location_txt.tag_remove("misspell", "1.0", "end")
         except Exception:
             return
 
         text = self._location_get()
-        issues = find_misspellings(text, DATA_DIR)
+        if self._location_last_spell_text == text:
+            return
+        self._location_last_spell_text = text
+        try:
+            issues = find_misspellings(text, DATA_DIR)
+        except Exception as e:
+            issues = []
+            try:
+                self._runlog("SPELLCHECK_LOCATION_ERR", f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
         self._location_issues = issues
 
         for it in issues:
@@ -4760,6 +4884,7 @@ class MultiSetApp:
                 return
             if suggestion.lower() == typed.lower():
                 self.location_var.set(suggestion)
+                self._schedule_location_spellcheck(delay_ms=120)
                 return
 
             self.location_txt.delete("1.0", "end")
@@ -4769,13 +4894,16 @@ class MultiSetApp:
             self.location_txt.tag_add("sel", i1, "end-1c")
             self.location_txt.mark_set("insert", i1)
             self.location_var.set(suggestion)
-            self._location_spellcheck_update()
+            self._schedule_location_spellcheck(delay_ms=120)
         except Exception:
             pass
 
     def _on_location_keyrelease(self, ev=None):
-        # keep existing behavior
-        self._on_location_change(ev)
+        try:
+            self.location_var.set(self._location_get())
+        except Exception:
+            pass
+        self._schedule_location_spellcheck(delay_ms=120)
 
         # do not fight navigation keys
         try:
@@ -5031,4 +5159,3 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
-
