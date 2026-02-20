@@ -2,6 +2,7 @@ import os
 import re
 import json
 import time
+import glob
 import shutil
 import tempfile
 import warnings
@@ -54,10 +55,24 @@ def save_used_filenames(used: set[str], path: str | None = None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     used = set(used)
 
+    def _prune_backups(keep: int = 20):
+        try:
+            pattern = f"{path}.bak_*"
+            files = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for old in files[max(1, int(keep)):]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     # backup (best effort)
     try:
         if os.path.exists(path):
             shutil.copy2(path, f"{path}.bak_{int(time.time())}")
+            _prune_backups(keep=20)
     except Exception:
         pass
 

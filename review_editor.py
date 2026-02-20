@@ -96,21 +96,8 @@ PUBLISH = getattr(_cfg, "PUBLISH", {}) if _cfg else {}
 # fallback to an empty string.
 PUBLIC_URL_BASE = PUBLISH.get("PUBLIC_URL_BASE", "")
 
-# Resolve repo-rooted defaults so sanitized code never carries machine-local paths.
-APP_DIR = (
-    os.path.dirname(sys.executable)
-    if getattr(sys, "frozen", False)
-    else os.path.dirname(os.path.abspath(__file__))
-)
-DEFAULT_DATA_DIR = os.path.join(APP_DIR, "data")
-DEFAULT_INCOMING_DIR = os.path.join(APP_DIR, "incoming")
-DEFAULT_REJECTED_DIR = os.path.join(APP_DIR, "rejected")
-DEFAULT_SITE_IMAGES_BASE = os.path.join(APP_DIR, "site_images")
-DEFAULT_EXPORT_DIR = os.path.join(APP_DIR, "export")
-DEFAULT_ARCHIVE_DIR = os.path.join(APP_DIR, "archive")
-
 # Canonical data location
-DATA_DIR = PATHS.get("DATA_DIR", DEFAULT_DATA_DIR)
+DATA_DIR = PATHS.get("DATA_DIR", r"YOUR_PATH_HERE")
 UI_STATE_FILE = os.path.join(DATA_DIR, "ui_state.json")
 
 # DB location (allow env override)
@@ -118,14 +105,14 @@ DB_PATH = os.environ.get("AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.j
 TABLE_NAME = PUBLISH.get("REVIEW_QUEUE_TABLE", "review_queue")
 
 # Other folders
-INCOMING_DIR    = PATHS.get("INCOMING_DIR", DEFAULT_INCOMING_DIR)
-REJECTED_FOLDER = PATHS.get("REJECTED_DIR", DEFAULT_REJECTED_DIR)
-LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", DEFAULT_SITE_IMAGES_BASE)
-DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", DEFAULT_EXPORT_DIR)
-ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", DEFAULT_ARCHIVE_DIR)
+INCOMING_DIR    = PATHS.get("INCOMING_DIR", r"YOUR_PATH_HERE")
+REJECTED_FOLDER = PATHS.get("REJECTED_DIR", r"YOUR_PATH_HERE")
+LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", r"YOUR_PATH_HERE")
+DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", r"YOUR_PATH_HERE")
+ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", r"YOUR_PATH_HERE")
 
 FONT_PATH      = resource_path(os.path.join("fonts", "Montserrat-Light.ttf"))
-WATERMARK_TEXT = "© amir2000.nl\nPhotography"
+WATERMARK_TEXT = "© YOUR_HOST\nPhotography"
 
 # Use the one true JSON in DATA_DIR
 USED_FILENAMES_JSON = os.path.join(DATA_DIR, "used_filenames.json")
@@ -143,9 +130,9 @@ except ModuleNotFoundError as e:
         "Missing dependency while starting review_editor.\n\n"
         f"Missing module: {missing}\n\n"
         "Fix:\n"
-        "1) Install into your active Python/venv:\n"
-        "   python -m pip install piexif\n"
-        "2) Re-run review_editor via that same Python environment.\n"
+        "1) Install into your venv:\n"
+        "   YOUR_PATH_HERE -m pip install piexif\n"
+        "2) Re-run review_editor via that venv python.\n"
     )
     print("[ERROR] " + msg.replace("\n", " | "))
 
@@ -258,16 +245,30 @@ def save_used_filenames(used: set[str]):
       - backup existing file
       - atomic write via temp file
     """
-    import time, tempfile, shutil
+    import time, tempfile, shutil, glob
     os.makedirs(DATA_DIR, exist_ok=True)
 
     used = set(used)
+
+    def _prune_used_backups(keep: int = 20) -> None:
+        try:
+            pat = f"{USED_FILENAMES_JSON}.bak_*"
+            files = [p for p in glob.glob(pat) if os.path.isfile(p)]
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for old in files[max(1, int(keep)):]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # backup
     try:
         if os.path.exists(USED_FILENAMES_JSON):
             bak = f"{USED_FILENAMES_JSON}.bak_{int(time.time())}"
             shutil.copy2(USED_FILENAMES_JSON, bak)
+            _prune_used_backups(keep=20)
     except Exception:
         pass
 
@@ -1034,3 +1035,4 @@ if __name__ == "__main__":
     root = Tk()
     app  = ReviewApp(root)
     root.mainloop()
+

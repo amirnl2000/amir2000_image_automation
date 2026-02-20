@@ -53,7 +53,6 @@ This project automates the full path from raw image intake to reviewed metadata 
 |   |-- setup_venv313_full.ps1       # Create/install runtime environment
 |   |-- preflight_multiset.ps1       # Pre-build validations
 |   |-- build_multiset.ps1           # EXE build script
-|   |-- sanitize_git_repo.ps1        # Auto-sanitize + leak scan before git push
 |   `-- copy_pack.ps1                # Curated backup pack creator
 |
 |-- utils/                           # Shared workflow modules
@@ -189,28 +188,6 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clea
 
 - Create a curated runnable backup pack:
   - `helpers/copy_pack.ps1`
-
-## Git Leak Guard (Path/Secret Safety)
-
-Enable once in this clone:
-
-```powershell
-Set-Location "YOUR_PATH_HERE"
-git config core.hooksPath .githooks
-```
-
-What it does:
-
-- `.githooks/pre-push` runs `helpers/sanitize_git_repo.ps1 -Fix`
-- If files are auto-updated, push is blocked so you can commit sanitized changes first
-- If any leak pattern still remains, push is blocked
-
-Manual run (any time):
-
-```powershell
-Set-Location "YOUR_PATH_HERE"
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\sanitize_git_repo.ps1 -Fix
-```
 
 ## Documentation Index
 

@@ -1,0 +1,2 @@
+DB removed: data\photos_info_revamp.db
+DB removed: data\review.db

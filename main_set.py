@@ -165,28 +165,33 @@ def _load_config():
 _cfg = _load_config()
 PATHS = getattr(_cfg, "PATHS", {}) if _cfg else {}
 
-# Keep relative "data/..." paths stable like main.py does
+DATA_DIR = PATHS.get(
+    "DATA_DIR", r"YOUR_PATH_HERE"
+)
+DB_PATH = os.environ.get(
+    "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
+)
+INCOMING_DIR = PATHS.get(
+    "INCOMING_DIR", r"YOUR_PATH_HERE"
+)
+LOCAL_SITE_IMAGES_BASE = PATHS.get(
+    "LOCAL_SITE_IMAGES_BASE",
+    r"YOUR_PATH_HERE",
+)
+
+BASE_PICK_DIR = PATHS.get(
+    "BASE_PICK_DIR", r"YOUR_PATH_HERE to be uploaded"
+)
+STAGED_DIR = PATHS.get(
+    "STAGED_DIR", r"YOUR_PATH_HERE to be uploaded\staged"
+)
+
+# Keep relative “data/…” paths stable like main.py does
 APP_DIR = (
     os.path.dirname(sys.executable)
     if getattr(sys, "frozen", False)
     else os.path.dirname(os.path.abspath(__file__))
 )
-
-DEFAULT_DATA_DIR = os.path.join(APP_DIR, "data")
-DEFAULT_INCOMING_DIR = os.path.join(APP_DIR, "incoming")
-DEFAULT_SITE_IMAGES_BASE = os.path.join(APP_DIR, "site_images")
-DEFAULT_BASE_PICK_DIR = DEFAULT_INCOMING_DIR
-DEFAULT_STAGED_DIR = os.path.join(DEFAULT_INCOMING_DIR, "staged")
-
-DATA_DIR = PATHS.get("DATA_DIR", DEFAULT_DATA_DIR)
-DB_PATH = os.environ.get(
-    "AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db"))
-)
-INCOMING_DIR = PATHS.get("INCOMING_DIR", DEFAULT_INCOMING_DIR)
-LOCAL_SITE_IMAGES_BASE = PATHS.get("LOCAL_SITE_IMAGES_BASE", DEFAULT_SITE_IMAGES_BASE)
-
-BASE_PICK_DIR = PATHS.get("BASE_PICK_DIR", DEFAULT_BASE_PICK_DIR)
-STAGED_DIR = PATHS.get("STAGED_DIR", DEFAULT_STAGED_DIR)
 
 
 LOCATION_FILE = os.path.join(DATA_DIR, "location_list.json")
@@ -220,8 +225,11 @@ OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL_SUBJECT", "llama3.2-vision:latest"
 )  # subject suggestions (vision)
 OLLAMA_MODEL_CAPTION = os.getenv(
-    "OLLAMA_MODEL_CAPTION", "minicpm-v:latest"
-)  # caption/keywords/alt prefill default (better grounding for mixed sets)
+    "OLLAMA_MODEL_CAPTION", "llava:13b"
+)  # caption/keywords/alt prefill primary
+OLLAMA_MODEL_CAPTION_FALLBACK = os.getenv(
+    "OLLAMA_MODEL_CAPTION_FALLBACK", "llava:34b"
+).strip()  # used only on failed rows
 SUBJECT_MODEL_CANDIDATES_ENV = os.getenv(
     "OLLAMA_MODEL_SUBJECT_CANDIDATES", f"{OLLAMA_MODEL_CAPTION},{OLLAMA_MODEL}"
 )
@@ -241,9 +249,9 @@ SUBJECT_JPEG_QUALITY = max(
 THUMB_MAX = 1024  # more detail for species and fine subjects (slower)
 # Caption stage opts only (34b on 8GB GPU benefits from smaller ctx)
 OLLAMA_OPTS = {
-    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "3072")),
-    "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "120")),
-    "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.2")),
+    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "4096")),
+    "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "180")),
+    "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.1")),
 }
 OLLAMA_WARM_ON_SCORING = os.getenv("OLLAMA_WARM_ON_SCORING", "1") == "1"
 OLLAMA_WARM_TIMEOUT_SEC = int(os.getenv("OLLAMA_WARM_TIMEOUT_SEC", "45"))
@@ -252,17 +260,18 @@ OLLAMA_WARM_KEEP_ALIVE = os.getenv("OLLAMA_WARM_KEEP_ALIVE", "45m")
 # caption_review_local.py tuning (used by Stage 6)
 CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "15"))
 CAPTION_REWRITE_WEAK = os.getenv("CAPTION_REWRITE_WEAK", "1") == "1"
-CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "2"))
-CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "86"))
+CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "3"))
+CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "90"))
 CAPTION_SERIES_LARGE_THRESHOLD = int(os.getenv("CAPTION_SERIES_LARGE_THRESHOLD", "8"))
 CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "5"))
+CAPTION_FALLBACK_MAX_TRIES = int(os.getenv("CAPTION_FALLBACK_MAX_TRIES", "2"))
 CAPTION_PREFIX_WORDS = int(os.getenv("CAPTION_PREFIX_WORDS", "8"))
 CAPTION_FAIL_ON_ROW_ERRORS = os.getenv("CAPTION_FAIL_ON_ROW_ERRORS", "0") == "1"
 RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", ""
+    "CAPTION_TERMS_DB", r"YOUR_PATH_HERE"
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
@@ -3454,7 +3463,7 @@ class MultiSetApp:
                 os.path.join(os.path.dirname(DATA_DIR), ".venv", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv_cuda", "Scripts", "python.exe"),
                 os.path.join(os.path.dirname(DATA_DIR), ".venv312", "Scripts", "python.exe"),
-                os.path.join(os.path.expanduser("~"), "amir2000", ".venv", "Scripts", "python.exe"),
+                r"YOUR_PATH_HERE",
             ]
 
             _py_mm_cache = {}
@@ -3572,8 +3581,17 @@ class MultiSetApp:
                             return
                         with sqlite3.connect(DB_PATH) as _c:
                             _c.executemany(
-                                f"UPDATE {TABLE_NAME} SET QC_Status=? WHERE id=? AND QC_Status=?",
-                                [("NA", i, "ScoringFailed") for i in inserted_ids],
+                                f"""
+                                UPDATE {TABLE_NAME}
+                                   SET QC_Status =
+                                         CASE WHEN QC_Status='ScoringFailed' THEN 'NA'
+                                              ELSE QC_Status END,
+                                       Review_Status =
+                                         CASE WHEN COALESCE(Review_Status,'')='Error' THEN 'Queued'
+                                              ELSE Review_Status END
+                                 WHERE id=?
+                                """,
+                                [(i,) for i in inserted_ids],
                             )
                             _c.commit()
                     except Exception:
@@ -3886,6 +3904,12 @@ class MultiSetApp:
                         "--no-tqdm",
                     ]
 
+                    if OLLAMA_MODEL_CAPTION_FALLBACK and OLLAMA_MODEL_CAPTION_FALLBACK != OLLAMA_MODEL_CAPTION:
+                        prefill_args_base += [
+                            "--fallback-model", OLLAMA_MODEL_CAPTION_FALLBACK,
+                            "--fallback-max-tries", str(max(1, int(CAPTION_FALLBACK_MAX_TRIES))),
+                        ]
+
                     if CAPTION_REWRITE_WEAK:
                         prefill_args_base.append("--rewrite-weak")
 
@@ -3896,7 +3920,13 @@ class MultiSetApp:
                             "--terms-min-precision", str(CAPTION_TERMS_MIN_PRECISION),
                         ]
 
-                    print(f"[INFO] Prefilling captions via '{OLLAMA_MODEL_CAPTION}' for {queued_count} queued rows...")
+                    if OLLAMA_MODEL_CAPTION_FALLBACK and OLLAMA_MODEL_CAPTION_FALLBACK != OLLAMA_MODEL_CAPTION:
+                        print(
+                            f"[INFO] Prefilling captions via '{OLLAMA_MODEL_CAPTION}' "
+                            f"(fallback on fail: '{OLLAMA_MODEL_CAPTION_FALLBACK}') for {queued_count} queued rows..."
+                        )
+                    else:
+                        print(f"[INFO] Prefilling captions via '{OLLAMA_MODEL_CAPTION}' for {queued_count} queued rows...")
                     try:
                         chunk_size = max(0, int(CAPTION_PREFILL_CHUNK_SIZE))
                         crash_retry_budget = max(0, int(CAPTION_NATIVE_CRASH_RETRIES))
@@ -4174,6 +4204,17 @@ class MultiSetApp:
 
                         _bak = f"{USED_NAMES}.bak_{int(time.time())}"
                         shutil.copy2(USED_NAMES, _bak)
+                        try:
+                            _pat = f"{USED_NAMES}.bak_*"
+                            _baks = [p for p in glob.glob(_pat) if os.path.isfile(p)]
+                            _baks.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                            for _old in _baks[20:]:
+                                try:
+                                    os.remove(_old)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
 
                         _removed = 0
                         if isinstance(_data, list):
@@ -5154,3 +5195,4 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
+
