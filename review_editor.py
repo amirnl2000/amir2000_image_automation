@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import subprocess
 import json
-from tkinter import Tk, Label, Entry, Button, StringVar, messagebox, Frame, Text, END, DISABLED
+from tkinter import Tk, Label, Entry, Button, StringVar, messagebox, Frame, Text, END, DISABLED, Menu
 from tkinter import ttk
 from PIL import Image, ImageTk
 from datetime import datetime
@@ -149,6 +149,7 @@ except ModuleNotFoundError as e:
 
 from utils.file_namer import generate_unique_filename
 from utils.caption_keyword_generator import generate_caption, generate_keywords
+from utils.autofix import find_misspellings, add_spell_exception, spellcheck_status
 
 
 QR_EXPLANATION = (
@@ -351,6 +352,9 @@ class ReviewApp:
         self.idx = 0
         self.field_vars: dict[str, StringVar] = {}
         self.text_widgets: dict[str, Text] = {}
+        self._text_spell_after_ids: dict[str, str] = {}
+        self._text_spell_hits: dict[str, list[dict]] = {}
+        self._spellcheck_ok_cached: bool | None = None
         self.file_ops_queue: list[tuple[dict, dict]] = []
         self._wants_upload = False
         self._qr_updating = False  # guard to prevent slider->callback recursion
@@ -407,6 +411,184 @@ class ReviewApp:
         except Exception:
             pass
         self.master.destroy()
+
+    # ---------- Shared dictionary spellcheck for editable text fields ----------
+    def _spellcheck_available(self) -> bool:
+        if self._spellcheck_ok_cached is not None:
+            return bool(self._spellcheck_ok_cached)
+        try:
+            ok, _reason = spellcheck_status(DATA_DIR)
+            self._spellcheck_ok_cached = bool(ok)
+        except Exception:
+            self._spellcheck_ok_cached = False
+        return bool(self._spellcheck_ok_cached)
+
+    def _schedule_text_spellcheck(self, field_name: str, delay_ms: int = 120):
+        if field_name not in self.text_widgets:
+            return
+        old = self._text_spell_after_ids.get(field_name)
+        if old:
+            try:
+                self.master.after_cancel(old)
+            except Exception:
+                pass
+        try:
+            self._text_spell_after_ids[field_name] = self.master.after(
+                max(0, int(delay_ms)),
+                lambda k=field_name: self._text_spellcheck_update(k),
+            )
+        except Exception:
+            pass
+
+    def _refresh_text_spellchecks(self):
+        for k in ("Keywords", "Caption", "alt_text"):
+            if k in self.text_widgets:
+                self._text_spellcheck_update(k)
+
+    def _text_spellcheck_update(self, field_name: str):
+        self._text_spell_after_ids.pop(field_name, None)
+        w = self.text_widgets.get(field_name)
+        if not w:
+            return
+        try:
+            w.tag_remove("spell_miss", "1.0", END)
+        except Exception:
+            pass
+
+        txt = ""
+        try:
+            txt = w.get("1.0", "end-1c")
+        except Exception:
+            txt = ""
+        if not txt.strip():
+            self._text_spell_hits[field_name] = []
+            return
+        if not self._spellcheck_available():
+            self._text_spell_hits[field_name] = []
+            return
+
+        try:
+            hits = find_misspellings(txt, DATA_DIR)
+        except Exception:
+            hits = []
+        self._text_spell_hits[field_name] = list(hits or [])
+
+        for h in self._text_spell_hits[field_name]:
+            try:
+                s = int(h.get("start", -1))
+                e = int(h.get("end", -1))
+            except Exception:
+                continue
+            if s < 0 or e <= s:
+                continue
+            try:
+                w.tag_add("spell_miss", f"1.0 + {s} chars", f"1.0 + {e} chars")
+            except Exception:
+                continue
+
+    @staticmethod
+    def _apply_case_like(original: str, replacement: str) -> str:
+        if not replacement:
+            return original
+        if (original or "").isupper():
+            return original
+        if original[:1].isupper() and original[1:].islower():
+            return replacement[:1].upper() + replacement[1:]
+        return replacement
+
+    def _text_spell_context_menu(self, ev, field_name: str):
+        w = self.text_widgets.get(field_name)
+        if not w:
+            return
+        try:
+            w.focus_set()
+            click_idx = w.index(f"@{ev.x},{ev.y}")
+        except Exception:
+            return
+
+        # Ensure hit list is fresh enough for this widget content.
+        self._text_spellcheck_update(field_name)
+        hits = self._text_spell_hits.get(field_name, [])
+        click_off = 0
+        try:
+            click_off = len(w.get("1.0", click_idx))
+        except Exception:
+            click_off = 0
+
+        hit = None
+        for h in hits:
+            try:
+                s = int(h.get("start", -1))
+                e = int(h.get("end", -1))
+            except Exception:
+                continue
+            if s <= click_off < e:
+                hit = h
+                break
+
+        menu = Menu(self.master, tearoff=0)
+
+        if hit:
+            word = str(hit.get("word") or "").strip()
+            sug = str(hit.get("suggestion") or "").strip()
+            s = int(hit.get("start", 0))
+            e = int(hit.get("end", s))
+            start_idx = f"1.0 + {s} chars"
+            end_idx = f"1.0 + {e} chars"
+
+            if sug:
+                def do_replace():
+                    repl = self._apply_case_like(word, sug)
+                    try:
+                        w.delete(start_idx, end_idx)
+                        w.insert(start_idx, repl)
+                    except Exception:
+                        return
+                    self._schedule_text_spellcheck(field_name, delay_ms=30)
+
+                menu.add_command(label=f"Replace with: {sug}", command=do_replace)
+
+            def do_keep_word():
+                try:
+                    add_spell_exception(word, DATA_DIR)
+                except Exception:
+                    pass
+                self._spellcheck_ok_cached = None
+                self._refresh_text_spellchecks()
+
+            menu.add_command(label=f"Keep term (add to exceptions): {word}", command=do_keep_word)
+            menu.add_separator()
+
+        # Optional phrase keep from selection
+        try:
+            sel = (w.get("sel.first", "sel.last") or "").strip()
+        except Exception:
+            sel = ""
+        if sel:
+            short_sel = sel if len(sel) <= 42 else (sel[:39] + "...")
+
+            def do_keep_selection():
+                try:
+                    add_spell_exception(sel, DATA_DIR)
+                except Exception:
+                    pass
+                self._spellcheck_ok_cached = None
+                self._refresh_text_spellchecks()
+
+            menu.add_command(
+                label=f"Keep selection (add to exceptions): {short_sel}",
+                command=do_keep_selection,
+            )
+        elif not hit:
+            menu.add_command(label="No spelling suggestion here", state="disabled")
+
+        try:
+            menu.tk_popup(ev.x_root, ev.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
 
     def get_images_to_review(self) -> list[dict]:
@@ -515,6 +697,13 @@ class ReviewApp:
             if label in ('Keywords', 'Caption', 'alt_text'):
                 t = Text(self.right_frame, height=4, width=84, wrap='word')
                 t.grid(row=i, column=1, sticky='ew')
+                try:
+                    t.tag_configure("spell_miss", underline=1, foreground="#b00020")
+                except Exception:
+                    pass
+                t.bind("<KeyRelease>", lambda e, k=label: self._schedule_text_spellcheck(k), add="+")
+                t.bind("<<Paste>>", lambda e, k=label: self._schedule_text_spellcheck(k), add="+")
+                t.bind("<Button-3>", lambda e, k=label: self._text_spell_context_menu(e, k), add="+")
                 self.text_widgets[label] = t
             else:
                 v = StringVar()
@@ -631,6 +820,9 @@ class ReviewApp:
         cur_qc = self.field_vars.get('QC_Status').get()
         if not cur_qc:
             self.field_vars['QC_Status'].set(qc_status(self.field_vars.get('QR').get()))
+
+        # Refresh shared dictionary spellcheck overlays for editable text fields.
+        self._refresh_text_spellchecks()
 
         # Keep the QR slider synced with the freshly loaded value (guard re-entrancy)
         try:

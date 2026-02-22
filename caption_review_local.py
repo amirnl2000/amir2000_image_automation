@@ -218,6 +218,9 @@ _BAD_PHRASES = (
     "american west",
     "metropolitan street setting",
     "cityscape view of urban scene",
+    "surrounding landscape context",
+    "open outdoor setting",
+    "scene view of scene",
 )
 
 _QUALITY_WEAK_TOKENS: Set[str] = {
@@ -540,10 +543,25 @@ _LOWLAND_MOUNTAIN_TERMS: Set[str] = {
     "alpine",
     "foothill",
     "foothills",
+    "hill",
+    "hills",
     "peak",
     "peaks",
     "valley",
     "basin",
+    "slope",
+    "slopes",
+    "ridgelines",
+    "rock",
+    "rocks",
+    "rocky",
+    "rugged",
+    "cliff",
+    "cliffs",
+    "upland",
+    "uplands",
+    "highland",
+    "highlands",
     "lake",
     "lakes",
 }
@@ -555,27 +573,27 @@ _LOWLAND_TEXT_REPLACEMENTS: Dict[str, str] = {
     "upland": "lowland",
     "mountain road": "road",
     "mountain landscape": "landscape",
-    "mountain terrain": "open terrain",
+    "mountain terrain": "landscape",
     "mountain scenery": "landscape",
-    "mountain backdrop": "open backdrop",
-    "mountain slopes": "slopes",
-    "valley floor": "open fields",
-    "mountain basin": "open lowland",
+    "mountain backdrop": "background",
+    "mountain slopes": "tree line",
+    "valley floor": "open area",
+    "mountain basin": "open area",
     "distant mountains": "distant horizon",
     "distant ridges": "distant horizon",
-    "ridgeline terrain": "open horizon",
+    "ridgeline terrain": "horizon line",
     "alpine setting": "lowland setting",
     "lake": "waterway",
     "lakes": "waterways",
-    "mountains": "open terrain",
-    "mountain": "open terrain",
+    "mountains": "distant background",
+    "mountain": "background",
     "ridges": "horizon",
     "ridgeline": "horizon",
     "ridge": "horizon",
     "alpine": "lowland",
     "foothills": "fields",
     "foothill": "field",
-    "valley": "open ground",
+    "valley": "open area",
     "peaks": "horizon",
     "peak": "horizon",
 }
@@ -638,10 +656,23 @@ _AMSTERDAM_FORCE_BLOCK_TERMS: Set[str] = {
     "rivers",
     "lake",
     "lakes",
+    "terrain",
     "mountain",
     "mountains",
+    "ridge",
+    "ridges",
+    "ridgeline",
+    "ridgelines",
     "valley",
     "valleys",
+    "hill",
+    "hills",
+    "slope",
+    "slopes",
+    "rock",
+    "rocks",
+    "rocky",
+    "rugged",
     "alpine",
     "foothill",
     "foothills",
@@ -839,19 +870,72 @@ def _extract_phrase_keywords(folder: str, subject: str, location: str, caption: 
     if loc_norm and loc_norm in _KNOWN_LOCATION_PHRASES:
         add(loc_norm)
 
-    for m in re.finditer(r"\b([a-z]+(?: [a-z]+){0,3} (?:national park|state park|national forest|national monument))\b", src):
-        add(m.group(1))
-    for m in re.finditer(r"\b([a-z]+(?: [a-z]+){0,2} city)\b", src):
-        add(m.group(1))
-    for m in re.finditer(r"\b(downtown [a-z]+(?: [a-z]+)?)\b", src):
-        add(m.group(1))
+    # Avoid regex-engine edge cases on large/odd strings by using token-window scans.
+    toks = [t for t in src.split() if t]
+    n = len(toks)
 
-    # Generic named-place extraction for common geo/location phrase endings.
-    for m in re.finditer(
-        r"\b([a-z]+(?: [a-z]+){0,3} (?:road|street|avenue|boulevard|bridge|park|square|plaza|harbor|airport|station|tower|lake|river|district|island|bay))\b",
-        src,
-    ):
-        add(m.group(1))
+    special_suffix2: Set[Tuple[str, str]] = {
+        ("national", "park"),
+        ("state", "park"),
+        ("national", "forest"),
+        ("national", "monument"),
+    }
+    generic_suffix1: Set[str] = {
+        "road",
+        "street",
+        "avenue",
+        "boulevard",
+        "bridge",
+        "park",
+        "square",
+        "plaza",
+        "harbor",
+        "airport",
+        "station",
+        "tower",
+        "lake",
+        "river",
+        "district",
+        "island",
+        "bay",
+    }
+
+    # 1..4-word prefix + 2-word suffix => 3..6 words total
+    for i in range(n):
+        for size in range(3, 7):
+            j = i + size
+            if j > n:
+                break
+            if (toks[j - 2], toks[j - 1]) in special_suffix2:
+                add(" ".join(toks[i:j]))
+
+    # 1..3-word prefix + "city" => 2..4 words total
+    for i in range(n):
+        for size in range(2, 5):
+            j = i + size
+            if j > n:
+                break
+            if toks[j - 1] == "city":
+                add(" ".join(toks[i:j]))
+
+    # downtown + 1..2 words => 2..3 words total
+    for i in range(n):
+        if toks[i] != "downtown":
+            continue
+        for size in (2, 3):
+            j = i + size
+            if j <= n:
+                add(" ".join(toks[i:j]))
+
+    # Generic named-place extraction for common geo/location phrase endings:
+    # 1..4-word prefix + 1-word suffix => 2..5 words total
+    for i in range(n):
+        for size in range(2, 6):
+            j = i + size
+            if j > n:
+                break
+            if toks[j - 1] in generic_suffix1:
+                add(" ".join(toks[i:j]))
 
     if "glass ball" in src:
         add("glass ball")
@@ -1747,16 +1831,36 @@ def _has_low_quality_phrase(s: str) -> bool:
     bad_patterns = (
         r"\b(?:a|an)\s+is\b",
         r"\bof with\b",
+        r"\bwith an and\b",
         r"\bwildlife subject\b",
         r"\bwith background detail\b",
         r"\bwith simple scene detail\b",
         r"\bwith straightforward context\b",
         r"\bin daylight conditions\b",
+        r"\bthe scene appears\b",
+        r"\bscene appears in open terrain\b",
         r"\bthe scene remains visible\b",
         r"\bvisible in broad daylight\b",
         r"\bvisible in the background\b",
         r"\bwith context\b",
         r"\bshows? a with\b",
+        r"\bscene view of scene\b",
+        r"\bopen[- ]air view of scene\b",
+        r"\boutdoor view of scene\b",
+        r"\bscene (?:with|showing) surrounding landscape context\b",
+        r"\bshowing surrounding landscape context\b",
+        r"\bacross an open outdoor setting\b",
+        r"\bopen outdoor setting\b",
+        r"\bground[- ]level view of subject\b",
+        r"\bvisible habitat cover and profile detail\b",
+        r"\bvisible cover and profile detail\b",
+        r"\bcrosses an (?:intersection )?approach\b",
+        r"\bfollows a visible (?:street )?segment\b",
+        r"\burban scene (?:crosses|follows)\b",
+        r"\burban depth\b",
+        r"\bnatural view of natural landscape\b",
+        r"\bscene is framed by surrounding landscape\b",
+        r"\bwide background terrain remains visible\b",
         r"\b[a-z]+-\s+with\b",
         r"\b[a-z]+-\.$",
         r"\bfeatures a [a-z ]{1,48} that\b",
@@ -1828,21 +1932,72 @@ def _has_context_hallucination(
 ) -> bool:
     kind_now = _infer_subject_kind(folder, subject)
     txt = _norm_text_strict(f"{caption} {alt_text}")
+    ctx = _norm_text_strict(f"{folder} {subject} {location}")
     if not txt:
         return True
     if re.search(r"\b(?:a|an)\s+is\b", txt):
         return True
     if " of with " in f" {txt} ":
         return True
+    if any(
+        p in txt
+        for p in (
+            "scene view of scene",
+            "surrounding landscape context",
+            "open outdoor setting",
+            "crosses an approach",
+            "follows a visible segment",
+            "with an and",
+        )
+    ):
+        return True
     if kind_now != "wildlife" and ("wildlife subject" in txt or "animal subject" in txt):
         return True
     if kind_now in {"architecture", "urban", "structure", "vehicle"}:
-        if any(p in txt for p in ("open terrain", "rolling hills", "field cover", "habitat", "burrow area")):
+        if any(
+            p in txt
+            for p in (
+                "open terrain",
+                "rolling hills",
+                "distant hills",
+                "field cover",
+                "habitat",
+                "burrow area",
+                "rocky slope",
+                "rocky slopes",
+                "ridgeline",
+                "ridgelines",
+                "rugged",
+            )
+        ):
             return True
     if kind_now == "night":
         if any(p in txt for p in ("clear daylight", "daylight", "rolling hills", "open terrain", "field cover")):
             return True
-    _ = location
+    is_lowland_or_amsterdam = (
+        "amsterdam" in ctx
+        or "netherlands" in ctx
+        or _is_lowland_nl_context(folder, subject, location)
+    )
+    if is_lowland_or_amsterdam:
+        if any(
+            p in txt
+            for p in (
+                "rolling hills",
+                "distant hills",
+                "rocky slope",
+                "rocky slopes",
+                "steep terrain",
+                "rugged",
+                "ridgeline",
+                "ridgelines",
+                "alpine",
+                "valley",
+                "mountain",
+                "foothill",
+            )
+        ):
+            return True
     return False
 
 
@@ -2363,7 +2518,7 @@ def _subject_label(folder: str, subject: str) -> str:
             return "a passenger jet"
         if "aircraft" in ts or "airplane" in ts or "plane" in ts:
             return "an aircraft"
-        return "an aviation subject"
+        return "an aircraft"
 
     if kind == "wildlife":
         if "prairie" in ts and "dog" in ts:
@@ -2420,11 +2575,24 @@ def _subject_label(folder: str, subject: str) -> str:
     if kind == "urban":
         if "skyline" in ts:
             return "a city skyline"
+        if "canal" in ts or "gracht" in ts or "vaart" in ts:
+            return "a canal-side city view"
         if "street" in ts:
             return "an urban street scene"
         if "bridge" in ts:
             return "a city bridge"
-        return "an urban scene"
+        return "a cityscape"
+
+    if kind == "people":
+        if "cyclist" in ts or "bicycle" in ts or "bike" in ts:
+            return "people with bicycles"
+        if "snow" in ts or "snowy" in ts:
+            return "people in snowfall"
+        if "park" in ts:
+            return "people in a park"
+        if "street" in ts:
+            return "people on a street"
+        return "people outdoors"
 
     if kind == "architecture":
         if "bridge" in ts:
@@ -2475,6 +2643,9 @@ def _subject_label(folder: str, subject: str) -> str:
             return "a rural landscape"
         return "a natural landscape"
 
+    subj_hint = _subject_phrase(subject)
+    if subj_hint and subj_hint != "subject":
+        return f"the {subj_hint}"
     return "the scene"
 
 
@@ -2522,7 +2693,24 @@ def _caption_style_bad(caption: str) -> bool:
         return True
     if any(p in txt for p in ("distant context", "environmental context", "foreground depth", "outdoor scenic frame")):
         return True
+    if any(
+        p in txt
+        for p in (
+            "scene appears",
+            "scene view of scene",
+            "surrounding landscape context",
+            "open outdoor setting",
+            "crosses an approach",
+            "follows a visible segment",
+            "urban depth",
+            "with an and",
+            "wide background terrain remains visible",
+        )
+    ):
+        return True
     if re.search(r"\b(captured|shown|appears)\s+with\b", txt):
+        return True
+    if _weak_token_hits(txt) >= 5:
         return True
     return False
 
@@ -2571,6 +2759,25 @@ def _alt_style_bad(alt_text: str) -> bool:
     if txt.startswith("mountain view of mountain road"):
         return True
     if any(p in txt for p in ("distant context", "environmental context", "outdoor scenic frame", "stable.")):
+        return True
+    if any(
+        p in txt
+        for p in (
+            "scene view of scene",
+            "open air view of scene",
+            "outdoor view of scene",
+            "surrounding landscape context",
+            "open outdoor setting",
+            "ground level view of subject",
+            "visible cover and profile detail",
+            "crosses an approach",
+            "follows a visible segment",
+            "urban depth",
+            "with an and",
+        )
+    ):
+        return True
+    if _weak_token_hits(txt) >= 4:
         return True
     return False
 
@@ -2721,6 +2928,16 @@ def _infer_subject_kind(folder: str, subject: str) -> str:
         return "architecture"
     if folder_key in {"cityscape", "urban"}:
         return "urban"
+    if folder_key in {"aviation"}:
+        return "aviation"
+    if folder_key in {"night", "astrophotography"}:
+        return "night"
+    if folder_key in {"glassball"}:
+        return "glassball"
+    if folder_key in {"water"}:
+        return "macro"
+    if folder_key in {"people_creative_collection", "people", "people_creative"}:
+        return "people"
     if folder_key in {"macro", "closeup", "close-up"}:
         return "macro"
     if folder_key in {"miscellaneous", "misc"} and any(x in low for x in ("firework", "fireworks", "new year eve", "new years eve", "night", "dusk", "sunset", "twilight")):
@@ -2751,6 +2968,8 @@ def _infer_subject_kind(folder: str, subject: str) -> str:
         return "wildlife"
     if any(x in low for x in ("industrial", "silo", "factory", "facility", "warehouse", "oil")):
         return "structure"
+    if any(x in low for x in ("people", "person", "pedestrian", "pedestrians", "cyclist", "cyclists", "runner", "runners", "crowd", "individuals", "group")):
+        return "people"
     if any(x in low for x in ("city", "urban", "downtown", "skyline", "town", "street")):
         return "urban"
     if any(x in low for x in ("architecture", "architectural", "building", "bridge", "tower", "facade", "cabin")):
@@ -2870,7 +3089,7 @@ def _fallback_caption_candidate(
             "open sky and cloud layers",
             "airport approach corridor",
             "runway environment in the distance",
-            "clear sky with soft cloud cover",
+            "clear sky and soft cloud cover",
             "high-altitude backdrop",
             "airspace over an urban edge",
             "flight-path perspective",
@@ -2906,7 +3125,35 @@ def _fallback_caption_candidate(
             "street signage and buildings",
             "glass and concrete towers",
             "a broad city corridor",
-            "urban street depth",
+            "background city buildings",
+        ),
+        "people": (
+            "snow-covered ground",
+            "park trees and open space",
+            "winter weather and tree lines",
+            "people across a public space",
+            "buildings along the park edge",
+            "falling snow across the scene",
+            "a snowy park field",
+            "urban park surroundings",
+            "pedestrians and open ground",
+            "canal-side paths and trees",
+            "public-space activity in winter",
+            "tree-lined park background",
+        ),
+        "people": (
+            "snow-covered ground",
+            "park trees in the background",
+            "buildings along the park edge",
+            "pedestrians across open space",
+            "winter weather and tree lines",
+            "people spread across the scene",
+            "a snowy park field",
+            "canal-side paths and trees",
+            "urban park surroundings",
+            "falling snow across open space",
+            "street-side activity and buildings",
+            "public-space activity in winter",
         ),
         "architecture": (
             "structural lines and facade detail",
@@ -3169,18 +3416,48 @@ def _fallback_caption_candidate(
             )
     elif kind == "urban":
         acts = (
-            "runs along a main street corridor",
-            "shows storefronts and sidewalks",
-            "passes through a town-center block",
-            "includes mixed street and building detail",
-            "follows a visible street segment",
-            "shows parked vehicles near shopfronts",
-            "is framed by street-facing buildings",
-            "crosses an intersection approach",
-            "shows architectural detail along the street",
-            "includes a built roadside setting",
-            "shows a town street with urban elements",
-            "extends through a developed neighborhood",
+            "shows a canal-side city view",
+            "shows buildings and winter trees",
+            "includes city facades and open water",
+            "shows a built district with visible structures",
+            "shows an urban area with buildings in view",
+            "shows city architecture near water",
+            "is framed by trees and city buildings",
+            "shows a winter cityscape with open foreground",
+            "shows architectural detail in a city setting",
+            "includes a canal or waterfront urban edge",
+            "shows a developed neighborhood in view",
+            "shows city buildings under winter weather",
+        )
+    elif kind == "people":
+        acts = (
+            "are visible in a public outdoor setting",
+            "move across snow-covered ground",
+            "gather in a park during winter weather",
+            "walk through a snowy urban park",
+            "stand on open snow near buildings",
+            "appear across a park field in snowfall",
+            "move through a winter park scene",
+            "walk near trees and open ground",
+            "are shown in outdoor winter activity",
+            "cross a snowy public space",
+            "gather near a park edge with trees",
+            "are visible during falling snow",
+        )
+    elif kind == "people":
+        acts = (
+            "are visible in a public outdoor setting",
+            "move across snow-covered ground",
+            "gather in a park during winter weather",
+            "walk through a snowy urban park",
+            "stand on open snow near buildings",
+            "appear across a park field in snowfall",
+            "move through a winter park scene",
+            "walk near trees and open ground",
+            "are shown in outdoor winter activity",
+            "cross a snowy public space",
+            "gather near a park edge with trees",
+            "are visible during falling snow",
         )
     elif kind == "architecture":
         acts = (
@@ -3320,18 +3597,18 @@ def _fallback_caption_candidate(
             )
     else:
         acts = (
-            "stands within an outdoor setting",
-            "appears in open terrain",
-            "sits against a natural backdrop",
+            "stands in an outdoor setting",
+            "appears outdoors with visible surroundings",
+            "sits against a visible background",
             "appears under clear daylight",
-            "is positioned within surrounding landscape",
-            "appears beside nearby terrain",
-            "is visible against distant hills",
-            "sits in a clear outdoor scene",
+            "is positioned within visible surroundings",
+            "appears beside nearby trees or buildings",
+            "is visible with distant background detail",
+            "sits in a clear outdoor setting",
             "appears in a broad natural view",
             "stands near open ground and sky",
-            "remains visible within outdoor terrain",
-            "is framed by surrounding landscape",
+            "remains visible within the outdoor setting",
+            "is framed by visible surroundings",
         )
 
     seed = _stable_seed(folder, subject, loc, str(variant), str(max(0, sequence_no)))
@@ -3361,11 +3638,11 @@ def _fallback_caption_candidate(
             "Near {loc}, {subj} {act} with {bg}.",
             "Against {bg}, {subj} {act} in {loc}.",
             "Across {loc}, {subj} {act} with {bg}.",
-            "{subj_cap} {act} while {bg} remains visible in {loc}.",
+            "{subj_cap} {act} with {bg} visible in {loc}.",
             "With {bg} in view, {subj} {act} in {loc}.",
-            "{subj_cap} {act} through {loc} with {bg}.",
-            "{subj_cap} {act} as {bg} frames the scene in {loc}.",
-            "From {loc}, {subj} {act} against {bg}.",
+            "{subj_cap} {act} in {loc} with {bg}.",
+            "{subj_cap} {act} against {bg} in {loc}.",
+            "From {loc}, {subj} {act} with {bg}.",
         )
     else:
         templates = (
@@ -3373,10 +3650,10 @@ def _fallback_caption_candidate(
             "Against {bg}, {subj} {act}.",
             "Across the frame, {subj} {act} with {bg}.",
             "{subj_cap} {act} with {bg} in the background.",
-            "{subj_cap} {act} as {bg} fills the background.",
+            "{subj_cap} {act} against {bg}.",
             "{subj_cap} {act} with {bg} in view.",
             "With {bg} in the background, {subj} {act}.",
-            "{subj_cap} {act} while {bg} stays in view.",
+            "{subj_cap} {act} with {bg} visible.",
         )
 
     tpl = _pick_from_pool(templates, folder, subject, loc, str(variant), str(max(0, sequence_no)), "caption_tpl")
@@ -3455,14 +3732,24 @@ def _fallback_alt_candidate(
             "Utility-site view of",
         ),
         "urban": (
-            "Urban view of",
-            "Downtown view of",
-            "City-street view of",
-            "Street-level city view of",
+            "City view of",
+            "Urban city view of",
             "Cityscape view of",
-            "Metro-area view of",
-            "Intersection view of",
-            "City-corridor view of",
+            "Canal-side city view of",
+            "Winter city view of",
+            "Waterfront city view of",
+            "Built-city view of",
+            "Open city view of",
+        ),
+        "people": (
+            "People view of",
+            "Winter park view of",
+            "Snowy park view of",
+            "Public-space view of",
+            "Outdoor people view of",
+            "Park-side view of",
+            "Winter activity view of",
+            "Open-space people view of",
         ),
         "architecture": (
             "Architectural view of",
@@ -3548,13 +3835,12 @@ def _fallback_alt_candidate(
         ),
         "general": (
             "Outdoor view of",
-            "Scene view of",
             "Wide view of",
             "Ground-level view of",
-            "Open-air view of",
-            "Context view of",
+            "Outdoor view of",
+            "Detailed view of",
             "Daylight view of",
-            "General view of",
+            "Wide outdoor view of",
         ),
     }
 
@@ -3614,18 +3900,32 @@ def _fallback_alt_candidate(
             "near utility lines and site fencing",
         ),
         "urban": (
-            "with city blocks and side streets in view",
-            "along a downtown corridor with storefronts",
-            "with crosswalk markings and street signs",
-            "with layered storefronts and facades",
-            "with sidewalk detail and road lanes",
+            "with city buildings and winter trees in view",
+            "with layered facades and open foreground",
+            "with canal water and surrounding buildings",
             "with urban building lines in the background",
-            "with an intersection and city depth",
-            "with street-level perspective and signage",
-            "with glass and concrete buildings nearby",
-            "with urban street texture and perspective",
-            "across a built city district",
-            "with visible downtown architectural forms",
+            "with architectural detail and open sky",
+            "with a city waterfront and buildings nearby",
+            "with tree lines and city structures visible",
+            "with winter weather across a built district",
+            "with city architecture and open space in view",
+            "with building facades and waterfront detail",
+            "with urban structures and background trees",
+            "with visible city forms under winter light",
+        ),
+        "people": (
+            "with people visible across snow-covered ground",
+            "with park trees and winter weather in the background",
+            "showing outdoor activity in falling snow",
+            "with open public space and people in view",
+            "with a snowy park setting and tree lines",
+            "showing people near buildings and park edges",
+            "with winter conditions and visible park surroundings",
+            "showing people spread across a snowy field",
+            "with public-space activity and background trees",
+            "showing people and snow-covered ground detail",
+            "with pedestrians in a winter park setting",
+            "showing outdoor winter activity near trees",
         ),
         "architecture": (
             "with facade geometry and window detail",
@@ -3744,18 +4044,18 @@ def _fallback_alt_candidate(
             "with terrain layers and sparse pine clusters",
         ),
         "general": (
-            "with visible outdoor surroundings and terrain",
+            "with visible outdoor surroundings and background detail",
             "in clear daylight with distant backdrop",
             "with nearby trees and open horizon",
-            "showing broad terrain and sky detail",
+            "showing sky and background detail",
             "with mixed natural elements in view",
-            "across an open outdoor setting",
-            "with distant hills and foreground detail",
-            "showing surrounding landscape context",
+            "with visible surroundings in daylight",
+            "with distant background and foreground detail",
+            "showing visible surroundings",
             "with natural ground texture and trees",
-            "with a broad background terrain view",
+            "with a broad background view",
             "showing clear outdoor scene detail",
-            "with layered terrain and sky conditions",
+            "with layered background and sky tones",
         ),
     }
 
