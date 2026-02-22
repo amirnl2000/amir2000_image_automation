@@ -15,10 +15,11 @@ This project automates the full path from raw image intake to reviewed metadata 
 ## Key Capabilities
 
 - End-to-end guided desktop workflow (`main_set.py`)
-- Series-aware caption generation with anti-duplication checks (`caption_review_local.py`)
+- Series-aware caption generation with anti-duplication checks, evidence-first guardrails, and row-level fallback model retries (`caption_review_local.py`)
 - Strict filename reservation and duplicate prevention (`data/used_filenames.json`)
 - EXIF-preserving resize/watermark pipeline (`utils/image_processor.py`)
 - Review-first publishing with rollback on failures (`review_editor.py`, `db_uploader.py`)
+- Shared dictionary spellcheck in review editor for `Subject`, `Caption`, `alt_text`, and `Keywords` (`utils/autofix.py`, `review_editor.py`)
 - PyInstaller build path for one-click EXE distribution (`helpers/build_multiset.ps1`)
 
 ## Project Structure
@@ -116,9 +117,14 @@ python .\init_db.py
 4. Pull required Ollama models (or set different ones in env/config):
 
 ```powershell
-ollama pull llama3.2-vision:latest
-ollama pull minicpm-v:latest
+ollama pull llava:13b
+ollama pull llava:34b
 ```
+
+Notes:
+
+- `llava:13b` is the common primary prefill model.
+- `llava:34b` is optional but recommended as a row-level fallback for weak/failed rows when quality matters more than speed.
 
 5. Required for complete quality scoring stage:
    - Keep `sac+logos+ava1-l14-linearMSE.pth` in repository root.
