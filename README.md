@@ -190,13 +190,10 @@ Set-Location "YOUR_PATH_HERE"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clean -BuildProfile Lite
 ```
 
-## Backup and GitHub-Safe Export
-
-- Create a curated runnable backup pack:
-  - `helpers/copy_pack.ps1`
-
 ## Documentation Index
 
 - `docs/init/review_queue.sql`
 - `docs/init/photos_info_revamp.sql`
+- Full documentation can be found on: https://www.amir2000.com/
+  
 
