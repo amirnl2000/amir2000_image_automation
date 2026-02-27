@@ -58,8 +58,7 @@ This project automates the path from intake to reviewed metadata and publish:
 |   |-- preflight_multiset.ps1
 |   |-- build_multiset.ps1
 |   |-- runtime_hook_samevenv_classifier.py
-|   |-- copy_pack.ps1
-|   `-- sanitize_for_github.ps1
+|   `-- (local/private helper scripts are not included in this repo)
 |
 |-- utils/
 |-- vendor/
@@ -143,22 +142,6 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clea
 Output:
 
 - `dist/Amir2000ImageAutomation-MultiSet.exe`
-
-## Backup and Sanitize
-
-Curated runnable backup:
-
-```powershell
-Set-Location "YOUR_PATH_HERE"
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\copy_pack.ps1
-```
-
-GitHub-safe sanitized export:
-
-```powershell
-Set-Location "YOUR_PATH_HERE"
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\sanitize_for_github.ps1 -Latest
-```
 
 ## Notes on Generated Folders
 
