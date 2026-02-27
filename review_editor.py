@@ -13,6 +13,31 @@ import re
 from PIL import Image, ImageDraw, ImageFont  # ensure collected by PyInstaller
 import os, re
 
+# Ensure local runs (including snapshot paths) can import project-level `utils`.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = None
+for _cand in (
+    _THIS_DIR,
+    os.path.abspath(os.path.join(_THIS_DIR, "..")),
+    os.path.abspath(os.path.join(_THIS_DIR, "..", "..")),
+):
+    if os.path.isfile(os.path.join(_cand, "utils", "file_namer.py")):
+        _PROJECT_ROOT = _cand
+        if _cand not in sys.path:
+            sys.path.insert(0, _cand)
+        break
+
+# If another third-party `utils` module was loaded first, remove it so
+# imports resolve to our project package.
+_u = sys.modules.get("utils")
+if _u is not None and _PROJECT_ROOT:
+    _u_file = os.path.abspath(str(getattr(_u, "__file__", "") or ""))
+    _u_path = [os.path.abspath(str(p)) for p in (getattr(_u, "__path__", []) or [])]
+    _wanted = os.path.abspath(os.path.join(_PROJECT_ROOT, "utils"))
+    _is_project_utils = _u_file.startswith(_wanted) or any(p.startswith(_wanted) for p in _u_path)
+    if not _is_project_utils:
+        sys.modules.pop("utils", None)
+
 _UDUP = re.compile(r'_+')
 
 def clean_token(s: str) -> str:
@@ -113,6 +138,36 @@ ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", r"YOUR_PATH_HERE")
 
 FONT_PATH      = resource_path(os.path.join("fonts", "Montserrat-Light.ttf"))
 WATERMARK_TEXT = "© YOUR_HOST\nPhotography"
+
+# ---- Regenerate (caption/alt/keywords) via caption_review_local.py ----
+CAPTION_ENDPOINT = os.getenv("CAPTION_ENDPOINT", "http://127.0.0.1:11434/api/generate")
+CAPTION_MODEL = os.getenv("OLLAMA_MODEL_CAPTION", "llava:13b")
+CAPTION_MODEL_FALLBACK = os.getenv("OLLAMA_MODEL_CAPTION_FALLBACK", "llava:34b").strip()
+CAPTION_TIMEOUT_SEC = int(os.getenv("CAPTION_TIMEOUT_SEC", "420"))
+CAPTION_OPTS = {
+    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "4096")),
+    "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "180")),
+    "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.1")),
+}
+try:
+    _caption_num_gpu = int(os.getenv("CAPTION_NUM_GPU", os.getenv("OLLAMA_NUM_GPU", "99")))
+except Exception:
+    _caption_num_gpu = 99
+try:
+    _caption_main_gpu = int(os.getenv("CAPTION_MAIN_GPU", os.getenv("OLLAMA_MAIN_GPU", "0")))
+except Exception:
+    _caption_main_gpu = 0
+if _caption_num_gpu >= 0:
+    CAPTION_OPTS["num_gpu"] = _caption_num_gpu
+if _caption_main_gpu >= 0:
+    CAPTION_OPTS["main_gpu"] = _caption_main_gpu
+CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "15"))
+CAPTION_PREFIX_WORDS = int(os.getenv("CAPTION_PREFIX_WORDS", "8"))
+CAPTION_SERIES_LARGE_THRESHOLD = int(os.getenv("CAPTION_SERIES_LARGE_THRESHOLD", "8"))
+CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "5"))
+CAPTION_REWRITE_WEAK = os.getenv("CAPTION_REWRITE_WEAK", "1") == "1"
+CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "3"))
+CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "90"))
 
 # Use the one true JSON in DATA_DIR
 USED_FILENAMES_JSON = os.path.join(DATA_DIR, "used_filenames.json")
@@ -426,6 +481,7 @@ class ReviewApp:
     def _schedule_text_spellcheck(self, field_name: str, delay_ms: int = 120):
         if field_name not in self.text_widgets:
             return
+        self._fit_text_height(field_name)
         old = self._text_spell_after_ids.get(field_name)
         if old:
             try:
@@ -437,6 +493,27 @@ class ReviewApp:
                 max(0, int(delay_ms)),
                 lambda k=field_name: self._text_spellcheck_update(k),
             )
+        except Exception:
+            pass
+
+    def _fit_text_height(self, field_name: str):
+        w = self.text_widgets.get(field_name)
+        if not w:
+            return
+        min_lines = 3 if field_name == "Keywords" else 2
+        max_lines = 8 if field_name == "Keywords" else 6
+        try:
+            disp = int(w.count("1.0", "end-1c", "displaylines")[0])
+        except Exception:
+            try:
+                txt = w.get("1.0", "end-1c")
+                disp = max(1, txt.count("\n") + 1)
+            except Exception:
+                disp = min_lines
+        target = max(min_lines, min(max_lines, disp + 1))
+        try:
+            if int(w.cget("height")) != target:
+                w.configure(height=target)
         except Exception:
             pass
 
@@ -651,13 +728,28 @@ class ReviewApp:
 
 
     def build_layout(self):
+        try:
+            self.master.grid_rowconfigure(0, weight=1)
+            # Keep preview area at its natural width and let the metadata pane
+            # absorb extra window width, so the main image area stays in place.
+            self.master.grid_columnconfigure(0, weight=0)
+            self.master.grid_columnconfigure(1, weight=1)
+        except Exception:
+            pass
+
         self.left_frame  = Frame(self.master)
         self.right_frame = Frame(self.master)
-        self.left_frame.grid(row=0, column=0, padx=8, pady=8, sticky="n")
-        self.right_frame.grid(row=0, column=1, padx=8, pady=8, sticky="n")
+        self.left_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nw")
+        self.right_frame.grid(row=0, column=1, padx=8, pady=8, sticky="nsew")
 
         self.image_progress_var = StringVar(value=f"Image 0/{max(1, len(self.images))}")
-        Label(self.left_frame, textvariable=self.image_progress_var, font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
+        self.image_progress_label = Label(
+            self.left_frame,
+            textvariable=self.image_progress_var,
+            font=("Arial", 10, "bold"),
+            anchor="e",
+            justify="right",
+        )
 
         # image preview + QR guide
         # Fixed-size preview area so the UI never shifts between landscape/portrait
@@ -677,6 +769,8 @@ class ReviewApp:
         qr.insert(END, QR_EXPLANATION)
         qr.config(state=DISABLED)
         qr.pack(pady=(10, 0))
+        # Place image counter near the lower-right of the left pane (per requested spot).
+        self.image_progress_label.pack(fill="x", pady=(6, 0), padx=(0, 6))
 
         labels = [
             'id', 'Folder', 'File_Name', 'Path', 'Thumb_Path', 'DateTime',
@@ -695,8 +789,17 @@ class ReviewApp:
             Label(self.right_frame, text=label).grid(row=i, column=0, sticky='e')
 
             if label in ('Keywords', 'Caption', 'alt_text'):
-                t = Text(self.right_frame, height=4, width=84, wrap='word')
-                t.grid(row=i, column=1, sticky='ew')
+                # Wider than regular entries (so no scrolling for common edits),
+                # but still capped so the fields do not consume the full pane.
+                if label == 'Keywords':
+                    t_height = 3
+                    t_width = 64
+                else:
+                    t_height = 2
+                    t_width = 64
+                t = Text(self.right_frame, height=t_height, width=t_width, wrap='word')
+                # Keep a capped width; do not stretch across the whole right pane.
+                t.grid(row=i, column=1, sticky='w', pady=(1, 1))
                 try:
                     t.tag_configure("spell_miss", underline=1, foreground="#b00020")
                 except Exception:
@@ -731,14 +834,33 @@ class ReviewApp:
                             # Place a horizontal slider right under the QR entry
                     self.qr_row = i  # remember where QR lives to place slider on next row
 
-        self.right_frame.grid_columnconfigure(1, weight=1)
+        # Let the action row use real pane width; fields stay capped because their widgets
+        # use a fixed width and do not stretch east-west.
+        self.right_frame.grid_columnconfigure(1, weight=0)
+        self.right_frame.grid_columnconfigure(0, weight=0)
 
+        # Primary actions (Generate / Approve) aligned to the metadata region,
+        # with a stable, visible spacing.
+        self.primary_action_bar = Frame(self.right_frame)
+        self.primary_action_bar.grid(row=99, column=1, sticky="w", pady=(10, 8))
+        Button(self.primary_action_bar, text="Generate", width=14, height=2, command=self.regenerate_current).grid(
+            row=0, column=0, sticky="w"
+        )
+        Frame(self.primary_action_bar, width=160).grid(row=0, column=1)
+        Button(self.primary_action_bar, text="Approve", width=14, height=2, command=self.approve).grid(
+            row=0, column=2, sticky="w"
+        )
 
-        Button(self.right_frame, text="Back",    command=self.back).grid(row=99, column=0)
-        Button(self.right_frame, text="Approve", command=self.approve).grid(row=99, column=1)
-        Button(self.right_frame, text="Reject",  command=self.reject).grid(row=99, column=2)
-        Button(self.right_frame, text="Pending", command=self.pending).grid(row=99, column=3)
-        Button(self.right_frame, text="Publish", command=self.publish).grid(row=99, column=4)
+        # Secondary actions stay together below.
+        self.button_bar = Frame(self.right_frame)
+        self.button_bar.grid(row=100, column=1, sticky="w", pady=(0, 2))
+        for i, (txt, cmd) in enumerate([
+            ("Back", self.back),
+            ("Reject", self.reject),
+            ("Pending", self.pending),
+            ("Publish", self.publish),
+        ]):
+            Button(self.button_bar, text=txt, command=cmd).grid(row=0, column=i, padx=(0, 6))
 
         # ---- QR slider under the QR row (recursion-safe) ----
         try:
@@ -784,6 +906,7 @@ class ReviewApp:
             if k in self.text_widgets:
                 self.text_widgets[k].delete("1.0", END)
                 if v: self.text_widgets[k].insert(END, str(v))
+                self._fit_text_height(k)
 
         # Try to display the image: prefer Path; fall back to LOCAL_BASE/year/folder/name
         display_path = None
@@ -910,6 +1033,178 @@ class ReviewApp:
             fields_changed=",".join(changed),
             edited_by='amir', mysql_id=img['id']
         )
+
+    def _load_caption_module(self):
+        if getattr(self, "_caption_mod", None) is not None:
+            return self._caption_mod
+        try:
+            import importlib
+            self._caption_mod = importlib.import_module("caption_review_local")
+            return self._caption_mod
+        except Exception as e:
+            messagebox.showerror("Generate", f"Failed to load caption_review_local:\n{e}")
+            return None
+
+    def _prefill_generate_uniqueness_ledger(self, crl, ledger, *, exclude_id: int) -> int:
+        added = 0
+        for row in self.images:
+            try:
+                rid = int(row.get("id"))
+            except Exception:
+                rid = -1
+            if rid == int(exclude_id):
+                continue
+
+            status = str(row.get("Review_Status") or "Pending").strip().lower()
+            if status != "pending":
+                continue
+
+            caption = str(row.get("Caption") or "").strip()
+            alt_text = str(row.get("alt_text") or "").strip()
+            keywords_raw = str(row.get("Keywords") or "").strip()
+            if not (caption or alt_text or keywords_raw):
+                continue
+
+            folder_r = str(row.get("Folder") or "").strip()
+            subject_r = str(row.get("Subject") or "").strip()
+            file_name_r = str(row.get("File_Name") or "").strip()
+            try:
+                series_key_r, _ = crl._detect_series_key(folder_r, subject_r, file_name_r)
+            except Exception:
+                series_key_r = f"{folder_r}|{subject_r}|{file_name_r}"
+
+            kw_list = [k.strip() for k in keywords_raw.split(",") if k.strip()]
+            try:
+                kw_list = crl._clean_keywords_list(kw_list)
+            except Exception:
+                pass
+
+            try:
+                ledger.add(
+                    series_key=series_key_r,
+                    caption=caption,
+                    alt_text=alt_text,
+                    keywords=kw_list,
+                    prefix_words=CAPTION_PREFIX_WORDS,
+                )
+                added += 1
+            except Exception:
+                # Fallback: still guard exact caption duplicates if helper internals change.
+                try:
+                    cap_norm = crl._norm_text_strict(caption)
+                    if cap_norm:
+                        ledger.caption_global.add(cap_norm)
+                except Exception:
+                    pass
+        return added
+
+    def regenerate_current(self):
+        img = self.images[self.idx]
+        values = self.get_field_values()
+        image_path = (values.get("ollama_path") or img.get("ollama_path") or values.get("Path") or img.get("Path") or "").strip()
+        if not image_path:
+            messagebox.showerror("Generate", "No image path available for this row.")
+            return
+
+        crl = self._load_caption_module()
+        if crl is None:
+            return
+
+        folder = str(values.get("Folder") or img.get("Folder") or "").strip()
+        subject = str(values.get("Subject") or img.get("Subject") or "").strip()
+        location = str(values.get("Location") or img.get("Location") or "").strip()
+        file_name = str(values.get("File_Name") or img.get("File_Name") or "").strip()
+
+        try:
+            series_key, sequence_no = crl._detect_series_key(folder, subject, file_name)
+        except Exception:
+            series_key, sequence_no = f"{folder}|{subject}|{file_name}", 1
+
+        ledger = crl.UniquenessLedger()
+        try:
+            self._prefill_generate_uniqueness_ledger(
+                crl,
+                ledger,
+                exclude_id=int(img.get("id") or 0),
+            )
+        except Exception:
+            pass
+
+        ok, cap, kws, alt_or_err = crl.process_one(
+            ledger=ledger,
+            series_key=series_key,
+            file_name=file_name,
+            sequence_no=int(sequence_no or 1),
+            series_size=1,
+            folder=folder,
+            subject=subject,
+            location=location,
+            image_path=Path(image_path),
+            endpoint=CAPTION_ENDPOINT,
+            model=CAPTION_MODEL,
+            timeout=CAPTION_TIMEOUT_SEC,
+            options=CAPTION_OPTS,
+            img_max_side=1024,
+            img_quality=85,
+            keywords_n=CAPTION_KEYWORDS_N,
+            prefix_words=CAPTION_PREFIX_WORDS,
+            series_large_threshold=CAPTION_SERIES_LARGE_THRESHOLD,
+            max_tries=CAPTION_MAX_TRIES,
+            rewrite_weak=CAPTION_REWRITE_WEAK,
+            rewrite_max_passes=CAPTION_REWRITE_MAX_PASSES,
+            quality_min_score=CAPTION_QUALITY_MIN_SCORE,
+        )
+
+        if not ok and CAPTION_MODEL_FALLBACK:
+            ok, cap, kws, alt_or_err = crl.process_one(
+                ledger=ledger,
+                series_key=series_key,
+                file_name=file_name,
+                sequence_no=int(sequence_no or 1),
+                series_size=1,
+                folder=folder,
+                subject=subject,
+                location=location,
+                image_path=Path(image_path),
+                endpoint=CAPTION_ENDPOINT,
+                model=CAPTION_MODEL_FALLBACK,
+                timeout=CAPTION_TIMEOUT_SEC,
+                options=CAPTION_OPTS,
+                img_max_side=1024,
+                img_quality=85,
+                keywords_n=CAPTION_KEYWORDS_N,
+                prefix_words=CAPTION_PREFIX_WORDS,
+                series_large_threshold=CAPTION_SERIES_LARGE_THRESHOLD,
+                max_tries=max(2, CAPTION_MAX_TRIES),
+                rewrite_weak=CAPTION_REWRITE_WEAK,
+                rewrite_max_passes=CAPTION_REWRITE_MAX_PASSES,
+                quality_min_score=CAPTION_QUALITY_MIN_SCORE,
+            )
+
+        if not ok:
+            messagebox.showerror("Generate", f"Regenerate failed: {alt_or_err}")
+            return
+
+        # Update UI fields but do not change status until the user approves.
+        try:
+            self.text_widgets["Caption"].delete("1.0", END)
+            self.text_widgets["Caption"].insert(END, cap)
+            self._fit_text_height("Caption")
+            self.text_widgets["alt_text"].delete("1.0", END)
+            self.text_widgets["alt_text"].insert(END, alt_or_err)
+            self._fit_text_height("alt_text")
+            self.text_widgets["Keywords"].delete("1.0", END)
+            self.text_widgets["Keywords"].insert(END, kws)
+            self._fit_text_height("Keywords")
+        except Exception:
+            pass
+
+        # Persist to DB with current status to avoid losing the regenerate result.
+        try:
+            status = str(img.get("Review_Status") or "Pending")
+            self.save_current(status)
+        except Exception:
+            pass
 
     def approve(self):
         img   = self.images[self.idx]

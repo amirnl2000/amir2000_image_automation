@@ -108,6 +108,71 @@ def _title_case_slug_token(s: str) -> str:
     return "_".join(out)
 
 
+def _title_case_words(s: str) -> str:
+    parts = [p for p in re.split(r"\\s+", (s or "").strip()) if p]
+    return " ".join([p[:1].upper() + p[1:].lower() for p in parts])
+
+
+def _filename_tokens_from_path(path: str) -> set[str]:
+    stem = os.path.splitext(os.path.basename(path or ""))[0]
+    toks = [t for t in re.split(r"[_\\-\\s]+", stem) if t]
+    return {t.lower() for t in toks}
+
+
+def _load_nature_subject_classifier():
+    global _NATURE_SUBJECT_PIPE
+    if _NATURE_SUBJECT_PIPE is not None:
+        return _NATURE_SUBJECT_PIPE
+    if _hf_pipeline is None:
+        return None
+    _NATURE_SUBJECT_PIPE = _hf_pipeline("zero-shot-image-classification", model=NATURE_SUBJECT_MODEL, device=-1)
+    return _NATURE_SUBJECT_PIPE
+
+
+def _nature_subject_from_classifier(image_path: str) -> str | None:
+    if not NATURE_SUBJECT_ENABLE:
+        return None
+    if _hf_pipeline is None:
+        return None
+    if not os.path.isfile(image_path):
+        return None
+    toks = _filename_tokens_from_path(image_path)
+    if not (toks & {"bird", "birds", "buzzard", "wigeon", "pigeon", "pigeons", "duck", "goose", "heron", "cormorant", "gull", "seagull", "animal", "macro", "plant", "plants", "flower", "flowers", "tree", "trees", "reeds", "reed", "seed", "seedhead"}):
+        return None
+    pipe = _load_nature_subject_classifier()
+    if pipe is None:
+        return None
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+    try:
+        preds = pipe(img, candidate_labels=_NATURE_SUBJECT_LABELS)
+    except Exception:
+        return None
+    if isinstance(preds, dict) and "labels" in preds and "scores" in preds:
+        preds = [{"label": l, "score": s} for l, s in zip(preds["labels"], preds["scores"])]
+    preds = list(preds) if isinstance(preds, list) else []
+    if not preds:
+        return None
+    top = preds[0]
+    try:
+        score = float(top.get("score", 0.0))
+    except Exception:
+        score = 0.0
+    label = str(top.get("label", "")).strip().lower()
+    if not label:
+        return None
+    min_score = NATURE_SUBJECT_MIN_SCORE_GENERIC if label in _NATURE_SUBJECT_GENERIC else NATURE_SUBJECT_MIN_SCORE
+    if score < min_score:
+        return None
+    # Only allow non-generic labels if they align with filename tokens
+    label_toks = set(label.split())
+    if label not in _NATURE_SUBJECT_GENERIC and not (label_toks & toks):
+        return None
+    return _title_case_words(label)
+
+
 def build_preview_filename(
     subject: str,
     location: str,
@@ -137,6 +202,11 @@ warnings.filterwarnings(
     message=r"Converting a tensor with requires_grad=True to a scalar",
     category=UserWarning,
 )
+
+try:
+    from transformers import pipeline as _hf_pipeline
+except Exception:
+    _hf_pipeline = None
 
 # ---------- Shared paths (prefer amir2000_config.py when present) ----------
 from pathlib import Path
@@ -230,6 +300,20 @@ OLLAMA_MODEL_CAPTION = os.getenv(
 OLLAMA_MODEL_CAPTION_FALLBACK = os.getenv(
     "OLLAMA_MODEL_CAPTION_FALLBACK", "llava:34b"
 ).strip()  # used only on failed rows
+try:
+    OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "99"))
+except Exception:
+    OLLAMA_NUM_GPU = 99
+try:
+    OLLAMA_MAIN_GPU = int(os.getenv("OLLAMA_MAIN_GPU", "0"))
+except Exception:
+    OLLAMA_MAIN_GPU = 0
+OLLAMA_FORCE_GPU = os.getenv("OLLAMA_FORCE_GPU", "1") == "1"
+OLLAMA_RESTART_FOR_GPU = os.getenv("OLLAMA_RESTART_FOR_GPU", "1") == "1"
+OLLAMA_LLM_LIBRARY = os.getenv("OLLAMA_LLM_LIBRARY", "cuda").strip() or "cuda"
+_OLLAMA_GPU_BOOTSTRAPPED = False
+_OLLAMA_STARTED_BY_APP = False
+OLLAMA_CLOSE_ON_RUN_END = os.getenv("OLLAMA_CLOSE_ON_RUN_END", "1") == "1"
 SUBJECT_MODEL_CANDIDATES_ENV = os.getenv(
     "OLLAMA_MODEL_SUBJECT_CANDIDATES", f"{OLLAMA_MODEL_CAPTION},{OLLAMA_MODEL}"
 )
@@ -253,9 +337,14 @@ OLLAMA_OPTS = {
     "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "180")),
     "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.1")),
 }
+if OLLAMA_NUM_GPU >= 0:
+    OLLAMA_OPTS["num_gpu"] = int(OLLAMA_NUM_GPU)
+if OLLAMA_MAIN_GPU >= 0:
+    OLLAMA_OPTS["main_gpu"] = int(OLLAMA_MAIN_GPU)
 OLLAMA_WARM_ON_SCORING = os.getenv("OLLAMA_WARM_ON_SCORING", "1") == "1"
 OLLAMA_WARM_TIMEOUT_SEC = int(os.getenv("OLLAMA_WARM_TIMEOUT_SEC", "45"))
 OLLAMA_WARM_KEEP_ALIVE = os.getenv("OLLAMA_WARM_KEEP_ALIVE", "45m")
+OLLAMA_STARTUP_PROBE = os.getenv("OLLAMA_STARTUP_PROBE", "1") == "1"
 
 # caption_review_local.py tuning (used by Stage 6)
 CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "15"))
@@ -294,6 +383,62 @@ PREFILL_QC_REPORT_PATH = os.getenv(
     "PREFILL_QC_REPORT_PATH", os.path.join(DATA_DIR, "prefill_qc_last.json")
 )
 
+# Optional nature classifier for subject suggestion (open-source, local)
+NATURE_SUBJECT_ENABLE = os.getenv("NATURE_SUBJECT_ENABLE", "1") == "1"
+NATURE_SUBJECT_MODEL = os.getenv("NATURE_SUBJECT_MODEL", "openai/clip-vit-large-patch14")
+NATURE_SUBJECT_MIN_SCORE = float(os.getenv("NATURE_SUBJECT_MIN_SCORE", "0.55"))
+NATURE_SUBJECT_MIN_SCORE_GENERIC = float(os.getenv("NATURE_SUBJECT_MIN_SCORE_GENERIC", "0.40"))
+_NATURE_SUBJECT_PIPE = None
+
+_NATURE_SUBJECT_LABELS = [
+    "common buzzard",
+    "eurasian wigeon",
+    "pigeons",
+    "pigeon",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "seagull",
+    "gull",
+    "bird",
+    "raptor",
+    "waterfowl",
+    "fox",
+    "deer",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "animal",
+    "dry reeds",
+    "reeds",
+    "flower",
+    "flowers",
+    "plant",
+    "plants",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "seed head",
+]
+_NATURE_SUBJECT_GENERIC = {
+    "bird",
+    "raptor",
+    "waterfowl",
+    "animal",
+    "plant",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "reeds",
+    "reed",
+    "seed head",
+    "flower",
+    "flowers",
+}
+
 
 def _ollama_up(host=OLLAMA_HOST, port=OLLAMA_PORT, timeout=0.5):
     s = socket.socket()
@@ -307,16 +452,102 @@ def _ollama_up(host=OLLAMA_HOST, port=OLLAMA_PORT, timeout=0.5):
         s.close()
 
 
+def _ollama_serve_env() -> dict:
+    env = os.environ.copy()
+    if OLLAMA_FORCE_GPU:
+        # Force values even when parent process has empty keys.
+        env["OLLAMA_LLM_LIBRARY"] = str(OLLAMA_LLM_LIBRARY or "cuda")
+        env["OLLAMA_NUM_GPU"] = str(int(OLLAMA_NUM_GPU))
+        env["OLLAMA_MAIN_GPU"] = str(int(OLLAMA_MAIN_GPU))
+    try:
+        ollama_bin = shutil.which(OLLAMA_BIN) or OLLAMA_BIN
+        if os.path.isabs(ollama_bin):
+            install_dir = os.path.dirname(ollama_bin)
+            dll_dirs = [
+                os.path.join(install_dir, "lib", "ollama"),
+                os.path.join(install_dir, "lib", "ollama", "cuda_v13"),
+                os.path.join(install_dir, "lib", "ollama", "cuda_v12"),
+            ]
+            present = [p for p in dll_dirs if os.path.isdir(p)]
+            if present:
+                old_path = str(env.get("PATH", "") or "")
+                env["PATH"] = os.pathsep.join(present + [old_path] if old_path else present)
+    except Exception:
+        pass
+    return env
+
+
 def _ensure_ollama_running():
+    global _OLLAMA_GPU_BOOTSTRAPPED, _OLLAMA_STARTED_BY_APP
+    if OLLAMA_FORCE_GPU and OLLAMA_RESTART_FOR_GPU and not _OLLAMA_GPU_BOOTSTRAPPED:
+        _OLLAMA_GPU_BOOTSTRAPPED = True
+        try:
+            if os.name == "nt":
+                # Kill tray + server once, then launch serve with explicit GPU env.
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "ollama app.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "ollama.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "ollama serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            time.sleep(0.7)
+        except Exception:
+            pass
+
     if _ollama_up():
         return True
     try:
-        subprocess.Popen(
-            [OLLAMA_BIN, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        ollama_bin = shutil.which(OLLAMA_BIN) or OLLAMA_BIN
+        ollama_cwd = None
+        try:
+            if os.path.isabs(ollama_bin):
+                ollama_cwd = os.path.dirname(ollama_bin)
+        except Exception:
+            ollama_cwd = None
+
+        started = False
+        if os.name == "nt":
+            try:
+                app_bin = os.path.join(ollama_cwd or "", "ollama app.exe")
+                if app_bin and os.path.isfile(app_bin):
+                    subprocess.Popen(
+                        [app_bin],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        # On Windows, app-managed Ollama detects GPU correctly
+                        # with its own default environment.
+                        env=os.environ.copy(),
+                        cwd=ollama_cwd,
+                    )
+                    started = True
+            except Exception:
+                started = False
+
+        if not started:
+            subprocess.Popen(
+                [ollama_bin, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                env=_ollama_serve_env(),
+                cwd=ollama_cwd,
+            )
+        _OLLAMA_STARTED_BY_APP = True
+
         for _ in range(40):  # wait ~10s
             if _ollama_up():
                 return True
@@ -400,7 +631,12 @@ def _warm_ollama_model(model: str, *, timeout: int = OLLAMA_WARM_TIMEOUT_SEC) ->
         "prompt": "Warmup. Respond with OK.",
         "stream": False,
         "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
-        "options": {"num_predict": 8, "temperature": 0.0},
+        "options": {
+            "num_predict": 8,
+            "temperature": 0.0,
+            "num_gpu": int(OLLAMA_NUM_GPU),
+            "main_gpu": int(OLLAMA_MAIN_GPU),
+        },
     }
     try:
         req = request.Request(
@@ -416,6 +652,117 @@ def _warm_ollama_model(model: str, *, timeout: int = OLLAMA_WARM_TIMEOUT_SEC) ->
         return True, "ready"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _format_gib(n: object) -> str:
+    try:
+        v = float(n)
+        if v <= 0:
+            return "0.0GiB"
+        return f"{v / (1024 ** 3):.1f}GiB"
+    except Exception:
+        return "0.0GiB"
+
+
+def _ollama_startup_probe() -> None:
+    """Start Ollama with GPU env and print CPU/GPU status at app startup."""
+    if not OLLAMA_STARTUP_PROBE:
+        return
+
+    if not _ensure_ollama_running():
+        print("[WARN] Ollama startup check: service not reachable.")
+        return
+
+    probe_model = (OLLAMA_MODEL_CAPTION or OLLAMA_MODEL or "minicpm-v:latest").strip()
+    names = _ollama_model_names(timeout=3.0)
+    if names:
+        resolved = _resolve_ollama_model_alias(probe_model, names)
+        if resolved:
+            probe_model = resolved
+
+    # Force a tiny load so /api/ps can report CPU/GPU immediately.
+    try:
+        payload = {
+            "model": probe_model,
+            "prompt": "ok",
+            "stream": False,
+            "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
+            "options": {
+                "num_predict": 1,
+                "temperature": 0.0,
+                "num_ctx": 32768,
+                "num_gpu": int(OLLAMA_NUM_GPU),
+                "main_gpu": int(OLLAMA_MAIN_GPU),
+            },
+        }
+        req = request.Request(
+            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=30) as resp:
+            _ = resp.read()
+    except Exception as e:
+        print(
+            f"[WARN] Ollama startup check: probe generate failed for '{probe_model}': {type(e).__name__}: {e}"
+        )
+
+    try:
+        with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=5) as resp:
+            ps = json.loads(resp.read().decode("utf-8"))
+        models = list((ps or {}).get("models", []))
+        chosen = None
+        for m in models:
+            if str(m.get("name", "")).strip() == probe_model:
+                chosen = m
+                break
+        if not chosen and models:
+            chosen = models[0]
+        if not chosen:
+            print("[INFO] Ollama startup check: no model loaded yet.")
+            return
+        vram = int(chosen.get("size_vram") or 0)
+        proc = "GPU" if vram > 0 else "CPU"
+        ctx = int(chosen.get("context_length") or 0)
+        name = str(chosen.get("name") or probe_model)
+        print(
+            f"[INFO] Ollama startup check: model={name} processor={proc} context={ctx} vram={_format_gib(vram)}"
+        )
+    except Exception as e:
+        print(f"[WARN] Ollama startup check failed: {type(e).__name__}: {e}")
+
+
+def _shutdown_ollama_on_run_end() -> None:
+    """Close app-started Ollama processes after run is fully done."""
+    if not OLLAMA_CLOSE_ON_RUN_END:
+        return
+    if not _OLLAMA_STARTED_BY_APP:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama app.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-f", "ollama"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        print("[INFO] Ollama runtime closed.")
+    except Exception as e:
+        print(f"[WARN] Could not close Ollama runtime: {type(e).__name__}: {e}")
 
 
 _QC_NATURE_CUES = (
@@ -878,33 +1225,14 @@ def _normalize_subject_line(
     line = _smart_title_case(words)
 
     if len(line) > max_chars:
-        trailing_joiners = {
-            "a",
-            "an",
-            "and",
-            "at",
-            "by",
-            "for",
-            "from",
-            "in",
-            "near",
-            "of",
-            "on",
-            "over",
-            "the",
-            "to",
-            "under",
-            "with",
-        }
         cut = line[:max_chars].rstrip()
         # Avoid chopping words in the middle when we enforce max chars.
         space_at = cut.rfind(" ")
         if space_at >= max(1, int(max_chars * 0.6)):
             cut = cut[:space_at].rstrip()
-        parts = cut.split()
-        while len(parts) > max(1, min_words) and parts[-1].lower() in trailing_joiners:
-            parts.pop()
-        cut = " ".join(parts).strip()
+        # Keep trailing joiners (e.g. "in", "of", "the") if the user/AI output
+        # naturally ends with them after max-char trimming.
+        cut = cut.strip()
         line = cut
 
     return line
@@ -993,6 +1321,8 @@ def _subject_generate(
             "repeat_penalty": 1.1,
             "repeat_last_n": 64,
             "seed": 42,
+            "num_gpu": int(OLLAMA_NUM_GPU),
+            "main_gpu": int(OLLAMA_MAIN_GPU),
             "stop": ["\n"],
         },
     }
@@ -1142,6 +1472,13 @@ def ai_suggest_subject(image_path: str) -> str | None:
 
     if not os.path.isfile(image_path):
         return None
+    # Fast path: local nature classifier (bird/animal/plant) when filename hints support it.
+    try:
+        quick = _nature_subject_from_classifier(image_path)
+        if quick:
+            return quick
+    except Exception:
+        pass
     if not _ensure_ollama_running():
         return None
     subject_model = _pick_subject_model()
@@ -2497,16 +2834,28 @@ class MultiSetApp:
         self._ai_subject_paths_sig = paths_sig
 
         # Never block the Tk main thread (prevents "Not Responding")
+        _ai_btn_prev_text = None
         try:
             if hasattr(self, "ai_subject_btn"):
-                self.ai_subject_btn.configure(state="disabled")
+                try:
+                    _ai_btn_prev_text = str(self.ai_subject_btn.cget("text"))
+                except Exception:
+                    _ai_btn_prev_text = "AI suggest subject"
+                self.ai_subject_btn.configure(
+                    state="disabled",
+                    text=f"AI suggesting... ({len(paths)})",
+                )
         except Exception:
             pass
 
         try:
-            self.stage_lbl["text"] = "AI subject: working..."
+            self.status_var.set(f"AI subject: working on {len(paths)} image(s)...")
+            self.root.update_idletasks()
         except Exception:
-            pass
+            try:
+                self.stage_lbl["text"] = f"AI subject: working on {len(paths)} image(s)..."
+            except Exception:
+                pass
 
         def _worker():
             try:
@@ -2519,7 +2868,10 @@ class MultiSetApp:
             def _done():
                 try:
                     if hasattr(self, "ai_subject_btn"):
-                        self.ai_subject_btn.configure(state="normal")
+                        self.ai_subject_btn.configure(
+                            state="normal",
+                            text=_ai_btn_prev_text or "AI suggest subject",
+                        )
                 except Exception:
                     pass
                 finally:
@@ -3560,6 +3912,9 @@ class MultiSetApp:
             if score_total > 0:
                 self._set_stage(4, STAGES[4])
                 os.environ["AMIR_REVIEW_DB"] = DB_PATH
+                # Strict scoring is mandatory: no safe fallback / no pyiqa skip.
+                os.environ["AMIR_SCORE_SAFE_MODE"] = "0"
+                os.environ["AMIR_SCORE_REQUIRE_PYIQA"] = "1"
                 script_score = _prepare_external_script("batch_image_quality_score.py")
 
                 def _mark_scoring_failed(reason: str):
@@ -4297,12 +4652,14 @@ class MultiSetApp:
                             runpy.run_path(_script3, run_name="__main__")
                             self._clear_session_state()
                             print("[INFO] Review/editor closed.")
+                            _shutdown_ollama_on_run_end()
                             return
 
                         if os.environ.get("AMIR_TRACE_SKIP_EDITOR") == "1":
                             self._clear_session_state()
                             print("[TRACE] Skipping review editor (AMIR_TRACE_SKIP_EDITOR=1).")
                             print("[INFO] Review/editor closed.")
+                            _shutdown_ollama_on_run_end()
                             return
 
                         py_editor = os.environ.get("AMIR_PYTHON") or sys.executable
@@ -4313,6 +4670,7 @@ class MultiSetApp:
 
                         self._clear_session_state()
                         print("[INFO] Review/editor closed.")
+                        _shutdown_ollama_on_run_end()
 
                     except Exception as _ex2:
                         traceback.print_exc()
@@ -5174,6 +5532,7 @@ if __name__ == "__main__":
         print("\n========= Amir2000 Image Automation: MULTI-SET START =========")
         print(f"[INFO] Using DB at: {DB_PATH}")
         print(f"[INFO] Using used_filenames at: {USED_NAMES}")
+        _ollama_startup_probe()
         root = tk.Tk()
         app = MultiSetApp(root)
         try:

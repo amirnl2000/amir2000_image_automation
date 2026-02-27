@@ -7,10 +7,12 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import sqlite3
 import sys
 import time
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +21,29 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import requests
 from PIL import Image
 from tqdm import tqdm
+
+try:
+    from transformers import pipeline
+    from transformers.utils import logging as _hf_logging
+except Exception:
+    pipeline = None
+    _hf_logging = None
+
+# Suppress known noisy, non-actionable upstream warnings in production logs.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*`resume_download` is deprecated.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*Could not find image processor class.*feature_extractor_type.*",
+)
+if _hf_logging is not None:
+    try:
+        _hf_logging.set_verbosity_error()
+    except Exception:
+        pass
 
 # ============================================================
 # Goals (your requirements)
@@ -41,6 +66,110 @@ _KNOWN_LOCATION_PHRASES: Set[str] = set()
 _KNOWN_LOCATION_TOKENS: Set[str] = set()
 _KNOWN_FOLDER_TOKENS: Set[str] = set()
 _FOLDER_MAP_BY_KEY: Dict[str, str] = {}
+
+# ---- Nature classifier (optional, open-source) ----
+_NATURE_CLASSIFIER_ENABLE = os.getenv("NATURE_CLASSIFIER_ENABLE", "1").strip() != "0"
+_NATURE_CLASSIFIER_MODEL = os.getenv("NATURE_CLASSIFIER_MODEL", "openai/clip-vit-large-patch14").strip()
+_NATURE_CLASSIFIER_MIN_SCORE = float(os.getenv("NATURE_CLASSIFIER_MIN_SCORE", "0.55"))
+_NATURE_CLASSIFIER_MIN_SCORE_GENERIC = float(os.getenv("NATURE_CLASSIFIER_MIN_SCORE_GENERIC", "0.40"))
+_NATURE_CLASSIFIER_PIPE = None
+
+_NATURE_HINT_TOKENS = {
+    "bird",
+    "birds",
+    "raptor",
+    "buzzard",
+    "wigeon",
+    "pigeon",
+    "pigeons",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "seagull",
+    "gull",
+    "animal",
+    "animals",
+    "fox",
+    "deer",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "macro",
+    "flower",
+    "flowers",
+    "plant",
+    "plants",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "reeds",
+    "reed",
+    "wetland",
+    "seed",
+    "seedhead",
+}
+
+_NATURE_BIRD_LABELS = [
+    "common buzzard",
+    "eurasian wigeon",
+    "pigeon",
+    "pigeons",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "seagull",
+    "gull",
+    "bird",
+    "raptor",
+    "waterfowl",
+]
+_NATURE_ANIMAL_LABELS = [
+    "fox",
+    "deer",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "animal",
+]
+_NATURE_PLANT_LABELS = [
+    "dry reeds",
+    "reeds",
+    "reed",
+    "flower",
+    "flowers",
+    "plant",
+    "plants",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "seed head",
+    "seed heads",
+    "moss",
+    "lichen",
+    "fern",
+    "leaf",
+]
+_NATURE_GENERIC_ALLOW = {
+    "bird",
+    "raptor",
+    "waterfowl",
+    "animal",
+    "plant",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "reeds",
+    "reed",
+    "seed head",
+    "seed heads",
+    "flower",
+    "flowers",
+}
 
 # Words we do not want in keywords (fluff, meta, and your website/gear junk)
 _KW_BANNED: Set[str] = {
@@ -1363,6 +1492,135 @@ def _filename_time_hints(file_name: str) -> Tuple[bool, bool]:
     return sunrise_hint, sunset_hint
 
 
+def _filename_tokens(file_name: str) -> Set[str]:
+    stem = _norm_text_strict(_clean_phrase(Path(file_name or "").stem))
+    if not stem:
+        return set()
+    return set(stem.split())
+
+
+def _should_run_nature_classifier(folder: str, subject: str, file_name: str) -> bool:
+    if not _NATURE_CLASSIFIER_ENABLE or pipeline is None:
+        return False
+    blob = _norm_text_strict(f"{folder} {subject} {Path(file_name or '').stem}")
+    if not blob:
+        return False
+    if "macro" in blob or "nature" in blob or "birds" in blob or "botanical" in blob:
+        return True
+    toks = set(blob.split())
+    return bool(toks & _NATURE_HINT_TOKENS)
+
+
+def _candidate_labels_for_classifier(folder: str, subject: str, file_name: str) -> List[str]:
+    stem_toks = _filename_tokens(file_name)
+    subj_toks = set(_norm_text_strict(_clean_phrase(subject)).split())
+    blob = " ".join(sorted(stem_toks | subj_toks))
+    labels: List[str] = []
+
+    if any(t in blob for t in ("bird", "buzzard", "wigeon", "pigeon", "duck", "goose", "heron", "cormorant", "gull", "seagull")):
+        labels.extend(_NATURE_BIRD_LABELS)
+    if any(t in blob for t in ("animal", "fox", "deer", "rabbit", "hare", "squirrel")):
+        labels.extend(_NATURE_ANIMAL_LABELS)
+    if any(t in blob for t in ("plant", "flower", "tree", "branch", "reeds", "reed", "seed", "macro", "botanical")):
+        labels.extend(_NATURE_PLANT_LABELS)
+
+    # Filename-driven exact hints (boost zero-shot ranking)
+    if "common" in stem_toks and "buzzard" in stem_toks:
+        labels.insert(0, "common buzzard")
+    if "eurasian" in stem_toks and "wigeon" in stem_toks:
+        labels.insert(0, "eurasian wigeon")
+    if "pigeon" in stem_toks or "pigeons" in stem_toks:
+        labels.insert(0, "pigeons")
+    if "reed" in stem_toks or "reeds" in stem_toks:
+        labels.insert(0, "dry reeds")
+        labels.insert(1, "reeds")
+
+    # Always include safe generic options at the end
+    labels.extend(["bird", "animal", "plant", "tree"])
+
+    out: List[str] = []
+    seen = set()
+    for x in labels:
+        s = str(x).strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out[:40]
+
+
+def _family_for_label(label: str) -> str:
+    l = str(label or "").lower()
+    if any(x in l for x in ["buzzard", "wigeon", "pigeon", "duck", "goose", "heron", "cormorant", "gull", "seagull", "bird", "raptor", "waterfowl"]):
+        return "bird"
+    if any(x in l for x in ["fox", "deer", "rabbit", "hare", "squirrel", "animal"]):
+        return "animal"
+    if any(x in l for x in ["flower", "plant", "reeds", "reed", "seed head", "seed", "moss", "lichen", "fern", "leaf"]):
+        return "plant"
+    if any(x in l for x in ["tree", "trees", "branch", "branches"]):
+        return "tree"
+    return "scene"
+
+
+def _load_nature_classifier(model: str):
+    global _NATURE_CLASSIFIER_PIPE
+    if _NATURE_CLASSIFIER_PIPE is not None:
+        return _NATURE_CLASSIFIER_PIPE
+    if pipeline is None:
+        return None
+    _NATURE_CLASSIFIER_PIPE = pipeline("zero-shot-image-classification", model=model, device=-1)
+    return _NATURE_CLASSIFIER_PIPE
+
+
+def _run_nature_classifier(image_path: Path, folder: str, subject: str, file_name: str) -> Optional[Dict[str, object]]:
+    if not _should_run_nature_classifier(folder, subject, file_name):
+        return None
+    labels = _candidate_labels_for_classifier(folder, subject, file_name)
+    if not labels:
+        return None
+    pipe = _load_nature_classifier(_NATURE_CLASSIFIER_MODEL)
+    if pipe is None:
+        return None
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+    try:
+        preds = pipe(img, candidate_labels=labels)
+    except Exception:
+        return None
+    if isinstance(preds, dict) and "labels" in preds and "scores" in preds:
+        preds = [{"label": l, "score": s} for l, s in zip(preds["labels"], preds["scores"])]
+    preds = list(preds) if isinstance(preds, list) else []
+    if not preds:
+        return None
+    top = preds[0]
+    try:
+        score = float(top.get("score", 0.0))
+    except Exception:
+        score = 0.0
+    label = str(top.get("label", "")).strip().lower()
+    family = _family_for_label(label)
+    min_score = _NATURE_CLASSIFIER_MIN_SCORE if family in {"bird", "animal", "plant", "tree"} else _NATURE_CLASSIFIER_MIN_SCORE_GENERIC
+    if score < min_score or not label:
+        return None
+
+    # Safety: only allow species labels when they align with filename/subject tokens.
+    fn_toks = _filename_tokens(file_name) | set(_norm_text_strict(_clean_phrase(subject)).split())
+    label_toks = set(_norm_text_strict(label).split())
+    if label not in _NATURE_GENERIC_ALLOW and not (label_toks & fn_toks):
+        return None
+
+    return {"label": label, "score": round(score, 4), "family": family, "source": "nature_classifier"}
+
+
+def _label_to_subject_identifier(label: str) -> str:
+    s = _clean_phrase(label)
+    if not s:
+        return ""
+    return "_".join([w.capitalize() for w in s.split() if w])
+
+
 def _context_evidence_blob(folder: str, subject: str, location: str, file_name: str = "") -> str:
     folder_display = _FOLDER_MAP_BY_KEY.get(str(folder or "").strip().lower(), "")
     stem = _clean_phrase(Path(file_name or "").stem)
@@ -1794,6 +2052,10 @@ def _deawkward_sentence(s: str) -> str:
     s = re.sub(r"\b([A-Za-z]+)\s+and\s+a\s+\1\b", r"\1", s, flags=re.IGNORECASE)
     s = re.sub(r"\b([A-Za-z]+)\s+\1\b", r"\1", s, flags=re.IGNORECASE)
     s = re.sub(r"\bview of\s+(along|in|with|over|showing|across|near)\b", r"view \1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+edge\s+of\s+(?:a|the)\s+water\b", "the edge of the water", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+edge\s+of\s+water\b", "the edge of the water", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+water's\s+edge\b", "the water's edge", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+(calm|still|clear)\s+water\b", r"\1 water", s, flags=re.IGNORECASE)
     s = _WS_RE.sub(" ", s).strip()
     return s
 
@@ -1844,6 +2106,8 @@ def _has_low_quality_phrase(s: str) -> bool:
         r"\bvisible in the background\b",
         r"\bwith context\b",
         r"\bshows? a with\b",
+        r"\bview of (?:a|an|the) with\b",
+        r"\bof (?:a|an|the) with\b",
         r"\bscene view of scene\b",
         r"\bopen[- ]air view of scene\b",
         r"\boutdoor view of scene\b",
@@ -1872,6 +2136,9 @@ def _has_low_quality_phrase(s: str) -> bool:
         r"\bsits among dense city buildings\b",
         r"\bappears within downtown streets\b",
         r"\bstreet-level city view of urban scene\b",
+        r"\bparked wall\b",
+        r"\bvisible surroundings\b",
+        r"\bnatural ground texture\b",
         r"\bin this photo\b",
         r",\s*\.$",
     )
@@ -4996,6 +5263,7 @@ def build_prompt(
     avoid_caption_prefixes: Sequence[str],
     avoid_alt_prefixes: Sequence[str],
     avoid_kw_sigs: Sequence[str],
+    classifier_hint: Optional[Dict[str, object]] = None,
     sequence_no: int = 0,
     series_size: int = 1,
 ) -> str:
@@ -5056,6 +5324,17 @@ def build_prompt(
         lines.append(f"subject: {subject}")
     if location:
         lines.append(f"location: {location}")
+    if classifier_hint:
+        fam = str(classifier_hint.get("family") or "")
+        lab = str(classifier_hint.get("label") or "")
+        sc = classifier_hint.get("score")
+        lines.append("nature_classifier: (use ONLY if clearly consistent with filename and visible evidence)")
+        if fam:
+            lines.append(f"nature_classifier_family: {fam}")
+        if lab:
+            lines.append(f"nature_classifier_label: {lab}")
+        if sc is not None:
+            lines.append(f"nature_classifier_score: {sc}")
     if sequence_no > 0:
         lines.append(f"sequence_no: {sequence_no}")
     if series_size > 1:
@@ -5087,6 +5366,7 @@ def build_rewrite_prompt(
     quality_issues: Sequence[str],
     avoid_caption_prefixes: Sequence[str],
     avoid_alt_prefixes: Sequence[str],
+    classifier_hint: Optional[Dict[str, object]] = None,
     sequence_no: int = 0,
     series_size: int = 1,
 ) -> str:
@@ -5129,6 +5409,17 @@ def build_rewrite_prompt(
         lines.append(f"subject: {subject}")
     if location:
         lines.append(f"location: {location}")
+    if classifier_hint:
+        fam = str(classifier_hint.get("family") or "")
+        lab = str(classifier_hint.get("label") or "")
+        sc = classifier_hint.get("score")
+        lines.append("nature_classifier: (use ONLY if clearly consistent with filename and visible evidence)")
+        if fam:
+            lines.append(f"nature_classifier_family: {fam}")
+        if lab:
+            lines.append(f"nature_classifier_label: {lab}")
+        if sc is not None:
+            lines.append(f"nature_classifier_score: {sc}")
     if sequence_no > 0:
         lines.append(f"sequence_no: {sequence_no}")
     if series_size > 1:
@@ -5162,6 +5453,7 @@ def rewrite_weak_payload(
     quality_issues: Sequence[str],
     avoid_caption_prefixes: Sequence[str],
     avoid_alt_prefixes: Sequence[str],
+    classifier_hint: Optional[Dict[str, object]] = None,
     sequence_no: int = 0,
     series_size: int = 1,
 ) -> Optional[Tuple[str, str, List[str]]]:
@@ -5176,6 +5468,7 @@ def rewrite_weak_payload(
         quality_issues=quality_issues,
         avoid_caption_prefixes=avoid_caption_prefixes,
         avoid_alt_prefixes=avoid_alt_prefixes,
+        classifier_hint=classifier_hint,
         sequence_no=sequence_no,
         series_size=series_size,
     )
@@ -5441,6 +5734,12 @@ def process_one(
         return False, "", "", f"missing file: {image_path}"
 
     location = _enrich_location(location, folder, subject)
+    classifier_hint = _run_nature_classifier(image_path, folder, subject, file_name)
+    subject_gen = subject
+    if classifier_hint:
+        ident = _label_to_subject_identifier(str(classifier_hint.get("label") or ""))
+        if ident:
+            subject_gen = ident.replace("_", " ")
     image_b64 = image_to_base64_jpeg(image_path, img_max_side, img_quality)
     last_reason = "not_started"
     base_seed = _stable_seed(folder, subject, location, file_name, str(image_path))
@@ -5475,12 +5774,13 @@ def process_one(
 
         prompt = build_prompt(
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             keywords_n=keywords_n,
             avoid_caption_prefixes=avoid_caps,
             avoid_alt_prefixes=avoid_alts,
             avoid_kw_sigs=avoid_kws,
+            classifier_hint=classifier_hint,
             sequence_no=sequence_no,
             series_size=series_size,
         )
@@ -5514,7 +5814,7 @@ def process_one(
             alt_text=alt_text,
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             file_name=file_name,
             keywords_n=keywords_n,
@@ -5527,7 +5827,7 @@ def process_one(
             kw_list=kw_list,
             keywords_n=keywords_n,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
         )
         if rewrite_weak and rewrite_passes > 0 and initial_score < quality_floor:
@@ -5545,7 +5845,7 @@ def process_one(
                     options=opts,
                     image_b64=image_b64,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     keywords_n=keywords_n,
                     draft_caption=best_caption,
@@ -5554,6 +5854,7 @@ def process_one(
                     quality_issues=best_issues,
                     avoid_caption_prefixes=avoid_caps,
                     avoid_alt_prefixes=avoid_alts,
+                    classifier_hint=classifier_hint,
                     sequence_no=sequence_no + attempt + rp,
                     series_size=series_size,
                 )
@@ -5565,7 +5866,7 @@ def process_one(
                     alt_text=ra,
                     kw_list=rk,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     file_name=file_name,
                     keywords_n=keywords_n,
@@ -5576,7 +5877,7 @@ def process_one(
                     kw_list=rk,
                     keywords_n=keywords_n,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                 )
                 if r_score >= best_score:
@@ -5597,7 +5898,7 @@ def process_one(
         ):
             caption = _fallback_caption_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 7,
                 sequence_no=sequence_no,
@@ -5612,7 +5913,7 @@ def process_one(
         ):
             alt_text = _fallback_alt_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 11,
                 sequence_no=sequence_no,
@@ -5624,7 +5925,7 @@ def process_one(
         ):
             alt_text = _fallback_alt_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 17,
                 sequence_no=sequence_no + 1,
@@ -5634,7 +5935,7 @@ def process_one(
         if _caption_alt_too_similar(caption, alt_text):
             caption = _fallback_caption_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 19,
                 sequence_no=sequence_no + 2,
@@ -5645,7 +5946,7 @@ def process_one(
             alt_text=alt_text,
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             file_name=file_name,
             keywords_n=keywords_n,
@@ -5682,7 +5983,7 @@ def process_one(
         kw_list = _finalize_keywords(
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             caption=caption,
             alt_text=alt_text,
@@ -5693,7 +5994,7 @@ def process_one(
             alt_text=alt_text,
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             file_name=file_name,
             keywords_n=keywords_n,
@@ -5706,7 +6007,7 @@ def process_one(
             kw_list=kw_list,
             keywords_n=keywords_n,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
         )
 
@@ -5725,7 +6026,7 @@ def process_one(
                     options=opts,
                     image_b64=image_b64,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     keywords_n=keywords_n,
                     draft_caption=best_caption,
@@ -5734,6 +6035,7 @@ def process_one(
                     quality_issues=best_issues,
                     avoid_caption_prefixes=avoid_caps,
                     avoid_alt_prefixes=avoid_alts,
+                    classifier_hint=classifier_hint,
                     sequence_no=sequence_no + attempt + rp + 100,
                     series_size=series_size,
                 )
@@ -5743,7 +6045,7 @@ def process_one(
                 rk = _finalize_keywords(
                     kw_list=rk,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     caption=rc,
                     alt_text=ra,
@@ -5754,7 +6056,7 @@ def process_one(
                     alt_text=ra,
                     kw_list=rk,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     file_name=file_name,
                     keywords_n=keywords_n,
@@ -5765,7 +6067,7 @@ def process_one(
                     kw_list=rk,
                     keywords_n=keywords_n,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                 )
                 if r_score >= best_score:
@@ -5783,7 +6085,7 @@ def process_one(
             series_key=series_key,
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             caption=caption,
             keywords_n=keywords_n,

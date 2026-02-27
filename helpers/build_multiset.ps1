@@ -69,7 +69,8 @@ Write-Host "[INFO] Ensuring PyInstaller exists..."
 
 # Keep EXE lean by default (matches your old stable approach)
 $excludes = @(
-    "torch","torchvision","pyiqa","clip","cv2",
+    "torch","torchvision","transformers","huggingface_hub","tokenizers","safetensors",
+    "pyiqa","clip","cv2",
     "matplotlib","pandas","scipy","dask",
     "tensorflow","keras","tf_keras","tensorboard","tensorflow_probability",
     "jax","jaxlib","tflite_runtime","flax","optax",
@@ -113,6 +114,11 @@ $piArgs = @(
     "--hidden-import","regex",
     "--hidden-import","piexif",
     "--collect-all","piexif",
+    # review_editor imports caption_review_local dynamically at runtime.
+    # Include it (and a couple of transitive modules it needs) explicitly.
+    "--hidden-import","caption_review_local",
+    "--hidden-import","requests",
+    "--hidden-import","http.cookies",
 
     # Pillow for runpy scripts
     "--hidden-import","PIL.Image",
@@ -148,6 +154,11 @@ foreach ($d in $addData) {
     if (Test-Path -LiteralPath $srcPath) {
         $piArgs += @("--add-data", $d)
     }
+}
+
+$runtimeHook = Join-Path $root "helpers\runtime_hook_samevenv_classifier.py"
+if (Test-Path -LiteralPath $runtimeHook) {
+    $piArgs += @("--runtime-hook", $runtimeHook)
 }
 
 # Full profile is optional and NOT recommended right now while NTFS/WOF is crashing

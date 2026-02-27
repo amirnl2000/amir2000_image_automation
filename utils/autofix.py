@@ -412,7 +412,7 @@ def autofix_subject(subject: str, dict_path: str) -> str:
       - normalize spaces/underscores
       - apply manual mapping replacements (autofix_dict.json)
       - apply English spellcheck (pyspellchecker) with exceptions
-      - trim dangling stop-words at end
+      - keep user wording (including trailing small words like "in/of/the")
     """
     s = _norm_spaces(subject)
     if not s:
@@ -426,13 +426,4 @@ def autofix_subject(subject: str, dict_path: str) -> str:
     data_dir = os.path.dirname(dict_path)
     s3, _ = spellcheck_text(s2, data_dir)
 
-    # trim trailing dangling small words (common fragment endings)
-    stop = {
-        "and", "or", "of", "in", "at", "with", "on", "for", "to", "from",
-        "a", "an", "the", "by", "near", "over", "under", "above", "below", "into"
-    }
-    parts = s3.split()
-    while len(parts) > 2 and parts[-1].lower().strip(" ,.;:-") in stop:
-        parts.pop()
-
-    return _norm_spaces(" ".join(parts))
+    return _norm_spaces(s3)
