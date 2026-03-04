@@ -1,21 +1,7 @@
 {
-  "flagged": null,
+  "flagged": [],
   "summary": {
-    "keywords_dup_rows": 0,
-    "caption_dup_rows": 0,
-    "alt_dup_rows": 0,
-    "caption_alt_pair_dup_rows": 0,
-    "caption_dup_groups": 0,
-    "caption_alt_equal_rows": 0,
-    "suspicious_rows": 0,
-    "report_path": "YOUR_PATH_HERE",
-    "duplicate_rows_total": 0,
-    "flagged_rows_total": 0,
-    "sample_ids": null,
-    "keywords_dup_groups": 0,
-    "caption_alt_pair_dup_groups": 0,
-    "scope_ids_count": 1,
     "row_count": 1,
-    "alt_dup_groups": 0
+    "report_path": "YOUR_PATH_HERE"
   }
 }
