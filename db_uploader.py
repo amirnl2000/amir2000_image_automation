@@ -400,7 +400,6 @@ def upload():
 
     if not rows:
         print("0 images were processed and uploaded successfully.")
-        print("Click OK to close.")
         qconn.close()
         return 0
 
@@ -497,17 +496,20 @@ def upload():
             public_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, folder_key, fname] if p])
             public_path = public_path.replace(" ", "%20")
 
+            # Always persist a deterministic thumb URL (never NULL in DB).
+            thumb_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, "thumbs", folder_key, fname] if p])
+            thumb_path = thumb_path.replace(" ", "%20")
+
             # Upload thumb from local mirror if present
             thumb_local = os.path.join(LOCAL_BASE, year, "thumbs", folder_key, fname) if LOCAL_BASE else ""
-            thumb_path = None
             if thumb_local and os.path.exists(thumb_local):
                 mkdir_p(ftp, remote_thumb_dir)
                 ftp.cwd("/")
                 ftp.cwd(remote_thumb_dir)
                 with open(thumb_local, "rb") as tf:
                     ftp.storbinary(f"STOR {fname}", tf)
-                thumb_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, "thumbs", folder_key, fname] if p])
-                thumb_path = thumb_path.replace(" ", "%20")
+            else:
+                LOGGER.warning("Thumb missing locally for %s (expected %s); URL still set in DB.", fname, thumb_local)
 
             # Insert/update by File_Name (UNIQUE). Never reuse review_queue id for MySQL PK.
             sql = f"""
@@ -652,11 +654,9 @@ def upload():
     # Console/UI output
     if fail == 0:
         print(f"{success} images were processed and uploaded successfully.")
-        print("Click OK to close.")
     else:
         print(f"Uploaded {success} images. {fail} failed.")
         print("See logs/uploader.log for details.")
-        print("Click OK to close.")
 
     return 0 if fail == 0 else 1
 

@@ -35,7 +35,6 @@ $ErrLog  = Join-Path $logDir "build_multiset.err.log"
 
 # Pick venv python
 $py = Get-FirstExistingPath @(
-    (Join-Path $root ".venv_cuda\Scripts\python.exe"),
     (Join-Path $root ".venv313\Scripts\python.exe"),
     (Join-Path $root ".venv_cuda\Scripts\python.exe"),
     (Join-Path $root ".venv\Scripts\python.exe")
@@ -115,9 +114,9 @@ $piArgs = @(
     "--hidden-import","regex",
     "--hidden-import","piexif",
     "--collect-all","piexif",
-    # review_editor imports caption_review_local dynamically at runtime.
-    # Include it (and a couple of transitive modules it needs) explicitly.
-    "--hidden-import","caption_review_local",
+    # caption_review_local.py is shipped as external data and run via external
+    # Python in Stage 6. Do not hidden-import it in the EXE build, because
+    # PyInstaller+Python 3.13 can crash while bytecode-scanning that module.
     "--hidden-import","requests",
     "--hidden-import","http.cookies",
 

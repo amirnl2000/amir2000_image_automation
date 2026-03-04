@@ -5,6 +5,10 @@ import shutil
 import sqlite3
 import subprocess
 import json
+import traceback
+import threading
+import uuid
+import tempfile
 from tkinter import Tk, Label, Entry, Button, StringVar, messagebox, Frame, Text, END, DISABLED, Menu
 from tkinter import ttk
 from PIL import Image, ImageTk
@@ -124,6 +128,8 @@ PUBLIC_URL_BASE = PUBLISH.get("PUBLIC_URL_BASE", "")
 # Canonical data location
 DATA_DIR = PATHS.get("DATA_DIR", r"YOUR_PATH_HERE")
 UI_STATE_FILE = os.path.join(DATA_DIR, "ui_state.json")
+REVIEW_EDITOR_CRASH_LOG = os.path.join(DATA_DIR, "review_editor_crash.log")
+PUBLISH_QUEUE_FILE = os.path.join(DATA_DIR, "publish_queue.json")
 
 # DB location (allow env override)
 DB_PATH = os.environ.get("AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.join(DATA_DIR, "review.db")))
@@ -142,7 +148,7 @@ WATERMARK_TEXT = "© YOUR_HOST\nPhotography"
 # ---- Regenerate (caption/alt/keywords) via caption_review_local.py ----
 CAPTION_ENDPOINT = os.getenv("CAPTION_ENDPOINT", "http://127.0.0.1:11434/api/generate")
 CAPTION_MODEL = os.getenv("OLLAMA_MODEL_CAPTION", "llava:13b")
-CAPTION_MODEL_FALLBACK = os.getenv("OLLAMA_MODEL_CAPTION_FALLBACK", "llava:34b").strip()
+CAPTION_MODEL_FALLBACK = os.getenv("OLLAMA_MODEL_CAPTION_FALLBACK", "").strip()
 CAPTION_TIMEOUT_SEC = int(os.getenv("CAPTION_TIMEOUT_SEC", "420"))
 CAPTION_OPTS = {
     "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "4096")),
@@ -397,6 +403,10 @@ class ReviewApp:
         self.master.resizable(True, True)
         self.master.protocol("WM_DELETE_WINDOW", self._on_close)
         self.master.title("Amir2000 Image Review & Publish")
+        try:
+            self.master.report_callback_exception = self._report_callback_exception
+        except Exception:
+            pass
 
 
 
@@ -410,17 +420,51 @@ class ReviewApp:
         self._text_spell_after_ids: dict[str, str] = {}
         self._text_spell_hits: dict[str, list[dict]] = {}
         self._spellcheck_ok_cached: bool | None = None
-        self.file_ops_queue: list[tuple[dict, dict]] = []
+        self.file_ops_queue: list[tuple[dict, dict]] = []  # legacy in-memory queue
         self._wants_upload = False
         self._qr_updating = False  # guard to prevent slider->callback recursion
+        self._action_in_progress = False
+        self._autoscan_spell_on_load = os.getenv(
+            "AMIR_AUTOSPELLCHECK_ON_LOAD", "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
+        self._publish_lock = threading.Lock()
+        self.publish_queue: list[dict] = []
+        self._publish_thread: threading.Thread | None = None
+        self._publish_running = False
+        self._publish_last_result: dict | None = None
+        self._publish_progress = {
+            "total": 0,
+            "processed": 0,
+            "uploaded": 0,
+            "failed": 0,
+            "phase": "idle",
+            "last": "",
+        }
+        self.publish_status_var = StringVar(value="Publish queue: 0 pending")
+        self._load_publish_queue()
 
         self.build_layout()
+        self._refresh_publish_status()
+        self._set_review_actions_enabled(bool(self.images))
 
         if self.images:
             self.load_image()
         else:
-            messagebox.showinfo("No Images", "No images found to review.")
-            self.master.destroy()
+            if self._has_pending_publish_items():
+                if messagebox.askyesno(
+                    "Resume publish",
+                    "No pending review rows were found, but there are pending publish tasks from a previous run.\n\n"
+                    "Do you want to resume publishing now?",
+                ):
+                    self._start_publish_worker()
+                else:
+                    messagebox.showinfo(
+                        "No Images",
+                        "No images found to review. You can still use 'Resume Publish' to continue queued uploads.",
+                    )
+            else:
+                messagebox.showinfo("No Images", "No images found to review.")
+                self.master.destroy()
 
     def _apply_ui_state(self, default_geometry: str = "1700x1050"):
         geo = default_geometry
@@ -436,6 +480,27 @@ class ReviewApp:
             self.master.geometry(geo)
         except Exception:
             self.master.geometry(default_geometry)
+        # If last saved position was on a disconnected screen, force it visible.
+        try:
+            self.master.update_idletasks()
+            sw = int(self.master.winfo_screenwidth())
+            sh = int(self.master.winfo_screenheight())
+            x = int(self.master.winfo_x())
+            y = int(self.master.winfo_y())
+            w = int(self.master.winfo_width())
+            h = int(self.master.winfo_height())
+            visible_w = max(0, min(x + w, sw) - max(x, 0))
+            visible_h = max(0, min(y + h, sh) - max(y, 0))
+            if visible_w < 120 or visible_h < 120:
+                self.master.geometry(default_geometry)
+                self.master.update_idletasks()
+                cw = int(self.master.winfo_width())
+                ch = int(self.master.winfo_height())
+                nx = max(0, (sw - cw) // 2)
+                ny = max(0, (sh - ch) // 2)
+                self.master.geometry(f"{cw}x{ch}+{nx}+{ny}")
+        except Exception:
+            pass
 
     def _save_ui_state(self):
         try:
@@ -453,6 +518,17 @@ class ReviewApp:
             pass
 
     def _on_close(self):
+        if self._publish_running:
+            if not messagebox.askyesno(
+                "Publish running",
+                "Background publish is still running.\n\n"
+                "Close anyway? You can resume later from the saved publish queue.",
+            ):
+                return
+        try:
+            self._cancel_pending_spellchecks()
+        except Exception:
+            pass
         try:
             self._save_ui_state()
         except Exception:
@@ -466,6 +542,456 @@ class ReviewApp:
         except Exception:
             pass
         self.master.destroy()
+
+    def _append_error_log(self, header: str, detail: str):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(REVIEW_EDITOR_CRASH_LOG, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().isoformat(timespec='seconds')}] {header}\n")
+                f.write((detail or "").rstrip() + "\n\n")
+        except Exception:
+            pass
+
+    def _report_callback_exception(self, exc, val, tb):
+        msg = "".join(traceback.format_exception(exc, val, tb))
+        self._append_error_log("Tk callback exception", msg)
+        try:
+            messagebox.showerror(
+                "Action failed",
+                "The action failed but the app stayed open.\n\n"
+                f"Details were logged to:\n{REVIEW_EDITOR_CRASH_LOG}",
+            )
+        except Exception:
+            pass
+
+    def _run_ui_action(self, action_name: str, fn):
+        if self._action_in_progress:
+            return
+        self._action_in_progress = True
+        try:
+            fn()
+        except Exception:
+            self._append_error_log(
+                f"Action failed: {action_name}",
+                traceback.format_exc(),
+            )
+            try:
+                messagebox.showerror(
+                    "Action failed",
+                    f"'{action_name}' failed. Nothing was deleted.\n\n"
+                    f"Check:\n{REVIEW_EDITOR_CRASH_LOG}",
+                )
+            except Exception:
+                pass
+        finally:
+            self._action_in_progress = False
+
+    def _set_review_actions_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for b in getattr(self, "_review_action_buttons", []):
+            try:
+                b.configure(state=state)
+            except Exception:
+                pass
+
+    def _atomic_write_json(self, path: str, payload):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix="pubq_", suffix=".json", dir=os.path.dirname(path) or None)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+
+    def _normalize_publish_item(self, item) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        try:
+            row_id = int(item.get("row_id") or item.get("id") or 0)
+        except Exception:
+            row_id = 0
+        if row_id <= 0:
+            return None
+        state = str(item.get("state") or "approved").strip().lower()
+        if state not in {"approved", "processed", "uploaded", "failed"}:
+            state = "approved"
+        original_img = item.get("original_img") if isinstance(item.get("original_img"), dict) else {}
+        values = item.get("values") if isinstance(item.get("values"), dict) else {}
+        if not values and isinstance(item.get("img_updated"), dict):
+            values = item.get("img_updated")
+        return {
+            "queue_id": str(item.get("queue_id") or uuid.uuid4()),
+            "row_id": row_id,
+            "state": state,
+            "attempts": int(item.get("attempts") or 0),
+            "last_error": str(item.get("last_error") or ""),
+            "created_at": str(item.get("created_at") or datetime.now().isoformat(timespec="seconds")),
+            "updated_at": str(item.get("updated_at") or datetime.now().isoformat(timespec="seconds")),
+            "original_img": dict(original_img or {}),
+            "values": dict(values or {}),
+        }
+
+    def _load_publish_queue(self):
+        arr = []
+        try:
+            if os.path.exists(PUBLISH_QUEUE_FILE):
+                with open(PUBLISH_QUEUE_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, list):
+                    arr = raw
+        except Exception:
+            arr = []
+        normalized: list[dict] = []
+        for x in arr:
+            n = self._normalize_publish_item(x)
+            if n is not None:
+                normalized.append(n)
+        with self._publish_lock:
+            self.publish_queue = normalized
+        # Rewrite normalized format so future loads stay stable.
+        try:
+            self._atomic_write_json(PUBLISH_QUEUE_FILE, normalized)
+        except Exception:
+            pass
+
+    def _save_publish_queue(self):
+        with self._publish_lock:
+            payload = [dict(x) for x in self.publish_queue]
+        self._atomic_write_json(PUBLISH_QUEUE_FILE, payload)
+
+    def _pending_publish_items(self) -> list[dict]:
+        with self._publish_lock:
+            return [dict(x) for x in self.publish_queue if str(x.get("state") or "").lower() != "uploaded"]
+
+    def _has_pending_publish_items(self) -> bool:
+        return bool(self._pending_publish_items())
+
+    def _publish_queue_used_names(self) -> set[str]:
+        out: set[str] = set()
+        for it in self._pending_publish_items():
+            vals = it.get("values") if isinstance(it.get("values"), dict) else {}
+            fn = clean_filename(vals.get("File_Name") or "")
+            if fn:
+                out.add(fn)
+        return out
+
+    def _enqueue_publish_item(self, original_img: dict, values: dict):
+        rid = int(values.get("id") or original_img.get("id") or 0)
+        if rid <= 0:
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        replaced = False
+        with self._publish_lock:
+            for it in self.publish_queue:
+                if int(it.get("row_id") or 0) == rid and str(it.get("state") or "").lower() != "uploaded":
+                    it["state"] = "approved"
+                    it["values"] = dict(values or {})
+                    it["original_img"] = dict(original_img or {})
+                    it["updated_at"] = now
+                    it["last_error"] = ""
+                    replaced = True
+                    break
+            if not replaced:
+                self.publish_queue.append(
+                    {
+                        "queue_id": str(uuid.uuid4()),
+                        "row_id": rid,
+                        "state": "approved",
+                        "attempts": 0,
+                        "last_error": "",
+                        "created_at": now,
+                        "updated_at": now,
+                        "original_img": dict(original_img or {}),
+                        "values": dict(values or {}),
+                    }
+                )
+        self._save_publish_queue()
+        self._refresh_publish_status()
+
+    def _refresh_publish_status(self):
+        with self._publish_lock:
+            q = list(self.publish_queue)
+            prog = dict(self._publish_progress)
+        counts = {"approved": 0, "processed": 0, "uploaded": 0, "failed": 0}
+        for it in q:
+            st = str(it.get("state") or "").lower()
+            if st in counts:
+                counts[st] += 1
+        pending = counts["approved"] + counts["processed"] + counts["failed"]
+        phase = str(prog.get("phase") or "idle")
+        if self._publish_running:
+            tail = (
+                f" | running {phase}: {int(prog.get('processed') or 0)}/{int(prog.get('total') or pending)}"
+                f" uploaded={int(prog.get('uploaded') or 0)} failed={int(prog.get('failed') or 0)}"
+            )
+        else:
+            tail = ""
+        self.publish_status_var.set(
+            f"Publish queue pending={pending} approved={counts['approved']} processed={counts['processed']} failed={counts['failed']}{tail}"
+        )
+
+    def _run_recovery_from_revamp(self):
+        script = os.path.join(os.path.dirname(__file__), "helpers", "recover_actual_images_from_revamp.py")
+        if not os.path.exists(script):
+            messagebox.showerror("Recovery", f"Recovery script not found:\n{script}")
+            return
+        res = subprocess.run(
+            [sys.executable, script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()[-3500:]
+        if res.returncode == 0:
+            messagebox.showinfo("Recovery Complete", out or "Done.")
+        else:
+            messagebox.showerror("Recovery Failed", out or f"Exit code {res.returncode}")
+
+    def _start_publish_worker(self):
+        if self._publish_running:
+            messagebox.showinfo("Publish", "Publish is already running in background.")
+            return
+        pending = self._pending_publish_items()
+        if not pending:
+            messagebox.showinfo("Publish", "No pending publish tasks.")
+            return
+        with self._publish_lock:
+            self._publish_progress = {
+                "total": len(pending),
+                "processed": 0,
+                "uploaded": 0,
+                "failed": 0,
+                "phase": "local",
+                "last": "",
+            }
+            self._publish_last_result = None
+        self._publish_running = True
+        self._publish_thread = threading.Thread(target=self._publish_worker_main, daemon=True)
+        self._publish_thread.start()
+        self._refresh_publish_status()
+        self.master.after(250, self._poll_publish_worker)
+
+    def _run_db_uploader_worker(self) -> tuple[int, str]:
+        try:
+            if getattr(sys, "frozen", False):
+                import runpy
+                try:
+                    runpy.run_path(resource_path("db_uploader.py"), run_name="__main__")
+                    return 0, "Uploader finished."
+                except SystemExit as se:
+                    code = int(se.code) if se.code is not None else 0
+                    return code, f"Uploader exit {code}"
+            res = subprocess.run(
+                [sys.executable, resource_path("db_uploader.py")],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            merged = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+            return int(res.returncode), merged
+        except Exception:
+            return 1, traceback.format_exc()
+
+    def _process_publish_item(
+        self,
+        item: dict,
+        qcur,
+        qconn,
+        used: set[str],
+        used_ci: set[str],
+    ) -> tuple[bool, str]:
+        original_img = item.get("original_img") if isinstance(item.get("original_img"), dict) else {}
+        values = item.get("values") if isinstance(item.get("values"), dict) else {}
+        row_id = int(item.get("row_id") or 0)
+        if row_id <= 0:
+            return False, "missing row_id"
+
+        folder = str(values.get("Folder") or original_img.get("Folder") or "").strip()
+        year = str(values.get("DateTime") or original_img.get("DateTime") or "")[:4] or "unknown"
+        newname = clean_filename(values.get("File_Name") or original_img.get("File_Name") or "")
+        oldname = clean_filename(original_img.get("File_Name") or "")
+        orig = str(original_img.get("Path") or values.get("Path") or "").strip()
+        if not folder or not newname:
+            return False, "missing folder or filename"
+
+        web_dir = os.path.join(LOCAL_BASE, year, folder)
+        thumb_dir = os.path.join(LOCAL_BASE, year, "thumbs", folder)
+        desk_dir = os.path.join(DESKTOP_ROOT, folder)
+        arch_dir = os.path.join(ARCHIVE_ROOT, year, folder)
+        for d in (web_dir, thumb_dir, desk_dir, arch_dir):
+            os.makedirs(d, exist_ok=True)
+
+        web_path = os.path.join(web_dir, newname)
+        thumb_path = os.path.join(thumb_dir, newname)
+        desk_path = os.path.join(desk_dir, newname)
+        arch_path = os.path.join(arch_dir, newname)
+
+        exists_on_dest = os.path.exists(web_path) or os.path.exists(thumb_path)
+        if exists_on_dest and (not os.path.exists(web_path) or not os.path.exists(thumb_path)):
+            base, _num, ext = split_filename_num(newname)
+            start_num = (int(_num) + 1) if (_num and str(_num).isdigit()) else None
+            tried_ci = {newname.casefold()}
+            fixed = False
+            for _ in range(1, 2000):
+                cand = next_free_filename(base, ext, used, blocked_ci=tried_ci, start_num=start_num)
+                tried_ci.add(cand.casefold())
+                cweb = os.path.join(web_dir, cand)
+                cthumb = os.path.join(thumb_dir, cand)
+                if not os.path.exists(cweb) and not os.path.exists(cthumb):
+                    newname = cand
+                    values["File_Name"] = cand
+                    web_path = cweb
+                    thumb_path = cthumb
+                    desk_path = os.path.join(desk_dir, cand)
+                    arch_path = os.path.join(arch_dir, cand)
+                    fixed = True
+                    break
+            if not fixed:
+                return False, f"destination collision unresolved for {newname}"
+
+        if os.path.exists(orig):
+            try:
+                if not os.path.exists(arch_path):
+                    shutil.copy2(orig, arch_path)
+            except Exception:
+                pass
+            if os.path.abspath(orig) != os.path.abspath(web_path):
+                shutil.move(orig, web_path)
+        elif not os.path.exists(web_path):
+            return False, f"source missing and web not found: {orig}"
+
+        ok = resize_and_watermark(web_path, web_path, thumb_path, desk_path, WATERMARK_TEXT, FONT_PATH)
+        if not ok:
+            return False, f"resize/watermark failed for {newname}"
+
+        with Image.open(web_path) as im:
+            width, height = im.size
+
+        path_url = f"{PUBLIC_URL_BASE}/{year}/{folder}/{newname}"
+        thumb_url = f"{PUBLIC_URL_BASE}/{year}/thumbs/{folder}/{newname}"
+        # Keep DB status as Approved so uploader semantics remain unchanged.
+        qcur.execute(
+            f"UPDATE {TABLE_NAME} SET File_Name=?, Width=?, Height=?, Path=?, Thumb_Path=?, Review_Status=? WHERE id=?",
+            (newname, width, height, path_url, thumb_url, "Approved", row_id),
+        )
+        qconn.commit()
+
+        if oldname:
+            _remove_used_name_ci(used, oldname)
+            used_ci.discard(oldname.casefold())
+        if newname.casefold() not in used_ci:
+            used.add(newname)
+            used_ci.add(newname.casefold())
+        return True, ""
+
+    def _publish_worker_main(self):
+        result = {"processed": 0, "uploaded": 0, "failed": 0, "uploader_rc": 0, "errors": []}
+        try:
+            qconn = sqlite3.connect(DB_PATH)
+            qcur = qconn.cursor()
+            used = load_used_filenames()
+            used_ci = {x.casefold() for x in used}
+
+            with self._publish_lock:
+                idxs = [
+                    i
+                    for i, it in enumerate(self.publish_queue)
+                    if str(it.get("state") or "").lower() in {"approved", "failed"}
+                ]
+                self._publish_progress["total"] = max(int(self._publish_progress.get("total") or 0), len(idxs))
+
+            for n, idx in enumerate(idxs, start=1):
+                with self._publish_lock:
+                    if idx >= len(self.publish_queue):
+                        continue
+                    item = self.publish_queue[idx]
+                ok, err = self._process_publish_item(item, qcur, qconn, used, used_ci)
+                now = datetime.now().isoformat(timespec="seconds")
+                with self._publish_lock:
+                    if idx < len(self.publish_queue):
+                        it = self.publish_queue[idx]
+                        it["updated_at"] = now
+                        it["attempts"] = int(it.get("attempts") or 0) + 1
+                        if ok:
+                            it["state"] = "processed"
+                            it["last_error"] = ""
+                            result["processed"] += 1
+                            self._publish_progress["last"] = f"processed row_id={it.get('row_id')}"
+                        else:
+                            it["state"] = "failed"
+                            it["last_error"] = err
+                            result["failed"] += 1
+                            result["errors"].append(f"row_id={it.get('row_id')} {err}")
+                            self._publish_progress["last"] = f"failed row_id={it.get('row_id')}"
+                        self._publish_progress["processed"] = n
+                save_used_filenames(used)
+                self._save_publish_queue()
+
+            with self._publish_lock:
+                self._publish_progress["phase"] = "upload"
+
+            # Upload stage still reads Review_Status='Approved' from review_queue.
+            rc, out = self._run_db_uploader_worker()
+            result["uploader_rc"] = int(rc)
+            if rc != 0:
+                result["errors"].append((out or "")[-1600:])
+
+            # Reconcile uploaded state: db_uploader deletes uploaded rows from review_queue.
+            qcur.execute(f"SELECT id FROM {TABLE_NAME}")
+            remain_ids = {int(r[0]) for r in qcur.fetchall()}
+            with self._publish_lock:
+                for it in self.publish_queue:
+                    if str(it.get("state") or "").lower() != "processed":
+                        continue
+                    rid = int(it.get("row_id") or 0)
+                    if rid > 0 and rid not in remain_ids:
+                        it["state"] = "uploaded"
+                        it["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                        it["last_error"] = ""
+                        result["uploaded"] += 1
+                self._publish_progress["uploaded"] = result["uploaded"]
+                self._publish_progress["failed"] = result["failed"]
+                self._publish_progress["phase"] = "done"
+            self._save_publish_queue()
+            qconn.close()
+        except Exception:
+            result["failed"] += 1
+            result["errors"].append(traceback.format_exc())
+            with self._publish_lock:
+                self._publish_progress["phase"] = "error"
+                self._publish_progress["last"] = "publish worker crashed"
+        finally:
+            with self._publish_lock:
+                self._publish_last_result = result
+
+    def _poll_publish_worker(self):
+        self._refresh_publish_status()
+        t = self._publish_thread
+        if t and t.is_alive():
+            self.master.after(300, self._poll_publish_worker)
+            return
+        self._publish_running = False
+        self._refresh_publish_status()
+        with self._publish_lock:
+            r = dict(self._publish_last_result or {})
+        errs = r.get("errors") or []
+        if errs:
+            tail = "\n".join([str(x) for x in errs][-5:])
+            messagebox.showwarning(
+                "Publish finished",
+                f"processed={r.get('processed',0)} uploaded={r.get('uploaded',0)} failed={r.get('failed',0)}\n\n{tail}\n\nClick OK to close.",
+            )
+        else:
+            messagebox.showinfo(
+                "Publish complete",
+                f"processed={r.get('processed',0)} uploaded={r.get('uploaded',0)} failed={r.get('failed',0)}\n\nClick OK to close.",
+            )
+        self._on_close()
 
     # ---------- Shared dictionary spellcheck for editable text fields ----------
     def _spellcheck_available(self) -> bool:
@@ -517,15 +1043,30 @@ class ReviewApp:
         except Exception:
             pass
 
-    def _refresh_text_spellchecks(self):
+    def _cancel_pending_spellchecks(self):
+        for _k, aid in list(self._text_spell_after_ids.items()):
+            if not aid:
+                continue
+            try:
+                self.master.after_cancel(aid)
+            except Exception:
+                pass
+        self._text_spell_after_ids.clear()
+
+    def _refresh_text_spellchecks(self, delay_ms: int = 160):
         for k in ("Keywords", "Caption", "alt_text"):
             if k in self.text_widgets:
-                self._text_spellcheck_update(k)
+                self._schedule_text_spellcheck(k, delay_ms=delay_ms)
 
     def _text_spellcheck_update(self, field_name: str):
         self._text_spell_after_ids.pop(field_name, None)
         w = self.text_widgets.get(field_name)
         if not w:
+            return
+        try:
+            if not int(w.winfo_exists()):
+                return
+        except Exception:
             return
         try:
             w.tag_remove("spell_miss", "1.0", END)
@@ -751,9 +1292,6 @@ class ReviewApp:
             justify="right",
         )
 
-        self.image_progress_var = StringVar(value=f"Image 0/{max(1, len(self.images))}")
-        Label(self.left_frame, textvariable=self.image_progress_var, font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 4))
-
         # image preview + QR guide
         # Fixed-size preview area so the UI never shifts between landscape/portrait
         self.preview_frame = Frame(self.left_frame, width=620, height=620)
@@ -846,24 +1384,63 @@ class ReviewApp:
         # with a stable, visible spacing.
         self.primary_action_bar = Frame(self.right_frame)
         self.primary_action_bar.grid(row=99, column=1, sticky="w", pady=(10, 8))
-        Button(self.primary_action_bar, text="Generate", width=14, height=2, command=self.regenerate_current).grid(
-            row=0, column=0, sticky="w"
+        self.btn_generate = Button(
+            self.primary_action_bar,
+            text="Generate",
+            width=14,
+            height=2,
+            command=lambda: self._run_ui_action("generate", self.regenerate_current),
         )
+        self.btn_generate.grid(row=0, column=0, sticky="w")
         Frame(self.primary_action_bar, width=160).grid(row=0, column=1)
-        Button(self.primary_action_bar, text="Approve", width=14, height=2, command=self.approve).grid(
-            row=0, column=2, sticky="w"
+        self.btn_approve = Button(
+            self.primary_action_bar,
+            text="Approve",
+            width=14,
+            height=2,
+            command=lambda: self._run_ui_action("approve", self.approve),
         )
+        self.btn_approve.grid(row=0, column=2, sticky="w")
 
         # Secondary actions stay together below.
         self.button_bar = Frame(self.right_frame)
         self.button_bar.grid(row=100, column=1, sticky="w", pady=(0, 2))
-        for i, (txt, cmd) in enumerate([
-            ("Back", self.back),
-            ("Reject", self.reject),
-            ("Pending", self.pending),
-            ("Publish", self.publish),
+        self._review_action_buttons = [self.btn_generate, self.btn_approve]
+        for i, (key, txt, cmd, action_name) in enumerate([
+            ("back", "Back", self.back, "back"),
+            ("reject", "Reject", self.reject, "reject"),
+            ("pending", "Pending", self.pending, "pending"),
+            ("publish", "Publish", self.publish, "publish"),
         ]):
-            Button(self.button_bar, text=txt, command=cmd).grid(row=0, column=i, padx=(0, 6))
+            b = Button(
+                self.button_bar,
+                text=txt,
+                command=lambda _c=cmd, _a=action_name: self._run_ui_action(_a, _c),
+            )
+            setattr(self, f"btn_{key}", b)
+            self._review_action_buttons.append(b)
+            b.grid(row=0, column=i, padx=(0, 6))
+
+        self.publish_control_bar = Frame(self.right_frame)
+        self.publish_control_bar.grid(row=101, column=1, sticky="w", pady=(2, 4))
+        Button(
+            self.publish_control_bar,
+            text="Resume Publish",
+            command=lambda: self._run_ui_action("resume_publish", self._start_publish_worker),
+        ).grid(row=0, column=0, padx=(0, 6))
+        Button(
+            self.publish_control_bar,
+            text="Recover Actual",
+            command=lambda: self._run_ui_action("recover_actual", self._run_recovery_from_revamp),
+        ).grid(row=0, column=1, padx=(0, 6))
+
+        Label(
+            self.right_frame,
+            textvariable=self.publish_status_var,
+            anchor="w",
+            justify="left",
+            fg="#245",
+        ).grid(row=102, column=1, sticky="w", pady=(2, 4))
 
         # ---- QR slider under the QR row (recursion-safe) ----
         try:
@@ -947,8 +1524,19 @@ class ReviewApp:
         if not cur_qc:
             self.field_vars['QC_Status'].set(qc_status(self.field_vars.get('QR').get()))
 
-        # Refresh shared dictionary spellcheck overlays for editable text fields.
-        self._refresh_text_spellchecks()
+        # Spellcheck refresh can be expensive. Keep it disabled on image-load by
+        # default to avoid navigation crashes during rapid approve/reject runs.
+        # It still runs on text edits and context-menu checks.
+        self._cancel_pending_spellchecks()
+        if self._autoscan_spell_on_load:
+            self._refresh_text_spellchecks(delay_ms=220)
+        else:
+            self._text_spell_hits.clear()
+            for _w in self.text_widgets.values():
+                try:
+                    _w.tag_remove("spell_miss", "1.0", END)
+                except Exception:
+                    pass
 
         # Keep the QR slider synced with the freshly loaded value (guard re-entrancy)
         try:
@@ -1246,15 +1834,9 @@ class ReviewApp:
 
         _ensure_used_json()
         used = load_used_filenames()
-        # Also reserve names that are already queued in this review session
-        # so two approvals in the same run cannot pick the same filename.
-        try:
-            for _orig, _vals in self.file_ops_queue:
-                _qn = clean_filename((_vals or {}).get("File_Name") or "")
-                if _qn:
-                    used.add(_qn)
-        except Exception:
-            pass
+        # Reserve names already queued in durable publish queue so two approvals
+        # across restarts cannot pick the same destination filename.
+        used |= self._publish_queue_used_names()
         used_ci = {x.casefold() for x in used}
 
         suggested = clean_filename(vals.get("File_Name"))
@@ -1306,7 +1888,7 @@ class ReviewApp:
 
         img_updated = self.get_field_values()
         img_updated['id'] = img['id']
-        self.file_ops_queue.append((img.copy(), img_updated.copy()))
+        self._enqueue_publish_item(img.copy(), img_updated.copy())
         self._wants_upload = True
 
         self.next_image()
@@ -1365,139 +1947,38 @@ class ReviewApp:
         self.next_image()
 
     def process_all_file_ops(self):
-        used = load_used_filenames()
-        used_ci = {x.casefold() for x in used}
-
-        for original_img, values in self.file_ops_queue:
-            folder  = values['Folder']
-            year    = (values.get('DateTime') or "")[:4] or "unknown"
-            newname = clean_filename(values['File_Name'])
-            oldname = clean_filename(original_img.get('File_Name') or "")
-            orig    = original_img.get('Path')
-
-            web_dir   = os.path.join(LOCAL_BASE, year, folder)
-            thumb_dir = os.path.join(LOCAL_BASE, year, "thumbs", folder)
-            desk_dir  = os.path.join(DESKTOP_ROOT, folder)
-            arch_dir  = os.path.join(ARCHIVE_ROOT, year, folder)
-            for d in (web_dir, thumb_dir, desk_dir, arch_dir):
-                os.makedirs(d, exist_ok=True)
-
-            web_path   = os.path.join(web_dir, newname)
-            thumb_path = os.path.join(thumb_dir, newname)
-            desk_path  = os.path.join(desk_dir, newname)
-            arch_path  = os.path.join(arch_dir, newname)
-
-            if os.path.exists(web_path) or os.path.exists(thumb_path):
-                # Last-resort auto-bump to avoid aborting publish on one collision.
-                base, _num, ext = split_filename_num(newname)
-                _start_num = (int(_num) + 1) if (_num and str(_num).isdigit()) else None
-                tried_ci = {newname.casefold()}
-                fixed = False
-                for _ in range(1, 2000):
-                    cand = next_free_filename(
-                        base, ext, used, blocked_ci=tried_ci, start_num=_start_num
-                    )
-                    cweb = os.path.join(web_dir, cand)
-                    cthumb = os.path.join(thumb_dir, cand)
-                    tried_ci.add(cand.casefold())
-                    if not os.path.exists(cweb) and not os.path.exists(cthumb):
-                        print(
-                            f"[WARN] Destination name collision for '{newname}'. "
-                            f"Auto-renamed to '{cand}'."
-                        )
-                        newname = cand
-                        values["File_Name"] = newname
-                        web_path = cweb
-                        thumb_path = cthumb
-                        desk_path = os.path.join(desk_dir, newname)
-                        arch_path = os.path.join(arch_dir, newname)
-                        fixed = True
-                        break
-                if not fixed:
-                    messagebox.showerror("Critical Error",
-                        f"Move/rename failed! '{newname}' already exists in destination.")
-                    continue
-
-            try:
-                shutil.copy2(orig, arch_path)
-                shutil.move(orig, web_path)
-
-                resize_and_watermark(
-                    web_path, web_path, thumb_path, desk_path,
-                    WATERMARK_TEXT, FONT_PATH
-                )
-
-                with Image.open(web_path) as im:
-                    width, height = im.size
-
-                # Build image and thumbnail URLs using the PUBLIC_URL_BASE from the config. Avoid
-                # embedding any specific domain or path directly in the code.
-                self.cur.execute(
-                    f"UPDATE {TABLE_NAME} SET Width=?, Height=?, Path=?, Thumb_Path=? WHERE id=?",
-                    (width, height,
-                     f"{PUBLIC_URL_BASE}/{year}/{folder}/{newname}",
-                     f"{PUBLIC_URL_BASE}/{year}/thumbs/{folder}/{newname}",
-                     original_img['id'])
-                )
-                self.conn.commit()
-
-                # Maintain used_filenames.json
-                if oldname:
-                    _remove_used_name_ci(used, oldname)
-                    used_ci.discard(oldname.casefold())
-                if newname.casefold() not in used_ci:
-                    used.add(newname)
-                    used_ci.add(newname.casefold())
-
-            except Exception as e:
-                print(f"[ERR] File op failed for id={original_img['id']}: {e}")
-
-        # persist the updated used-name set after all ops
-        save_used_filenames(used)
-
-        # ---- run uploader automatically ----
-
-        try:
-            if getattr(sys, "frozen", False):
-                import runpy
-                try:
-                    runpy.run_path(resource_path("db_uploader.py"), run_name="__main__")
-                    out = "Uploader finished."
-                except SystemExit as se:
-                    code = se.code if se.code is not None else 0
-                    out = "Uploader finished." if code == 0 else f"Uploader failed (exit code {code})."
-            else:
-                res = subprocess.run(
-                    [sys.executable, resource_path("db_uploader.py")],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                out = (res.stdout or "").strip()[:2000]
-            messagebox.showinfo("Upload Complete", out or "Done.")
-        except Exception as e:
-            messagebox.showwarning("Uploader", f"Uploader issue: {e}")
+        # Legacy compatibility entrypoint: publishing is now always done by
+        # the durable background worker.
+        self._start_publish_worker()
 
 
     def next_image(self):
+        self._cancel_pending_spellchecks()
         self.idx += 1
         if self.idx < len(self.images):
             self.load_image()
             return
 
         # End of queue
-        if self._wants_upload and self.file_ops_queue:
-            if messagebox.askyesno("Done", "All images reviewed! Move/rename/resize & upload now?"):
-                self.process_all_file_ops()
-                # Clean out 'Uploaded' if your uploader flags them; left as-is otherwise
-                try:
-                    self.cur.execute(f"DELETE FROM {TABLE_NAME} WHERE Review_Status='Uploaded'")
-                    self.conn.commit()
-                except Exception:
-                    pass
-                messagebox.showinfo("Done", "All operations completed.")
-        else:
-            messagebox.showinfo("Done", "Review complete.")
+        if self._wants_upload and self._has_pending_publish_items():
+            self._set_review_actions_enabled(False)
+            if messagebox.askyesno(
+                "Done",
+                "All images reviewed.\n\nStart move/rename/resize/upload now in background?",
+            ):
+                self._start_publish_worker()
+                messagebox.showinfo(
+                    "Publishing started",
+                    "Background publish started.\n\nYou can keep this window open to monitor progress.",
+                )
+                return
+            messagebox.showinfo(
+                "Review complete",
+                "Review is complete.\n\nPublish queue is saved. Use 'Resume Publish' anytime.",
+            )
+            return
+
+        messagebox.showinfo("Done", "Review complete.")
         # Cancel any pending Tk "after" callbacks to avoid:
         # invalid command name "<id>_apply" ("after" script)
         try:
@@ -1513,6 +1994,7 @@ class ReviewApp:
 
     def back(self):
         if self.idx > 0:
+            self._cancel_pending_spellchecks()
             self.idx -= 1
             self.load_image()
         else:

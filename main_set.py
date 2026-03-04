@@ -1,5 +1,5 @@
 # main_set.py — Multi-set launcher (keeps your pipeline intact)
-import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math, glob
+import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math, glob, queue
 
 # Make console output robust on Windows (avoid UnicodeEncodeError on emoji etc.)
 try:
@@ -14,10 +14,31 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import base64, re, difflib
-from utils.autofix import autofix_subject, find_misspellings, add_spell_exception
+from utils.autofix import (
+    autofix_subject,
+    find_misspellings,
+    add_spell_exception,
+    spellcheck_status,
+)
 
 
 _UDUP = re.compile(r"_+")
+_SUBJECT_INPUT_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+_SUBJECT_UPPER_TOKENS = {
+    "eos",
+    "rf",
+    "ef",
+    "iso",
+    "ii",
+    "iii",
+    "iv",
+    "v",
+    "vi",
+    "vii",
+    "viii",
+    "ix",
+    "x",
+}
 
 
 def clean_token(s: str) -> str:
@@ -25,6 +46,28 @@ def clean_token(s: str) -> str:
     s = (s or "").strip().replace(" ", "_")
     s = _UDUP.sub("_", s)
     return s.strip("_")
+
+
+def _title_case_subject_input_text(text: str) -> str:
+    """Title-case manual Subject input while preserving separators."""
+    src = str(text or "").replace("\r", " ").replace("\n", " ")
+
+    def _repl(match: re.Match[str]) -> str:
+        tok = match.group(0)
+        if not tok:
+            return tok
+        tl = tok.lower()
+        if tl in _SUBJECT_UPPER_TOKENS:
+            return tl.upper()
+        if tok.isupper():
+            return tok
+        if any(ch.isdigit() for ch in tok):
+            if tok[:1].isalpha():
+                return "".join(ch.upper() if ch.isalpha() else ch for ch in tok)
+            return tok
+        return tok[:1].upper() + tok[1:].lower()
+
+    return _SUBJECT_INPUT_WORD_RE.sub(_repl, src)
 
 
 def clean_filename(name: str) -> str:
@@ -52,6 +95,84 @@ def _normalize_camera_token(camera: str) -> str:
     return camera_s
 
 
+def _title_case_slug_token(s: str) -> str:
+    parts = [p for p in (s or "").split("_") if p]
+    out = []
+    for p in parts:
+        if p.isupper():
+            out.append(p)
+        elif p[:1].islower():
+            out.append(p[:1].upper() + p[1:])
+        else:
+            out.append(p)
+    return "_".join(out)
+
+
+def _title_case_words(s: str) -> str:
+    parts = [p for p in re.split(r"\\s+", (s or "").strip()) if p]
+    return " ".join([p[:1].upper() + p[1:].lower() for p in parts])
+
+
+def _filename_tokens_from_path(path: str) -> set[str]:
+    stem = os.path.splitext(os.path.basename(path or ""))[0]
+    toks = [t for t in re.split(r"[_\\-\\s]+", stem) if t]
+    return {t.lower() for t in toks}
+
+
+def _load_nature_subject_classifier():
+    global _NATURE_SUBJECT_PIPE
+    if _NATURE_SUBJECT_PIPE is not None:
+        return _NATURE_SUBJECT_PIPE
+    if _hf_pipeline is None:
+        return None
+    _NATURE_SUBJECT_PIPE = _hf_pipeline("zero-shot-image-classification", model=NATURE_SUBJECT_MODEL, device=-1)
+    return _NATURE_SUBJECT_PIPE
+
+
+def _nature_subject_from_classifier(image_path: str) -> str | None:
+    if not NATURE_SUBJECT_ENABLE:
+        return None
+    if _hf_pipeline is None:
+        return None
+    if not os.path.isfile(image_path):
+        return None
+    toks = _filename_tokens_from_path(image_path)
+    if not (toks & {"bird", "birds", "buzzard", "wigeon", "pigeon", "pigeons", "duck", "goose", "heron", "cormorant", "gull", "seagull", "animal", "macro", "plant", "plants", "flower", "flowers", "tree", "trees", "reeds", "reed", "seed", "seedhead"}):
+        return None
+    pipe = _load_nature_subject_classifier()
+    if pipe is None:
+        return None
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+    try:
+        preds = pipe(img, candidate_labels=_NATURE_SUBJECT_LABELS)
+    except Exception:
+        return None
+    if isinstance(preds, dict) and "labels" in preds and "scores" in preds:
+        preds = [{"label": l, "score": s} for l, s in zip(preds["labels"], preds["scores"])]
+    preds = list(preds) if isinstance(preds, list) else []
+    if not preds:
+        return None
+    top = preds[0]
+    try:
+        score = float(top.get("score", 0.0))
+    except Exception:
+        score = 0.0
+    label = str(top.get("label", "")).strip().lower()
+    if not label:
+        return None
+    min_score = NATURE_SUBJECT_MIN_SCORE_GENERIC if label in _NATURE_SUBJECT_GENERIC else NATURE_SUBJECT_MIN_SCORE
+    if score < min_score:
+        return None
+    # Only allow non-generic labels if they align with filename tokens
+    label_toks = set(label.split())
+    if label not in _NATURE_SUBJECT_GENERIC and not (label_toks & toks):
+        return None
+    return _title_case_words(label)
+
+
 def build_preview_filename(
     subject: str,
     location: str,
@@ -61,8 +182,8 @@ def build_preview_filename(
     index: int = 1,
 ) -> str:
     subject_s = slugify(subject)
-    location_s = slugify(location)
-    folder_s = slugify(folder)
+    location_s = _title_case_slug_token(slugify(location))
+    folder_s = _title_case_slug_token(slugify(folder))
     if folder_s and not folder_s.lower().endswith("photography"):
         folder_s = f"{folder_s}_Photography"
     camera_s = _normalize_camera_token(camera or DEFAULT_CAMERA_TOKEN)
@@ -81,6 +202,11 @@ warnings.filterwarnings(
     message=r"Converting a tensor with requires_grad=True to a scalar",
     category=UserWarning,
 )
+
+try:
+    from transformers import pipeline as _hf_pipeline
+except Exception:
+    _hf_pipeline = None
 
 # ---------- Shared paths (prefer amir2000_config.py when present) ----------
 from pathlib import Path
@@ -169,8 +295,26 @@ OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL_SUBJECT", "llama3.2-vision:latest"
 )  # subject suggestions (vision)
 OLLAMA_MODEL_CAPTION = os.getenv(
-    "OLLAMA_MODEL_CAPTION", "minicpm-v:latest"
-)  # caption/keywords/alt prefill default (better grounding for mixed sets)
+    "OLLAMA_MODEL_CAPTION", "llava:13b"
+)  # caption/keywords/alt prefill primary
+OLLAMA_MODEL_CAPTION_FALLBACK = os.getenv(
+    "OLLAMA_MODEL_CAPTION_FALLBACK", ""
+).strip()  # used only on failed rows
+try:
+    OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "99"))
+except Exception:
+    OLLAMA_NUM_GPU = 99
+try:
+    OLLAMA_MAIN_GPU = int(os.getenv("OLLAMA_MAIN_GPU", "0"))
+except Exception:
+    OLLAMA_MAIN_GPU = 0
+OLLAMA_FORCE_GPU = os.getenv("OLLAMA_FORCE_GPU", "1") == "1"
+OLLAMA_RESTART_FOR_GPU = os.getenv("OLLAMA_RESTART_FOR_GPU", "1") == "1"
+OLLAMA_LLM_LIBRARY = os.getenv("OLLAMA_LLM_LIBRARY", "cuda").strip() or "cuda"
+OLLAMA_START_METHOD = os.getenv("OLLAMA_START_METHOD", "serve").strip().lower()
+_OLLAMA_GPU_BOOTSTRAPPED = False
+_OLLAMA_STARTED_BY_APP = False
+OLLAMA_CLOSE_ON_RUN_END = os.getenv("OLLAMA_CLOSE_ON_RUN_END", "1") == "1"
 SUBJECT_MODEL_CANDIDATES_ENV = os.getenv(
     "OLLAMA_MODEL_SUBJECT_CANDIDATES", f"{OLLAMA_MODEL_CAPTION},{OLLAMA_MODEL}"
 )
@@ -190,21 +334,27 @@ SUBJECT_JPEG_QUALITY = max(
 THUMB_MAX = 1024  # more detail for species and fine subjects (slower)
 # Caption stage opts only (34b on 8GB GPU benefits from smaller ctx)
 OLLAMA_OPTS = {
-    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "3072")),
-    "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "120")),
-    "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.2")),
+    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "4096")),
+    "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "180")),
+    "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.1")),
 }
+if OLLAMA_NUM_GPU >= 0:
+    OLLAMA_OPTS["num_gpu"] = int(OLLAMA_NUM_GPU)
+if OLLAMA_MAIN_GPU >= 0:
+    OLLAMA_OPTS["main_gpu"] = int(OLLAMA_MAIN_GPU)
 OLLAMA_WARM_ON_SCORING = os.getenv("OLLAMA_WARM_ON_SCORING", "1") == "1"
 OLLAMA_WARM_TIMEOUT_SEC = int(os.getenv("OLLAMA_WARM_TIMEOUT_SEC", "45"))
 OLLAMA_WARM_KEEP_ALIVE = os.getenv("OLLAMA_WARM_KEEP_ALIVE", "45m")
+OLLAMA_STARTUP_PROBE = os.getenv("OLLAMA_STARTUP_PROBE", "1") == "1"
 
 # caption_review_local.py tuning (used by Stage 6)
 CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "15"))
 CAPTION_REWRITE_WEAK = os.getenv("CAPTION_REWRITE_WEAK", "1") == "1"
-CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "2"))
-CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "86"))
+CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "3"))
+CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "90"))
 CAPTION_SERIES_LARGE_THRESHOLD = int(os.getenv("CAPTION_SERIES_LARGE_THRESHOLD", "8"))
 CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "5"))
+CAPTION_FALLBACK_MAX_TRIES = int(os.getenv("CAPTION_FALLBACK_MAX_TRIES", "2"))
 CAPTION_PREFIX_WORDS = int(os.getenv("CAPTION_PREFIX_WORDS", "8"))
 CAPTION_FAIL_ON_ROW_ERRORS = os.getenv("CAPTION_FAIL_ON_ROW_ERRORS", "0") == "1"
 RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
@@ -221,7 +371,13 @@ CAPTION_MAX_RETRIES = int(os.getenv("CAPTION_MAX_RETRIES", "1"))
 CAPTION_TIMEOUT_SEC = int(os.getenv("CAPTION_TIMEOUT_SEC", "420"))
 CAPTION_PREFILL_CHUNK_SIZE = int(os.getenv("CAPTION_PREFILL_CHUNK_SIZE", "24"))
 CAPTION_NATIVE_CRASH_RETRIES = int(
-    os.getenv("CAPTION_NATIVE_CRASH_RETRIES", str(max(8, CAPTION_MAX_RETRIES + 2)))
+    os.getenv("CAPTION_NATIVE_CRASH_RETRIES", str(max(3, CAPTION_MAX_RETRIES + 1)))
+)
+CAPTION_PREFILL_IDLE_TIMEOUT_SEC = int(
+    os.getenv("CAPTION_PREFILL_IDLE_TIMEOUT_SEC", "120")
+)
+CAPTION_PREFILL_HARD_TIMEOUT_SEC = int(
+    os.getenv("CAPTION_PREFILL_HARD_TIMEOUT_SEC", "900")
 )
 SESSION_SCOPE_ONLY = os.getenv("AMIR_SESSION_SCOPE_ONLY", "1") == "1"
 AUTO_AI_SUBJECT_ON_SELECT = os.getenv("AUTO_AI_SUBJECT_ON_SELECT", "1") == "1"
@@ -233,6 +389,62 @@ PREFILL_QC_SAMPLE_IDS = max(3, int(os.getenv("PREFILL_QC_SAMPLE_IDS", "12")))
 PREFILL_QC_REPORT_PATH = os.getenv(
     "PREFILL_QC_REPORT_PATH", os.path.join(DATA_DIR, "prefill_qc_last.json")
 )
+
+# Optional nature classifier for subject suggestion (open-source, local)
+NATURE_SUBJECT_ENABLE = os.getenv("NATURE_SUBJECT_ENABLE", "1") == "1"
+NATURE_SUBJECT_MODEL = os.getenv("NATURE_SUBJECT_MODEL", "openai/clip-vit-large-patch14")
+NATURE_SUBJECT_MIN_SCORE = float(os.getenv("NATURE_SUBJECT_MIN_SCORE", "0.55"))
+NATURE_SUBJECT_MIN_SCORE_GENERIC = float(os.getenv("NATURE_SUBJECT_MIN_SCORE_GENERIC", "0.40"))
+_NATURE_SUBJECT_PIPE = None
+
+_NATURE_SUBJECT_LABELS = [
+    "common buzzard",
+    "eurasian wigeon",
+    "pigeons",
+    "pigeon",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "seagull",
+    "gull",
+    "bird",
+    "raptor",
+    "waterfowl",
+    "fox",
+    "deer",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "animal",
+    "dry reeds",
+    "reeds",
+    "flower",
+    "flowers",
+    "plant",
+    "plants",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "seed head",
+]
+_NATURE_SUBJECT_GENERIC = {
+    "bird",
+    "raptor",
+    "waterfowl",
+    "animal",
+    "plant",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "reeds",
+    "reed",
+    "seed head",
+    "flower",
+    "flowers",
+}
 
 
 def _ollama_up(host=OLLAMA_HOST, port=OLLAMA_PORT, timeout=0.5):
@@ -247,16 +459,163 @@ def _ollama_up(host=OLLAMA_HOST, port=OLLAMA_PORT, timeout=0.5):
         s.close()
 
 
+def _resolve_ollama_binary() -> tuple[str, str | None]:
+    candidates: list[str] = []
+    try:
+        w = shutil.which(OLLAMA_BIN)
+        if w:
+            candidates.append(str(w))
+    except Exception:
+        pass
+    if OLLAMA_BIN:
+        candidates.append(str(OLLAMA_BIN))
+    try:
+        la = os.environ.get("LOCALAPPDATA", "")
+        if la:
+            candidates.append(os.path.join(la, "Programs", "Ollama", "ollama.exe"))
+    except Exception:
+        pass
+    try:
+        pf = os.environ.get("ProgramFiles", r"YOUR_PATH_HERE Files")
+        candidates.append(os.path.join(pf, "Ollama", "ollama.exe"))
+    except Exception:
+        pass
+
+    for c in candidates:
+        if not c:
+            continue
+        p = c
+        try:
+            if not os.path.isabs(p):
+                p = os.path.abspath(p)
+        except Exception:
+            pass
+        if os.path.isfile(p):
+            return p, os.path.dirname(p)
+
+    fallback = candidates[0] if candidates else str(OLLAMA_BIN or "ollama")
+    try:
+        if os.path.isabs(fallback):
+            return fallback, os.path.dirname(fallback)
+    except Exception:
+        pass
+    return fallback, None
+
+
+def _pick_ollama_llm_library(install_dir: str | None) -> str:
+    configured = str(OLLAMA_LLM_LIBRARY or "cuda").strip() or "cuda"
+    if configured.lower() != "cuda":
+        return configured
+    if not install_dir:
+        return configured
+    for cand in ("cuda_v13", "cuda_v12", "cuda"):
+        try:
+            if os.path.isdir(os.path.join(install_dir, "lib", "ollama", cand)):
+                return cand
+        except Exception:
+            continue
+    return configured
+
+
+def _ollama_serve_env() -> dict:
+    env = os.environ.copy()
+    ollama_bin, install_dir = _resolve_ollama_binary()
+    if OLLAMA_FORCE_GPU:
+        # Force values even when parent process has empty keys.
+        env["OLLAMA_LLM_LIBRARY"] = _pick_ollama_llm_library(install_dir)
+        env["OLLAMA_NUM_GPU"] = str(int(OLLAMA_NUM_GPU))
+        env["OLLAMA_MAIN_GPU"] = str(int(OLLAMA_MAIN_GPU))
+    try:
+        if install_dir:
+            dll_dirs = [
+                os.path.join(install_dir, "lib", "ollama"),
+                os.path.join(install_dir, "lib", "ollama", "cuda_v13"),
+                os.path.join(install_dir, "lib", "ollama", "cuda_v12"),
+            ]
+            try:
+                llm_lib = str(env.get("OLLAMA_LLM_LIBRARY") or "").strip()
+                if llm_lib:
+                    llm_dir = os.path.join(install_dir, "lib", "ollama", llm_lib)
+                    if os.path.isdir(llm_dir):
+                        dll_dirs.insert(0, llm_dir)
+            except Exception:
+                pass
+            present = [p for p in dll_dirs if os.path.isdir(p)]
+            if present:
+                old_path = str(env.get("PATH", "") or "")
+                env["PATH"] = os.pathsep.join(present + [old_path] if old_path else present)
+    except Exception:
+        pass
+    return env
+
+
 def _ensure_ollama_running():
+    global _OLLAMA_GPU_BOOTSTRAPPED, _OLLAMA_STARTED_BY_APP
+    if OLLAMA_FORCE_GPU and OLLAMA_RESTART_FOR_GPU and not _OLLAMA_GPU_BOOTSTRAPPED:
+        _OLLAMA_GPU_BOOTSTRAPPED = True
+        try:
+            if os.name == "nt":
+                # Kill tray + server once, then launch serve with explicit GPU env.
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "ollama app.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "ollama.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                subprocess.run(
+                    ["pkill", "-f", "ollama serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            time.sleep(0.7)
+        except Exception:
+            pass
+
     if _ollama_up():
         return True
     try:
-        subprocess.Popen(
-            [OLLAMA_BIN, "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        ollama_bin, ollama_cwd = _resolve_ollama_binary()
+
+        started = False
+        if os.name == "nt" and OLLAMA_START_METHOD == "app":
+            try:
+                app_bin = os.path.join(ollama_cwd or "", "ollama app.exe")
+                if app_bin and os.path.isfile(app_bin):
+                    subprocess.Popen(
+                        [app_bin],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                        # On Windows, app-managed Ollama detects GPU correctly
+                        # with its own default environment.
+                        env=os.environ.copy(),
+                        cwd=ollama_cwd,
+                    )
+                    started = True
+            except Exception:
+                started = False
+
+        if not started:
+            _bg_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            _bg_flags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+            subprocess.Popen(
+                [ollama_bin, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_bg_flags,
+                env=_ollama_serve_env(),
+                cwd=ollama_cwd,
+            )
+        _OLLAMA_STARTED_BY_APP = True
+
         for _ in range(40):  # wait ~10s
             if _ollama_up():
                 return True
@@ -340,7 +699,12 @@ def _warm_ollama_model(model: str, *, timeout: int = OLLAMA_WARM_TIMEOUT_SEC) ->
         "prompt": "Warmup. Respond with OK.",
         "stream": False,
         "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
-        "options": {"num_predict": 8, "temperature": 0.0},
+        "options": {
+            "num_predict": 8,
+            "temperature": 0.0,
+            "num_gpu": int(OLLAMA_NUM_GPU),
+            "main_gpu": int(OLLAMA_MAIN_GPU),
+        },
     }
     try:
         req = request.Request(
@@ -356,6 +720,171 @@ def _warm_ollama_model(model: str, *, timeout: int = OLLAMA_WARM_TIMEOUT_SEC) ->
         return True, "ready"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _format_gib(n: object) -> str:
+    try:
+        v = float(n)
+        if v <= 0:
+            return "0.0GiB"
+        return f"{v / (1024 ** 3):.1f}GiB"
+    except Exception:
+        return "0.0GiB"
+
+
+def _ollama_startup_probe() -> None:
+    """Start Ollama with GPU env and print CPU/GPU status at app startup."""
+    if not OLLAMA_STARTUP_PROBE:
+        return
+
+    if not _ensure_ollama_running():
+        print("[WARN] Ollama startup check: service not reachable.")
+        return
+
+    probe_model = (OLLAMA_MODEL_CAPTION or OLLAMA_MODEL or "minicpm-v:latest").strip()
+    names = _ollama_model_names(timeout=3.0)
+    if names:
+        resolved = _resolve_ollama_model_alias(probe_model, names)
+        if resolved:
+            probe_model = resolved
+
+    probe_ctx = max(1024, min(4096, int(OLLAMA_OPTS.get("num_ctx", 4096) or 4096)))
+
+    # Force a tiny load so /api/ps can report CPU/GPU immediately.
+    try:
+        payload = {
+            "model": probe_model,
+            "prompt": "ok",
+            "stream": False,
+            "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
+            "options": {
+                "num_predict": 1,
+                "temperature": 0.0,
+                "num_ctx": int(probe_ctx),
+                "num_gpu": int(OLLAMA_NUM_GPU),
+                "main_gpu": int(OLLAMA_MAIN_GPU),
+            },
+        }
+        req = request.Request(
+            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=30) as resp:
+            _ = resp.read()
+    except Exception as e:
+        print(
+            f"[WARN] Ollama startup check: probe generate failed for '{probe_model}': {type(e).__name__}: {e}"
+        )
+
+    try:
+        with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=5) as resp:
+            ps = json.loads(resp.read().decode("utf-8"))
+        models = list((ps or {}).get("models", []))
+        chosen = None
+        for m in models:
+            if str(m.get("name", "")).strip() == probe_model:
+                chosen = m
+                break
+        if not chosen and models:
+            chosen = models[0]
+        if not chosen:
+            print("[INFO] Ollama startup check: no model loaded yet.")
+            return
+        vram = int(chosen.get("size_vram") or 0)
+        proc = "GPU" if vram > 0 else "CPU"
+        ctx = int(chosen.get("context_length") or 0)
+        name = str(chosen.get("name") or probe_model)
+        print(
+            f"[INFO] Ollama startup check: model={name} processor={proc} context={ctx} vram={_format_gib(vram)}"
+        )
+
+        # If startup landed on CPU, try once more with explicit GPU-friendly options.
+        if OLLAMA_FORCE_GPU and vram <= 0:
+            try:
+                payload2 = {
+                    "model": probe_model,
+                    "prompt": "gpu warmup",
+                    "stream": False,
+                    "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
+                    "options": {
+                        "num_predict": 8,
+                        "temperature": 0.0,
+                        "num_ctx": int(probe_ctx),
+                        "num_gpu": int(OLLAMA_NUM_GPU),
+                        "main_gpu": int(OLLAMA_MAIN_GPU),
+                    },
+                }
+                req2 = request.Request(
+                    f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+                    data=json.dumps(payload2).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with request.urlopen(req2, timeout=45) as resp2:
+                    _ = resp2.read()
+
+                with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=5) as resp3:
+                    ps2 = json.loads(resp3.read().decode("utf-8"))
+                models2 = list((ps2 or {}).get("models", []))
+                chosen2 = None
+                for m2 in models2:
+                    if str(m2.get("name", "")).strip() == probe_model:
+                        chosen2 = m2
+                        break
+                if not chosen2 and models2:
+                    chosen2 = models2[0]
+                if chosen2:
+                    vram2 = int(chosen2.get("size_vram") or 0)
+                    ctx2 = int(chosen2.get("context_length") or 0)
+                    proc2 = "GPU" if vram2 > 0 else "CPU"
+                    name2 = str(chosen2.get("name") or probe_model)
+                    print(
+                        f"[INFO] Ollama startup recheck: model={name2} processor={proc2} "
+                        f"context={ctx2} vram={_format_gib(vram2)}"
+                    )
+                    if vram2 <= 0:
+                        print(
+                            "[WARN] Ollama is still on CPU after GPU recheck. "
+                            "You can lower CAPTION_NUM_CTX and restart."
+                        )
+            except Exception as e2:
+                print(f"[WARN] Ollama GPU recheck failed: {type(e2).__name__}: {e2}")
+    except Exception as e:
+        print(f"[WARN] Ollama startup check failed: {type(e).__name__}: {e}")
+
+
+def _shutdown_ollama_on_run_end() -> None:
+    """Close app-started Ollama processes after run is fully done."""
+    if not OLLAMA_CLOSE_ON_RUN_END:
+        return
+    if not _OLLAMA_STARTED_BY_APP:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama app.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "ollama.exe"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-f", "ollama"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        print("[INFO] Ollama runtime closed.")
+    except Exception as e:
+        print(f"[WARN] Could not close Ollama runtime: {type(e).__name__}: {e}")
 
 
 _QC_NATURE_CUES = (
@@ -818,33 +1347,14 @@ def _normalize_subject_line(
     line = _smart_title_case(words)
 
     if len(line) > max_chars:
-        trailing_joiners = {
-            "a",
-            "an",
-            "and",
-            "at",
-            "by",
-            "for",
-            "from",
-            "in",
-            "near",
-            "of",
-            "on",
-            "over",
-            "the",
-            "to",
-            "under",
-            "with",
-        }
         cut = line[:max_chars].rstrip()
         # Avoid chopping words in the middle when we enforce max chars.
         space_at = cut.rfind(" ")
         if space_at >= max(1, int(max_chars * 0.6)):
             cut = cut[:space_at].rstrip()
-        parts = cut.split()
-        while len(parts) > max(1, min_words) and parts[-1].lower() in trailing_joiners:
-            parts.pop()
-        cut = " ".join(parts).strip()
+        # Keep trailing joiners (e.g. "in", "of", "the") if the user/AI output
+        # naturally ends with them after max-char trimming.
+        cut = cut.strip()
         line = cut
 
     return line
@@ -933,6 +1443,8 @@ def _subject_generate(
             "repeat_penalty": 1.1,
             "repeat_last_n": 64,
             "seed": 42,
+            "num_gpu": int(OLLAMA_NUM_GPU),
+            "main_gpu": int(OLLAMA_MAIN_GPU),
             "stop": ["\n"],
         },
     }
@@ -1082,6 +1594,13 @@ def ai_suggest_subject(image_path: str) -> str | None:
 
     if not os.path.isfile(image_path):
         return None
+    # Fast path: local nature classifier (bird/animal/plant) when filename hints support it.
+    try:
+        quick = _nature_subject_from_classifier(image_path)
+        if quick:
+            return quick
+    except Exception:
+        pass
     if not _ensure_ollama_running():
         return None
     subject_model = _pick_subject_model()
@@ -1513,6 +2032,11 @@ class MultiSetApp:
         self._ui_disabled = False
         self._ai_subject_busy = False
         self._ai_subject_paths_sig: set[str] = set()
+        self._subject_internal_edit = False
+        self._subject_spell_after_id = None
+        self._location_spell_after_id = None
+        self._subject_last_spell_text = None
+        self._location_last_spell_text = None
 
         try:
             # Capture Tk callback exceptions in a stable file instead of silent exits.
@@ -1571,9 +2095,7 @@ class MultiSetApp:
         self.subject_txt.bind("<Return>", lambda e: "break")
 
         # live underline + right click menu + hover tooltip
-        self.subject_txt.bind(
-            "<KeyRelease>", lambda e: self._subject_spellcheck_update(), add="+"
-        )
+        self.subject_txt.bind("<KeyRelease>", self._on_subject_keyrelease, add="+")
         self.subject_txt.bind(
             "<Button-3>",
             lambda e: getattr(self, "_subject_context_menu", lambda _e: None)(e),
@@ -1653,6 +2175,7 @@ class MultiSetApp:
         )
         self.spell_warn_lbl = ttk.Label(btns, text="", foreground="#c08000")
         self.spell_warn_lbl.pack(side="left", padx=(6, 0))
+        self._refresh_spellcheck_status()
 
         # Sets table
         tree_wrap = ttk.Frame(frm)
@@ -1879,6 +2402,65 @@ class MultiSetApp:
             if not isinstance(data, dict):
                 return 0, 0
 
+            restored_stage_origin = {}
+            for k, v in (data.get("stage_origin") or {}).items():
+                if not k or not v:
+                    continue
+                restored_stage_origin[str(k)] = str(v)
+
+            stage_for_origin: dict[str, str] = {}
+            for staged_p, original_p in restored_stage_origin.items():
+                try:
+                    stage_for_origin[self._norm_path(str(original_p))] = str(staged_p)
+                except Exception:
+                    pass
+
+            staged_norm = self._norm_path(STAGED_DIR)
+            incoming_norm = self._norm_path(INCOMING_DIR)
+
+            def _resolve_session_file(saved_path: str) -> str | None:
+                p = str(saved_path or "").strip()
+                if not p:
+                    return None
+                if os.path.exists(p):
+                    return p
+
+                base = os.path.basename(p)
+                if not base:
+                    return None
+
+                candidates: list[str] = []
+                pnorm = self._norm_path(p)
+                pdir_norm = self._norm_path(os.path.dirname(p))
+
+                # If this was an original source path, try its known staged path first.
+                staged_from_origin = stage_for_origin.get(pnorm)
+                if staged_from_origin:
+                    candidates.append(staged_from_origin)
+
+                if pdir_norm == staged_norm:
+                    candidates.append(os.path.join(STAGED_DIR, base))
+                    candidates.append(os.path.join(INCOMING_DIR, base))
+                elif pdir_norm == incoming_norm:
+                    candidates.append(os.path.join(INCOMING_DIR, base))
+                    candidates.append(os.path.join(STAGED_DIR, base))
+                else:
+                    # Unknown source: support both crash points.
+                    candidates.append(os.path.join(STAGED_DIR, base))
+                    candidates.append(os.path.join(INCOMING_DIR, base))
+
+                seen: set[str] = set()
+                for cand in candidates:
+                    if not cand:
+                        continue
+                    key = self._norm_path(cand)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if os.path.exists(cand):
+                        return cand
+                return None
+
             restored_batches: list[dict] = []
             for row in (data.get("batches") or []):
                 if not isinstance(row, dict):
@@ -1887,11 +2469,11 @@ class MultiSetApp:
                 location = clean_token((row.get("location") or "").strip())
                 folder = clean_token((row.get("folder") or "").strip())
                 folder_h = (row.get("folder_h") or "").strip()
-                files = [
-                    str(p)
-                    for p in (row.get("files") or [])
-                    if p and os.path.exists(str(p))
-                ]
+                files: list[str] = []
+                for p in (row.get("files") or []):
+                    rp = _resolve_session_file(str(p))
+                    if rp:
+                        files.append(rp)
                 if not subject or not location or not folder or not files:
                     continue
                 if not folder_h:
@@ -1906,17 +2488,11 @@ class MultiSetApp:
                     }
                 )
 
-            restored_stage_origin = {}
-            for k, v in (data.get("stage_origin") or {}).items():
-                if not k or not v:
-                    continue
-                restored_stage_origin[str(k)] = str(v)
-
-            restored_pending = [
-                str(p)
-                for p in (data.get("pending_files") or [])
-                if p and os.path.exists(str(p))
-            ]
+            restored_pending: list[str] = []
+            for p in (data.get("pending_files") or []):
+                rp = _resolve_session_file(str(p))
+                if rp:
+                    restored_pending.append(rp)
 
             if not (restored_batches or restored_pending):
                 return 0, 0
@@ -2433,16 +3009,28 @@ class MultiSetApp:
         self._ai_subject_paths_sig = paths_sig
 
         # Never block the Tk main thread (prevents "Not Responding")
+        _ai_btn_prev_text = None
         try:
             if hasattr(self, "ai_subject_btn"):
-                self.ai_subject_btn.configure(state="disabled")
+                try:
+                    _ai_btn_prev_text = str(self.ai_subject_btn.cget("text"))
+                except Exception:
+                    _ai_btn_prev_text = "AI suggest subject"
+                self.ai_subject_btn.configure(
+                    state="disabled",
+                    text=f"AI suggesting... ({len(paths)})",
+                )
         except Exception:
             pass
 
         try:
-            self.stage_lbl["text"] = "AI subject: working..."
+            self.status_var.set(f"AI subject: working on {len(paths)} image(s)...")
+            self.root.update_idletasks()
         except Exception:
-            pass
+            try:
+                self.stage_lbl["text"] = f"AI subject: working on {len(paths)} image(s)..."
+            except Exception:
+                pass
 
         def _worker():
             try:
@@ -2455,7 +3043,10 @@ class MultiSetApp:
             def _done():
                 try:
                     if hasattr(self, "ai_subject_btn"):
-                        self.ai_subject_btn.configure(state="normal")
+                        self.ai_subject_btn.configure(
+                            state="normal",
+                            text=_ai_btn_prev_text or "AI suggest subject",
+                        )
                 except Exception:
                     pass
                 finally:
@@ -2556,8 +3147,9 @@ class MultiSetApp:
 
     def _add_set(self, files: list[str]) -> bool:
         subject_raw = (self._subject_get() or "").strip()
-
+        subject_raw = _title_case_subject_input_text(subject_raw)
         subject_raw = autofix_subject(subject_raw, AUTOFIX_DICT_FILE)
+        subject_raw = _title_case_subject_input_text(subject_raw)
         subject = clean_token(subject_raw)
 
         location_h = (self.location_var.get() or "").strip()
@@ -2900,6 +3492,8 @@ class MultiSetApp:
             overall_done_before: int = 0,
             overall_ok_before: int = 0,
             overall_fail_before: int = 0,
+            idle_timeout_sec: int = 0,
+            hard_timeout_sec: int = 0,
         ):
             """
             Runs a child process and streams output live.
@@ -2924,6 +3518,25 @@ class MultiSetApp:
             env = os.environ.copy()
             env.setdefault("PYTHONUTF8", "1")
             env.setdefault("PYTHONIOENCODING", "utf-8")
+            # Force app-local HF cache for helper scripts to avoid broken global
+            # cache entries from other Python distributions (e.g. Anaconda).
+            try:
+                _cache_base = (
+                    os.path.join(os.path.dirname(sys.executable), ".cache")
+                    if getattr(sys, "frozen", False)
+                    else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+                )
+                _hf_home = os.path.join(_cache_base, "huggingface")
+                _hf_hub = os.path.join(_hf_home, "hub")
+                os.makedirs(_hf_hub, exist_ok=True)
+                env["XDG_CACHE_HOME"] = _cache_base
+                env["HF_HOME"] = _hf_home
+                env["HUGGINGFACE_HUB_CACHE"] = _hf_hub
+                env.pop("TRANSFORMERS_CACHE", None)
+                env.setdefault("HF_HUB_DISABLE_XET", "1")
+                env.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+            except Exception:
+                pass
             # When running from a PyInstaller EXE, avoid leaking bundled Python
             # runtime vars/paths into external interpreter subprocesses.
             if getattr(sys, "frozen", False):
@@ -2955,6 +3568,26 @@ class MultiSetApp:
                 bufsize=1,
                 env=env,
             )
+            idle_timeout_sec = max(0, int(idle_timeout_sec or 0))
+            hard_timeout_sec = max(0, int(hard_timeout_sec or 0))
+            line_q: "queue.Queue[str | None]" = queue.Queue()
+            reader_done = threading.Event()
+            timed_out = False
+            timeout_reason = ""
+            last_output_ts = time.time()
+
+            def _reader():
+                try:
+                    if proc.stdout:
+                        for raw in proc.stdout:
+                            line_q.put(raw.rstrip("\n"))
+                except Exception as _e:
+                    line_q.put(f"[WARN] stream reader exception: {type(_e).__name__}: {_e}")
+                finally:
+                    line_q.put(None)
+                    reader_done.set()
+
+            threading.Thread(target=_reader, daemon=True).start()
 
             def _bump_ui():
                 if stage_num_for_ui is None or total <= 0:
@@ -2990,8 +3623,41 @@ class MultiSetApp:
                     pass
 
             try:
-                for raw in proc.stdout:
-                    line = raw.rstrip("\n")
+                while True:
+                    try:
+                        line = line_q.get(timeout=0.5)
+                    except queue.Empty:
+                        now = time.time()
+                        if hard_timeout_sec > 0 and (now - t0) > hard_timeout_sec:
+                            timed_out = True
+                            timeout_reason = (
+                                f"hard timeout ({hard_timeout_sec}s) "
+                                f"batch_done={done_count}/{total}"
+                            )
+                        elif idle_timeout_sec > 0 and (now - last_output_ts) > idle_timeout_sec:
+                            timed_out = True
+                            timeout_reason = (
+                                f"idle timeout ({idle_timeout_sec}s without output) "
+                                f"batch_done={done_count}/{total}"
+                            )
+
+                        if timed_out:
+                            tail.append(f"[TIMEOUT] {timeout_reason}")
+                            print(f"[WARN] Child process timeout: {timeout_reason}. Terminating...")
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            break
+
+                        if proc.poll() is not None and reader_done.is_set():
+                            break
+                        continue
+
+                    if line is None:
+                        break
+
+                    last_output_ts = time.time()
                     tail.append(line)
                     if len(tail) > 80:
                         tail = tail[-80:]
@@ -3046,7 +3712,17 @@ class MultiSetApp:
                 except Exception:
                     pass
 
-            rc = proc.wait()
+            try:
+                rc = proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                rc = 1
+            if timed_out:
+                # Map timeout stalls into the native-crash retry path.
+                rc = 3221225477
             elapsed = max(0.001, time.time() - t0)
             rate = done_count / elapsed if done_count > 0 else 0.0
             global_tail = ""
@@ -3495,6 +4171,9 @@ class MultiSetApp:
             if score_total > 0:
                 self._set_stage(4, STAGES[4])
                 os.environ["AMIR_REVIEW_DB"] = DB_PATH
+                # Strict scoring is mandatory: no safe fallback / no pyiqa skip.
+                os.environ["AMIR_SCORE_SAFE_MODE"] = "0"
+                os.environ["AMIR_SCORE_REQUIRE_PYIQA"] = "1"
                 script_score = _prepare_external_script("batch_image_quality_score.py")
 
                 def _mark_scoring_failed(reason: str):
@@ -3516,8 +4195,17 @@ class MultiSetApp:
                             return
                         with sqlite3.connect(DB_PATH) as _c:
                             _c.executemany(
-                                f"UPDATE {TABLE_NAME} SET QC_Status=? WHERE id=? AND QC_Status=?",
-                                [("NA", i, "ScoringFailed") for i in inserted_ids],
+                                f"""
+                                UPDATE {TABLE_NAME}
+                                   SET QC_Status =
+                                         CASE WHEN QC_Status='ScoringFailed' THEN 'NA'
+                                              ELSE QC_Status END,
+                                       Review_Status =
+                                         CASE WHEN COALESCE(Review_Status,'')='Error' THEN 'Queued'
+                                              ELSE Review_Status END
+                                 WHERE id=?
+                                """,
+                                [(i,) for i in inserted_ids],
                             )
                             _c.commit()
                     except Exception:
@@ -3781,6 +4469,37 @@ class MultiSetApp:
                     print(f"[WARN] Could not query prefill rows: {_e}")
                     return []
 
+            def _quarantine_prefill_row(row_id: int, rc: int, err: str) -> bool:
+                """Mark one repeatedly-crashing prefill row as Error so the batch can continue."""
+                try:
+                    rid = int(row_id)
+                except Exception:
+                    return False
+                try:
+                    with sqlite3.connect(DB_PATH) as _c:
+                        _cur = _c.cursor()
+                        _cur.execute(
+                            f"UPDATE {TABLE_NAME} "
+                            "SET Review_Status='Error', QC_Status='PrefillNativeCrash' "
+                            "WHERE id=? AND COALESCE(Review_Status,'')='Queued'",
+                            (rid,),
+                        )
+                        _changed = int(_cur.rowcount or 0)
+                        _c.commit()
+                    if _changed > 0:
+                        _tail = (err or "").strip()
+                        if _tail:
+                            _tail = _tail[-220:]
+                        print(
+                            f"[WARN] Quarantined row id={rid} after native prefill crash rc={rc}. "
+                            f"Marked Review_Status=Error QC_Status=PrefillNativeCrash "
+                            f"tail={_tail or '(empty)'}"
+                        )
+                        return True
+                except Exception as _e:
+                    print(f"[WARN] Could not quarantine crashing prefill row id={rid}: {_e}")
+                return False
+
             queued_ids = _query_prefill_ids(0)
             queued_count = len(queued_ids)
 
@@ -3830,6 +4549,13 @@ class MultiSetApp:
                         "--no-tqdm",
                     ]
 
+                    fallback_model = ""
+                    fallback_tries = max(1, int(CAPTION_FALLBACK_MAX_TRIES))
+                    fallback_enabled = False
+                    if OLLAMA_MODEL_CAPTION_FALLBACK and OLLAMA_MODEL_CAPTION_FALLBACK != OLLAMA_MODEL_CAPTION:
+                        fallback_model = str(OLLAMA_MODEL_CAPTION_FALLBACK).strip()
+                        fallback_enabled = bool(fallback_model)
+
                     if CAPTION_REWRITE_WEAK:
                         prefill_args_base.append("--rewrite-weak")
 
@@ -3840,7 +4566,13 @@ class MultiSetApp:
                             "--terms-min-precision", str(CAPTION_TERMS_MIN_PRECISION),
                         ]
 
-                    print(f"[INFO] Prefilling captions via '{OLLAMA_MODEL_CAPTION}' for {queued_count} queued rows...")
+                    if OLLAMA_MODEL_CAPTION_FALLBACK and OLLAMA_MODEL_CAPTION_FALLBACK != OLLAMA_MODEL_CAPTION:
+                        print(
+                            f"[INFO] Prefilling captions via '{OLLAMA_MODEL_CAPTION}' "
+                            f"(fallback on fail: '{OLLAMA_MODEL_CAPTION_FALLBACK}') for {queued_count} queued rows..."
+                        )
+                    else:
+                        print(f"[INFO] Prefilling captions via '{OLLAMA_MODEL_CAPTION}' for {queued_count} queued rows...")
                     try:
                         chunk_size = max(0, int(CAPTION_PREFILL_CHUNK_SIZE))
                         crash_retry_budget = max(0, int(CAPTION_NATIVE_CRASH_RETRIES))
@@ -3881,6 +4613,11 @@ class MultiSetApp:
 
                             first_id = int(run_ids[0])
                             run_args = list(prefill_args_base)
+                            if fallback_enabled:
+                                run_args += [
+                                    "--fallback-model", fallback_model,
+                                    "--fallback-max-tries", str(fallback_tries),
+                                ]
                             run_args += ["--id-list", ",".join([str(x) for x in run_ids])]
 
                             rc, ok_n, fail_n, tail = _stream_cmd_with_ok_counter(
@@ -3893,6 +4630,8 @@ class MultiSetApp:
                                 overall_done_before=done_before,
                                 overall_ok_before=ok_total,
                                 overall_fail_before=fail_total,
+                                idle_timeout_sec=CAPTION_PREFILL_IDLE_TIMEOUT_SEC,
+                                hard_timeout_sec=CAPTION_PREFILL_HARD_TIMEOUT_SEC,
                             )
 
                             ok_total += int(ok_n)
@@ -3945,6 +4684,16 @@ class MultiSetApp:
                                 continue
 
                             if _is_native_prefill_crash(rc):
+                                # If fallback is present and native crashes happen, it is often
+                                # safer to disable fallback and continue with primary only.
+                                err_low = (err or "").lower()
+                                if fallback_enabled and ("trying fallback" in err_low or "fallback" in err_low):
+                                    fallback_enabled = False
+                                    print(
+                                        f"[WARN] Disabling fallback model '{fallback_model}' after native crash "
+                                        f"(rc={rc}). Continuing with primary model only."
+                                    )
+
                                 if crash_retry_used < crash_retry_budget:
                                     crash_retry_used += 1
                                     if ok_n == 0 and fail_n == 0 and first_id == last_chunk_first_id:
@@ -3959,6 +4708,11 @@ class MultiSetApp:
                                         f"Auto-retry {crash_retry_used}/{crash_retry_budget}."
                                     )
                                     if stalled_crashes >= 3:
+                                        if _quarantine_prefill_row(first_id, rc, err):
+                                            fail_total += 1
+                                            stalled_crashes = 0
+                                            last_chunk_first_id = -1
+                                            continue
                                         raise RuntimeError(
                                             f"Prefill subprocess repeatedly crashed before any progress "
                                             f"(rc={rc}) tail={err or '(empty)'}"
@@ -3973,6 +4727,11 @@ class MultiSetApp:
                                         f"(rc={rc}). Keeping completed rows and continuing."
                                     )
                                     break
+                                if _quarantine_prefill_row(first_id, rc, err):
+                                    fail_total += 1
+                                    stalled_crashes = 0
+                                    last_chunk_first_id = -1
+                                    continue
 
                             raise RuntimeError(
                                 f"Prefill script returned non-zero ({rc}) tail={err or '(empty)'}"
@@ -4118,6 +4877,17 @@ class MultiSetApp:
 
                         _bak = f"{USED_NAMES}.bak_{int(time.time())}"
                         shutil.copy2(USED_NAMES, _bak)
+                        try:
+                            _pat = f"{USED_NAMES}.bak_*"
+                            _baks = [p for p in glob.glob(_pat) if os.path.isfile(p)]
+                            _baks.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                            for _old in _baks[20:]:
+                                try:
+                                    os.remove(_old)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
 
                         _removed = 0
                         if isinstance(_data, list):
@@ -4200,12 +4970,14 @@ class MultiSetApp:
                             runpy.run_path(_script3, run_name="__main__")
                             self._clear_session_state()
                             print("[INFO] Review/editor closed.")
+                            _shutdown_ollama_on_run_end()
                             return
 
                         if os.environ.get("AMIR_TRACE_SKIP_EDITOR") == "1":
                             self._clear_session_state()
                             print("[TRACE] Skipping review editor (AMIR_TRACE_SKIP_EDITOR=1).")
                             print("[INFO] Review/editor closed.")
+                            _shutdown_ollama_on_run_end()
                             return
 
                         py_editor = os.environ.get("AMIR_PYTHON") or sys.executable
@@ -4216,6 +4988,7 @@ class MultiSetApp:
 
                         self._clear_session_state()
                         print("[INFO] Review/editor closed.")
+                        _shutdown_ollama_on_run_end()
 
                     except Exception as _ex2:
                         traceback.print_exc()
@@ -4246,7 +5019,7 @@ class MultiSetApp:
         return (s or "").replace("\n", " ").replace("_", " ").strip()
 
     def _subject_set(self, s: str):
-        s = (s or "").replace("\n", " ").strip()
+        s = _title_case_subject_input_text((s or "").replace("\n", " ").strip())
         try:
             self.subject_var.set(s)
         except Exception:
@@ -4254,28 +5027,111 @@ class MultiSetApp:
 
         self.subject_txt.delete("1.0", "end")
         self.subject_txt.insert("1.0", s)
+        self._subject_last_spell_text = None
         self._subject_spellcheck_update()
 
-    def _on_subject_change(self, event=None):
-        self._subject_spellcheck_update()
+    def _on_subject_keyrelease(self, _ev=None):
+        self._subject_apply_title_case()
+        self._schedule_subject_spellcheck(delay_ms=120)
+
+    def _subject_apply_title_case(self):
+        if getattr(self, "_subject_internal_edit", False):
+            return
+        try:
+            raw = self.subject_txt.get("1.0", "end-1c")
+            insert_off = int(self.subject_txt.count("1.0", "insert", "chars")[0])
+        except Exception:
+            return
+
+        titled = _title_case_subject_input_text(raw)
+        if titled != raw:
+            try:
+                self._subject_internal_edit = True
+                self.subject_txt.delete("1.0", "end")
+                self.subject_txt.insert("1.0", titled)
+                insert_off = max(0, min(insert_off, len(titled)))
+                self.subject_txt.mark_set("insert", f"1.0+{insert_off}c")
+            except Exception:
+                pass
+            finally:
+                self._subject_internal_edit = False
+
+        try:
+            self.subject_var.set((titled or "").replace("\n", " ").replace("_", " ").strip())
+        except Exception:
+            pass
+
+    def _schedule_subject_spellcheck(self, delay_ms: int = 100):
+        try:
+            if self._subject_spell_after_id is not None:
+                self.root.after_cancel(self._subject_spell_after_id)
+        except Exception:
+            pass
+        try:
+            self._subject_spell_after_id = self.root.after(
+                max(0, int(delay_ms)),
+                self._subject_spellcheck_update,
+            )
+        except Exception:
+            self._subject_spell_after_id = None
+
+    def _schedule_location_spellcheck(self, delay_ms: int = 100):
+        try:
+            if self._location_spell_after_id is not None:
+                self.root.after_cancel(self._location_spell_after_id)
+        except Exception:
+            pass
+        try:
+            self._location_spell_after_id = self.root.after(
+                max(0, int(delay_ms)),
+                self._location_spellcheck_update,
+            )
+        except Exception:
+            self._location_spell_after_id = None
+
+    def _refresh_spellcheck_status(self):
+        try:
+            ok, reason = spellcheck_status(DATA_DIR)
+            if ok:
+                self.spell_warn_lbl.configure(text="Spellcheck: ON", foreground="#2a7a2a")
+            else:
+                self.spell_warn_lbl.configure(
+                    text=f"Spellcheck: OFF ({reason})", foreground="#c00000"
+                )
+                self._runlog("SPELLCHECK_OFF", reason)
+        except Exception:
+            pass
 
     def _on_subject_change(self, _ev=None):
+        self._subject_apply_title_case()
         s = self._subject_get()
         self.subject_var.set(s)
+        self._subject_last_spell_text = None
         self._subject_spellcheck_update()
 
     def _subject_spellcheck_update(self):
+        self._subject_spell_after_id = None
         try:
             self.subject_txt.tag_remove("misspell", "1.0", "end")
         except Exception:
             return
 
         text = self._subject_get()
+        if self._subject_last_spell_text == text:
+            return
+        self._subject_last_spell_text = text
         try:
             self.subject_var.set(text)
         except Exception:
             pass
-        issues = find_misspellings(text, DATA_DIR)
+        try:
+            issues = find_misspellings(text, DATA_DIR)
+        except Exception as e:
+            issues = []
+            try:
+                self._runlog("SPELLCHECK_SUBJECT_ERR", f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
 
         self._subject_issues = issues
 
@@ -4402,21 +5258,33 @@ class MultiSetApp:
         except Exception:
             pass
 
+        self._location_last_spell_text = None
         self._location_spellcheck_update()
 
     def _on_location_change(self, _ev=None):
         s = self._location_get()
         self.location_var.set(s)
-        self._location_spellcheck_update()
+        self._schedule_location_spellcheck(delay_ms=120)
 
     def _location_spellcheck_update(self):
+        self._location_spell_after_id = None
         try:
             self.location_txt.tag_remove("misspell", "1.0", "end")
         except Exception:
             return
 
         text = self._location_get()
-        issues = find_misspellings(text, DATA_DIR)
+        if self._location_last_spell_text == text:
+            return
+        self._location_last_spell_text = text
+        try:
+            issues = find_misspellings(text, DATA_DIR)
+        except Exception as e:
+            issues = []
+            try:
+                self._runlog("SPELLCHECK_LOCATION_ERR", f"{type(e).__name__}: {e}")
+            except Exception:
+                pass
         self._location_issues = issues
 
         for it in issues:
@@ -4728,6 +5596,7 @@ class MultiSetApp:
                 return
             if suggestion.lower() == typed.lower():
                 self.location_var.set(suggestion)
+                self._schedule_location_spellcheck(delay_ms=120)
                 return
 
             self.location_txt.delete("1.0", "end")
@@ -4737,13 +5606,16 @@ class MultiSetApp:
             self.location_txt.tag_add("sel", i1, "end-1c")
             self.location_txt.mark_set("insert", i1)
             self.location_var.set(suggestion)
-            self._location_spellcheck_update()
+            self._schedule_location_spellcheck(delay_ms=120)
         except Exception:
             pass
 
     def _on_location_keyrelease(self, ev=None):
-        # keep existing behavior
-        self._on_location_change(ev)
+        try:
+            self.location_var.set(self._location_get())
+        except Exception:
+            pass
+        self._schedule_location_spellcheck(delay_ms=120)
 
         # do not fight navigation keys
         try:
@@ -4978,6 +5850,7 @@ if __name__ == "__main__":
         print("\n========= Amir2000 Image Automation: MULTI-SET START =========")
         print(f"[INFO] Using DB at: {DB_PATH}")
         print(f"[INFO] Using used_filenames at: {USED_NAMES}")
+        _ollama_startup_probe()
         root = tk.Tk()
         app = MultiSetApp(root)
         try:

@@ -7,10 +7,12 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import sqlite3
 import sys
 import time
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +21,53 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import requests
 from PIL import Image
 from tqdm import tqdm
+
+# Keep HuggingFace/Transformers cache deterministic for this app run tree.
+# Must happen before importing transformers to avoid inheriting broken global
+# cache state (e.g. Anaconda cache snapshots).
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if _SCRIPT_DIR.name.lower() == "_runtime_scripts":
+    _APP_ROOT = _SCRIPT_DIR.parent.parent
+else:
+    _APP_ROOT = _SCRIPT_DIR
+_APP_CACHE = _APP_ROOT / ".cache"
+_HF_HOME = _APP_CACHE / "huggingface"
+_HF_HUB_CACHE = _HF_HOME / "hub"
+for _p in (_APP_CACHE, _HF_HOME, _HF_HUB_CACHE):
+    try:
+        _p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+os.environ["XDG_CACHE_HOME"] = str(_APP_CACHE)
+os.environ["HF_HOME"] = str(_HF_HOME)
+os.environ["HUGGINGFACE_HUB_CACHE"] = str(_HF_HUB_CACHE)
+# transformers>=5 deprecates TRANSFORMERS_CACHE; use HF_HOME/HUGGINGFACE_HUB_CACHE.
+os.environ.pop("TRANSFORMERS_CACHE", None)
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+try:
+    from transformers import pipeline
+    from transformers.utils import logging as _hf_logging
+except Exception:
+    pipeline = None
+    _hf_logging = None
+
+# Suppress known noisy, non-actionable upstream warnings in production logs.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*`resume_download` is deprecated.*",
+    category=FutureWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r".*Could not find image processor class.*feature_extractor_type.*",
+)
+if _hf_logging is not None:
+    try:
+        _hf_logging.set_verbosity_error()
+    except Exception:
+        pass
 
 # ============================================================
 # Goals (your requirements)
@@ -41,6 +90,266 @@ _KNOWN_LOCATION_PHRASES: Set[str] = set()
 _KNOWN_LOCATION_TOKENS: Set[str] = set()
 _KNOWN_FOLDER_TOKENS: Set[str] = set()
 _FOLDER_MAP_BY_KEY: Dict[str, str] = {}
+
+# ---- Nature classifier (optional, open-source) ----
+_NATURE_CLASSIFIER_ENABLE = os.getenv("NATURE_CLASSIFIER_ENABLE", "1").strip() != "0"
+_NATURE_CLASSIFIER_MODEL = os.getenv("NATURE_CLASSIFIER_MODEL", "openai/clip-vit-large-patch14").strip()
+_NATURE_CLASSIFIER_MIN_SCORE = float(os.getenv("NATURE_CLASSIFIER_MIN_SCORE", "0.55"))
+_NATURE_CLASSIFIER_MIN_SCORE_GENERIC = float(os.getenv("NATURE_CLASSIFIER_MIN_SCORE_GENERIC", "0.40"))
+_NATURE_CLASSIFIER_PIPE = None
+_NATURE_CLASSIFIER_DISABLED = False
+
+_SUBJECT_BREAK_TOKENS = {
+    "in",
+    "on",
+    "at",
+    "near",
+    "over",
+    "under",
+    "with",
+    "against",
+    "from",
+    "to",
+    "perched",
+    "perching",
+    "preening",
+    "flying",
+    "flight",
+    "walking",
+    "running",
+    "standing",
+    "sitting",
+    "calm",
+    "surface",
+    "winter",
+    "scenery",
+    "photography",
+    "nature",
+}
+
+_BIRD_SPECIES_TOKENS = {
+    "bunting",
+    "tit",
+    "kestrel",
+    "buzzard",
+    "wigeon",
+    "swan",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "pigeon",
+    "gull",
+    "seagull",
+    "owl",
+    "eagle",
+    "falcon",
+    "hawk",
+    "sparrow",
+    "finch",
+    "warbler",
+    "thrush",
+    "robin",
+    "kingfisher",
+    "woodpecker",
+    "songbird",
+    "stork",
+    "storks",
+}
+
+_NATURE_HINT_TOKENS = {
+    "bird",
+    "birds",
+    "raptor",
+    "buzzard",
+    "wigeon",
+    "pigeon",
+    "pigeons",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "seagull",
+    "gull",
+    "animal",
+    "animals",
+    "fox",
+    "deer",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "macro",
+    "flower",
+    "flowers",
+    "plant",
+    "plants",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "reeds",
+    "reed",
+    "wetland",
+    "seed",
+    "seedhead",
+}
+
+_FAUNA_TERMS: Set[str] = {
+    "animal",
+    "animals",
+    "avian",
+    "bird",
+    "birds",
+    "raptor",
+    "songbird",
+    "wildlife",
+    "swan",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "gull",
+    "seagull",
+    "owl",
+    "eagle",
+    "falcon",
+    "hawk",
+    "kestrel",
+    "sparrow",
+    "finch",
+    "warbler",
+    "thrush",
+    "robin",
+    "kingfisher",
+    "woodpecker",
+    "deer",
+    "fox",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "elk",
+    "bison",
+    "coyote",
+    "bear",
+}
+
+_NATURE_BIRD_LABELS = [
+    "common buzzard",
+    "eurasian wigeon",
+    "pigeon",
+    "pigeons",
+    "duck",
+    "goose",
+    "heron",
+    "cormorant",
+    "seagull",
+    "gull",
+    "bird",
+    "raptor",
+    "waterfowl",
+]
+_NATURE_ANIMAL_LABELS = [
+    "fox",
+    "deer",
+    "rabbit",
+    "hare",
+    "squirrel",
+    "animal",
+]
+_NATURE_PLANT_LABELS = [
+    "dry reeds",
+    "reeds",
+    "reed",
+    "flower",
+    "flowers",
+    "plant",
+    "plants",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "seed head",
+    "seed heads",
+    "moss",
+    "lichen",
+    "fern",
+    "leaf",
+]
+_NATURE_GENERIC_ALLOW = {
+    "bird",
+    "raptor",
+    "waterfowl",
+    "animal",
+    "plant",
+    "tree",
+    "trees",
+    "branch",
+    "branches",
+    "reeds",
+    "reed",
+    "seed head",
+    "seed heads",
+    "flower",
+    "flowers",
+}
+
+_WILDLIFE_GENERIC_TERMS: Set[str] = {
+    "wildlife",
+    "animal",
+    "animals",
+    "bird",
+    "birds",
+    "songbird",
+    "raptor",
+    "waterfowl",
+    "mammal",
+    "fauna",
+    "subject",
+    "creature",
+}
+
+_SUBJECT_HINT_NOISE_TERMS: Set[str] = {
+    "wildlife",
+    "animal",
+    "animals",
+    "bird",
+    "birds",
+    "songbird",
+    "raptor",
+    "waterfowl",
+    "mammal",
+    "fauna",
+    "subject",
+    "creature",
+    "nature",
+    "photography",
+    "photo",
+    "image",
+    "picture",
+    "unknown",
+    "untitled",
+    "img",
+    "dsc",
+    "pxl",
+    "jpeg",
+    "jpg",
+    "shot",
+    "macro",
+    "closeup",
+    "close",
+    "nest",
+    "nests",
+    "perch",
+    "perched",
+    "pole",
+    "poles",
+    "branch",
+    "branches",
+    "tree",
+    "trees",
+    "wooden",
+    "metal",
+}
 
 # Words we do not want in keywords (fluff, meta, and your website/gear junk)
 _KW_BANNED: Set[str] = {
@@ -104,6 +413,10 @@ _KW_BANNED: Set[str] = {
     "scenic",
     "environment",
     "environmental",
+    "wildlife",
+    "habitat",
+    "foraging",
+    "animal",
     "transport",
     "transportation",
     "vehicle",
@@ -212,9 +525,11 @@ _BAD_PHRASES = (
     "broad scenery",
     "visible horizon",
     "american west",
-    "urban scene",
     "metropolitan street setting",
     "cityscape view of urban scene",
+    "surrounding landscape context",
+    "open outdoor setting",
+    "scene view of scene",
 )
 
 _QUALITY_WEAK_TOKENS: Set[str] = {
@@ -358,26 +673,8 @@ _URBAN_KEYWORD_TERMS: Set[str] = {
     "roadway",
 }
 
-_NATURE_KEYWORD_POOL: Sequence[str] = (
-    "trees",
-    "foliage",
-    "autumn",
-    "leaves",
-    "sky",
-    "sunlight",
-    "mountains",
-    "forest",
-    "rock",
-    "river",
-    "creek",
-    "water",
-    "trail",
-    "valley",
-    "hills",
-    "terrain",
-    "shoreline",
-    "landform",
-)
+# Keep empty: do not force generic terrain keywords into the output.
+_NATURE_KEYWORD_POOL: Sequence[str] = ()
 
 _STRONG_NATURE_KEYWORD_TERMS: Set[str] = {
     "mountain",
@@ -434,6 +731,36 @@ _TERRAIN_HEAVY_TERMS: Set[str] = {
     "shoreline",
 }
 
+_EVIDENCE_SENSITIVE_KEYWORDS: Set[str] = {
+    "usa",
+    "united states",
+    "colorado",
+    "mountain",
+    "mountains",
+    "lake",
+    "lakes",
+    "forest",
+    "river",
+    "rivers",
+    "valley",
+    "trail",
+}
+
+_EVIDENCE_TERM_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "usa": ("usa", "u s a", "united states"),
+    "united states": ("united states", "usa", "u s a"),
+    "colorado": ("colorado",),
+    "mountain": ("mountain", "mountains"),
+    "mountains": ("mountain", "mountains"),
+    "lake": ("lake", "lakes"),
+    "lakes": ("lake", "lakes"),
+    "forest": ("forest", "forests"),
+    "river": ("river", "rivers"),
+    "rivers": ("river", "rivers"),
+    "valley": ("valley", "valleys"),
+    "trail": ("trail", "trails"),
+}
+
 _AVIATION_HINTS: Set[str] = {
     "aviation",
     "aircraft",
@@ -454,6 +781,18 @@ _AVIATION_HINTS: Set[str] = {
 _WILDLIFE_BIRD_HINTS: Set[str] = {
     "bird",
     "birds",
+    "songbird",
+    "avian",
+    "waterfowl",
+    "swan",
+    "wigeon",
+    "bunting",
+    "tit",
+    "sparrow",
+    "finch",
+    "warbler",
+    "thrush",
+    "robin",
     "hawk",
     "eagle",
     "owl",
@@ -463,7 +802,6 @@ _WILDLIFE_BIRD_HINTS: Set[str] = {
     "goose",
     "heron",
     "raptor",
-    "avian",
     "jay",
     "kestrel",
     "crow",
@@ -474,6 +812,8 @@ _WILDLIFE_BIRD_HINTS: Set[str] = {
     "bulbul",
     "pigeon",
     "dove",
+    "stork",
+    "storks",
 }
 
 _WILDLIFE_MAMMAL_HINTS: Set[str] = {
@@ -505,6 +845,206 @@ _UNCERTAIN_PHRASES: Sequence[str] = (
     "appears to be",
     "seems to be",
 )
+
+_LOWLAND_CONTEXT_HINTS: Set[str] = {
+    "netherlands",
+    "amsterdam",
+    "holland",
+    "dutch",
+    "polder",
+    "kanaal",
+    "canal",
+    "frankendael",
+}
+
+_LOWLAND_MOUNTAIN_TERMS: Set[str] = {
+    "mountain",
+    "mountains",
+    "ridge",
+    "ridgeline",
+    "alpine",
+    "foothill",
+    "foothills",
+    "hill",
+    "hills",
+    "peak",
+    "peaks",
+    "valley",
+    "basin",
+    "slope",
+    "slopes",
+    "ridgelines",
+    "rock",
+    "rocks",
+    "rocky",
+    "rugged",
+    "cliff",
+    "cliffs",
+    "upland",
+    "uplands",
+    "highland",
+    "highlands",
+    "lake",
+    "lakes",
+}
+
+_LOWLAND_TEXT_REPLACEMENTS: Dict[str, str] = {
+    "high-elevation": "lowland",
+    "high elevation": "lowland",
+    "elevation": "lowland",
+    "upland": "lowland",
+    "mountain road": "road",
+    "mountain landscape": "landscape",
+    "mountain terrain": "landscape",
+    "mountain scenery": "landscape",
+    "mountain backdrop": "background",
+    "mountain slopes": "tree line",
+    "valley floor": "open area",
+    "mountain basin": "open area",
+    "distant mountains": "distant horizon",
+    "distant ridges": "distant horizon",
+    "ridgeline terrain": "horizon line",
+    "alpine setting": "lowland setting",
+    "lake": "waterway",
+    "lakes": "waterways",
+    "mountains": "distant background",
+    "mountain": "background",
+    "ridges": "horizon",
+    "ridgeline": "horizon",
+    "ridge": "horizon",
+    "alpine": "lowland",
+    "foothills": "fields",
+    "foothill": "field",
+    "valley": "open area",
+    "peaks": "horizon",
+    "peak": "horizon",
+}
+
+_SUNRISE_HINT_TERMS: Set[str] = {"sunrise", "dawn", "daybreak"}
+_SUNSET_HINT_TERMS: Set[str] = {"sunset", "dusk", "twilight", "evening"}
+
+_SUNRISE_BLOCK_TERMS: Set[str] = {"sunset", "dusk", "twilight", "evening", "night"}
+_SUNSET_BLOCK_TERMS: Set[str] = {"sunrise", "dawn", "morning"}
+
+_SUNRISE_TEXT_REPLACEMENTS: Dict[str, str] = {
+    "after sunset": "after sunrise",
+    "sunset": "sunrise",
+    "dusk": "morning",
+    "twilight": "early morning",
+    "evening": "morning",
+}
+
+_SUNSET_TEXT_REPLACEMENTS: Dict[str, str] = {
+    "sunrise": "sunset",
+    "daybreak": "sunset",
+    "dawn": "sunset",
+    "morning": "evening",
+}
+
+# Evidence-gated scene vocabulary: if a group is not explicitly present in
+# folder/subject/location/file_name context, terms in that group are blocked.
+_EVIDENCE_GATED_TERM_GROUPS: Dict[str, Tuple[str, ...]] = {
+    "mountain": ("mountain", "mountains", "ridge", "ridges", "ridgeline", "alpine", "peak", "peaks", "foothill", "foothills"),
+    "valley": ("valley", "valleys", "basin"),
+    "beach": ("beach", "beaches", "shore", "shoreline", "coast", "coastal", "seaside"),
+    "river": ("river", "rivers"),
+    "lake": ("lake", "lakes"),
+    "forest": ("forest", "forests", "woodland", "woods"),
+    "street": ("street", "streets", "road", "roads", "avenue", "avenues", "boulevard", "lane", "lanes", "intersection", "sidewalk", "crosswalk"),
+    "wall": ("wall", "walls"),
+}
+
+_SEASON_SYNONYMS: Dict[str, Tuple[str, ...]] = {
+    "winter": ("winter",),
+    "autumn": ("autumn", "fall"),
+    "spring": ("spring",),
+    "summer": ("summer",),
+}
+
+_SEASON_TEXT_REPLACEMENTS: Dict[str, Dict[str, str]] = {
+    "winter": {
+        "fall foliage": "leafless trees",
+        "autumn foliage": "leafless trees",
+        "autumn colors": "muted winter tones",
+        "autumn color": "muted winter tone",
+        "autumn light": "winter light",
+        "autumn": "winter",
+        "fall": "winter",
+        "spring": "winter",
+        "summer": "winter",
+    },
+    "autumn": {
+        "winter": "autumn",
+        "spring": "autumn",
+        "summer": "autumn",
+    },
+    "spring": {
+        "winter": "spring",
+        "autumn": "spring",
+        "fall": "spring",
+        "summer": "spring",
+    },
+    "summer": {
+        "winter": "summer",
+        "autumn": "summer",
+        "fall": "summer",
+        "spring": "summer",
+    },
+}
+
+_NIGHT_FIREWORK_BLOCK_TERMS: Set[str] = {
+    "sunny",
+    "sunshine",
+    "daylight",
+    "daytime",
+    "morning",
+    "sunrise",
+    "field",
+    "fields",
+    "meadow",
+    "meadows",
+    "terrain",
+    "hills",
+    "wildlife",
+    "animal",
+    "habitat",
+    "foraging",
+}
+
+_AMSTERDAM_FORCE_BLOCK_TERMS: Set[str] = {
+    "river",
+    "rivers",
+    "lake",
+    "lakes",
+    "terrain",
+    "mountain",
+    "mountains",
+    "ridge",
+    "ridges",
+    "ridgeline",
+    "ridgelines",
+    "valley",
+    "valleys",
+    "hill",
+    "hills",
+    "slope",
+    "slopes",
+    "rock",
+    "rocks",
+    "rocky",
+    "rugged",
+    "alpine",
+    "foothill",
+    "foothills",
+}
+
+_FIREWORK_HINTS: Set[str] = {
+    "firework",
+    "fireworks",
+    "new year eve",
+    "new years eve",
+    "new-year-eve",
+}
 
 _LOCATION_BAD_TOKENS: Set[str] = {
     "collection",
@@ -690,19 +1230,72 @@ def _extract_phrase_keywords(folder: str, subject: str, location: str, caption: 
     if loc_norm and loc_norm in _KNOWN_LOCATION_PHRASES:
         add(loc_norm)
 
-    for m in re.finditer(r"\b([a-z]+(?: [a-z]+){0,3} (?:national park|state park|national forest|national monument))\b", src):
-        add(m.group(1))
-    for m in re.finditer(r"\b([a-z]+(?: [a-z]+){0,2} city)\b", src):
-        add(m.group(1))
-    for m in re.finditer(r"\b(downtown [a-z]+(?: [a-z]+)?)\b", src):
-        add(m.group(1))
+    # Avoid regex-engine edge cases on large/odd strings by using token-window scans.
+    toks = [t for t in src.split() if t]
+    n = len(toks)
 
-    # Generic named-place extraction for common geo/location phrase endings.
-    for m in re.finditer(
-        r"\b([a-z]+(?: [a-z]+){0,3} (?:road|street|avenue|boulevard|bridge|park|square|plaza|harbor|airport|station|tower|lake|river|district|island|bay))\b",
-        src,
-    ):
-        add(m.group(1))
+    special_suffix2: Set[Tuple[str, str]] = {
+        ("national", "park"),
+        ("state", "park"),
+        ("national", "forest"),
+        ("national", "monument"),
+    }
+    generic_suffix1: Set[str] = {
+        "road",
+        "street",
+        "avenue",
+        "boulevard",
+        "bridge",
+        "park",
+        "square",
+        "plaza",
+        "harbor",
+        "airport",
+        "station",
+        "tower",
+        "lake",
+        "river",
+        "district",
+        "island",
+        "bay",
+    }
+
+    # 1..4-word prefix + 2-word suffix => 3..6 words total
+    for i in range(n):
+        for size in range(3, 7):
+            j = i + size
+            if j > n:
+                break
+            if (toks[j - 2], toks[j - 1]) in special_suffix2:
+                add(" ".join(toks[i:j]))
+
+    # 1..3-word prefix + "city" => 2..4 words total
+    for i in range(n):
+        for size in range(2, 5):
+            j = i + size
+            if j > n:
+                break
+            if toks[j - 1] == "city":
+                add(" ".join(toks[i:j]))
+
+    # downtown + 1..2 words => 2..3 words total
+    for i in range(n):
+        if toks[i] != "downtown":
+            continue
+        for size in (2, 3):
+            j = i + size
+            if j <= n:
+                add(" ".join(toks[i:j]))
+
+    # Generic named-place extraction for common geo/location phrase endings:
+    # 1..4-word prefix + 1-word suffix => 2..5 words total
+    for i in range(n):
+        for size in range(2, 6):
+            j = i + size
+            if j > n:
+                break
+            if toks[j - 1] in generic_suffix1:
+                add(" ".join(toks[i:j]))
 
     if "glass ball" in src:
         add("glass ball")
@@ -1104,6 +1697,671 @@ def _context_tail_keywords(folder: str, subject: str) -> List[str]:
     return ["landscape", "trees", "sky", "terrain", "horizon", "outdoors", "daylight", "nature", "environment", "scenery"]
 
 
+def _is_lowland_nl_context(folder: str, subject: str, location: str, file_name: str = "") -> bool:
+    file_stem = _clean_phrase(Path(file_name or "").stem)
+    blob = _norm_text_strict(f"{folder} {subject} {location} {file_stem}")
+    if not blob:
+        return False
+    hint_hits = sum(1 for hint in _LOWLAND_CONTEXT_HINTS if hint in blob)
+    if hint_hits <= 0:
+        return False
+    toks = set(blob.split())
+    if toks & _LOWLAND_MOUNTAIN_TERMS:
+        return False
+    return True
+
+
+def _filename_time_hints(file_name: str) -> Tuple[bool, bool]:
+    stem = _norm_text_strict(_clean_phrase(Path(file_name or "").stem))
+    if not stem:
+        return False, False
+    toks = set(stem.split())
+    sunrise_hint = bool(toks & _SUNRISE_HINT_TERMS)
+    sunset_hint = bool(toks & _SUNSET_HINT_TERMS)
+    if sunrise_hint and sunset_hint:
+        return False, False
+    return sunrise_hint, sunset_hint
+
+
+def _filename_tokens(file_name: str) -> Set[str]:
+    stem = _norm_text_strict(_clean_phrase(Path(file_name or "").stem))
+    if not stem:
+        return set()
+    return set(stem.split())
+
+
+def _subject_label_candidates(subject: str, file_name: str) -> List[str]:
+    raw = _clean_phrase(f"{subject} {Path(file_name or '').stem}")
+    toks: List[str] = []
+    for t in re.split(r"[\s]+", raw):
+        n = _norm_text_strict(t)
+        if not n:
+            continue
+        if n in _KW_BANNED or n in _KW_STOPWORDS:
+            continue
+        if n in {"canon", "eos", "r5", "mark", "ii", "iii", "iv", "v"}:
+            continue
+        if n.isdigit():
+            continue
+        if toks and n in _SUBJECT_BREAK_TOKENS:
+            break
+        toks.append(n)
+        if len(toks) >= 8:
+            break
+
+    informative = [t for t in toks if t not in _SUBJECT_HINT_NOISE_TERMS]
+    if not informative:
+        return []
+
+    labels: List[str] = []
+    if len(informative) >= 3:
+        labels.append(" ".join(informative[:3]))
+    if len(informative) >= 2:
+        labels.append(" ".join(informative[:2]))
+    labels.extend(informative[:4])
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for x in labels:
+        s = _norm_text_strict(x)
+        if not s or s in seen:
+            continue
+        if s in _NATURE_GENERIC_ALLOW or s in _WILDLIFE_GENERIC_TERMS:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out[:8]
+
+
+def _should_run_nature_classifier(folder: str, subject: str, file_name: str) -> bool:
+    if not _NATURE_CLASSIFIER_ENABLE or pipeline is None:
+        return False
+    if _infer_subject_kind(folder, subject) == "wildlife":
+        return True
+    blob = _norm_text_strict(f"{folder} {subject} {Path(file_name or '').stem}")
+    if not blob:
+        return False
+    if "macro" in blob or "nature" in blob or "birds" in blob or "botanical" in blob or "wildlife" in blob:
+        return True
+    toks = set(blob.split())
+    return bool(toks & _NATURE_HINT_TOKENS)
+
+
+def _candidate_labels_for_classifier(folder: str, subject: str, file_name: str) -> List[str]:
+    stem_toks = _filename_tokens(file_name)
+    subj_toks = set(_norm_text_strict(_clean_phrase(subject)).split())
+    blob = " ".join(sorted(stem_toks | subj_toks))
+    labels: List[str] = []
+
+    labels.extend(_subject_label_candidates(subject, file_name))
+
+    if any(t in blob for t in ("bird", "buzzard", "wigeon", "pigeon", "duck", "goose", "heron", "cormorant", "gull", "seagull")):
+        labels.extend(_NATURE_BIRD_LABELS)
+    if any(t in blob for t in ("animal", "fox", "deer", "rabbit", "hare", "squirrel")):
+        labels.extend(_NATURE_ANIMAL_LABELS)
+    if any(t in blob for t in ("plant", "flower", "tree", "branch", "reeds", "reed", "seed", "macro", "botanical")):
+        labels.extend(_NATURE_PLANT_LABELS)
+
+    # Filename-driven exact hints (boost zero-shot ranking)
+    if "common" in stem_toks and "buzzard" in stem_toks:
+        labels.insert(0, "common buzzard")
+    if "eurasian" in stem_toks and "wigeon" in stem_toks:
+        labels.insert(0, "eurasian wigeon")
+    if "pigeon" in stem_toks or "pigeons" in stem_toks:
+        labels.insert(0, "pigeons")
+    if "reed" in stem_toks or "reeds" in stem_toks:
+        labels.insert(0, "dry reeds")
+        labels.insert(1, "reeds")
+
+    # Always include safe generic options at the end
+    labels.extend(["bird", "animal", "plant", "tree"])
+
+    out: List[str] = []
+    seen = set()
+    for x in labels:
+        s = str(x).strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out[:40]
+
+
+def _family_for_label(label: str) -> str:
+    l = str(label or "").lower()
+    if any(x in l for x in ["buzzard", "wigeon", "pigeon", "duck", "goose", "heron", "cormorant", "gull", "seagull", "bird", "raptor", "waterfowl"]):
+        return "bird"
+    if any(x in l for x in ["fox", "deer", "rabbit", "hare", "squirrel", "animal"]):
+        return "animal"
+    if any(x in l for x in ["flower", "plant", "reeds", "reed", "seed head", "seed", "moss", "lichen", "fern", "leaf"]):
+        return "plant"
+    if any(x in l for x in ["tree", "trees", "branch", "branches"]):
+        return "tree"
+    return "scene"
+
+
+def _is_readable_file(path: Path) -> bool:
+    try:
+        if not path.is_file():
+            return False
+        with path.open("rb") as f:
+            f.read(16)
+        return True
+    except Exception:
+        return False
+
+
+def _safe_hf_model_dir_name(model_id: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9._-]+", "--", str(model_id or "").strip())
+    s = re.sub(r"-{3,}", "--", s).strip("-")
+    return s or "hf_model"
+
+
+def _ensure_local_nature_classifier_model(model_id: str) -> str:
+    # If user passes an explicit local path, use it as-is.
+    p = Path(str(model_id or "").strip())
+    if p.exists():
+        return str(p)
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+    except Exception as e:
+        raise RuntimeError(f"huggingface_hub unavailable: {e}")
+
+    local_dir = _APP_CACHE / "hf_models" / _safe_hf_model_dir_name(model_id)
+    cfg = local_dir / "config.json"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    if _is_readable_file(cfg):
+        return str(local_dir)
+
+    snapshot_download(
+        repo_id=model_id,
+        local_dir=str(local_dir),
+        resume_download=True,
+    )
+    if _is_readable_file(cfg):
+        return str(local_dir)
+
+    snapshot_download(
+        repo_id=model_id,
+        local_dir=str(local_dir),
+        force_download=True,
+    )
+    if _is_readable_file(cfg):
+        return str(local_dir)
+
+    raise RuntimeError(f"Local model config is not readable: {cfg}")
+
+
+def _load_nature_classifier(model: str):
+    global _NATURE_CLASSIFIER_PIPE, _NATURE_CLASSIFIER_DISABLED
+    if _NATURE_CLASSIFIER_PIPE is not None:
+        return _NATURE_CLASSIFIER_PIPE
+    if _NATURE_CLASSIFIER_DISABLED:
+        return None
+    if pipeline is None:
+        return None
+
+    model_ref = str(model or "").strip()
+    try:
+        model_ref = _ensure_local_nature_classifier_model(model_ref)
+    except Exception as e:
+        _NATURE_CLASSIFIER_DISABLED = True
+        print(f"[WARN] Nature classifier unavailable, continuing without it: {e}")
+        return None
+
+    try:
+        _NATURE_CLASSIFIER_PIPE = pipeline("zero-shot-image-classification", model=model_ref, device=-1)
+    except Exception as e:
+        _NATURE_CLASSIFIER_DISABLED = True
+        print(f"[WARN] Nature classifier unavailable, continuing without it: {e}")
+        return None
+    return _NATURE_CLASSIFIER_PIPE
+
+
+def _run_nature_classifier(image_path: Path, folder: str, subject: str, file_name: str) -> Optional[Dict[str, object]]:
+    if not _should_run_nature_classifier(folder, subject, file_name):
+        return None
+    labels = _candidate_labels_for_classifier(folder, subject, file_name)
+    if not labels:
+        return None
+    pipe = _load_nature_classifier(_NATURE_CLASSIFIER_MODEL)
+    if pipe is None:
+        return None
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except Exception:
+        return None
+    try:
+        preds = pipe(img, candidate_labels=labels)
+    except Exception:
+        return None
+    if isinstance(preds, dict) and "labels" in preds and "scores" in preds:
+        preds = [{"label": l, "score": s} for l, s in zip(preds["labels"], preds["scores"])]
+    preds = list(preds) if isinstance(preds, list) else []
+    if not preds:
+        return None
+    top = preds[0]
+    try:
+        score = float(top.get("score", 0.0))
+    except Exception:
+        score = 0.0
+    label = str(top.get("label", "")).strip().lower()
+    family = _family_for_label(label)
+    min_score = _NATURE_CLASSIFIER_MIN_SCORE if family in {"bird", "animal", "plant", "tree"} else _NATURE_CLASSIFIER_MIN_SCORE_GENERIC
+    if score < min_score or not label:
+        return None
+
+    # Safety: only allow species labels when they align with filename/subject tokens.
+    fn_toks = _filename_tokens(file_name) | set(_norm_text_strict(_clean_phrase(subject)).split())
+    label_toks = set(_norm_text_strict(label).split())
+    if label not in _NATURE_GENERIC_ALLOW and not (label_toks & fn_toks):
+        return None
+
+    return {"label": label, "score": round(score, 4), "family": family, "source": "nature_classifier"}
+
+
+def _label_to_subject_identifier(label: str) -> str:
+    s = _clean_phrase(label)
+    if not s:
+        return ""
+    return "_".join([w.capitalize() for w in s.split() if w])
+
+
+def _context_evidence_blob(folder: str, subject: str, location: str, file_name: str = "") -> str:
+    folder_display = _FOLDER_MAP_BY_KEY.get(str(folder or "").strip().lower(), "")
+    stem = _clean_phrase(Path(file_name or "").stem)
+    return _norm_text_strict(f"{folder} {folder_display} {subject} {location} {stem}")
+
+
+def _detect_context_season(folder: str, subject: str, location: str, file_name: str = "") -> str:
+    blob = _context_evidence_blob(folder, subject, location, file_name)
+    if not blob:
+        return ""
+    toks = set(blob.split())
+    if "winter" in toks:
+        return "winter"
+    if "autumn" in toks or "fall" in toks:
+        return "autumn"
+    if "spring" in toks:
+        return "spring"
+    if "summer" in toks:
+        return "summer"
+    return ""
+
+
+def _blocked_season_terms(primary_season: str) -> Set[str]:
+    out: Set[str] = set()
+    p = _norm_text_strict(primary_season)
+    if not p:
+        return out
+    for season_key, aliases in _SEASON_SYNONYMS.items():
+        if season_key == p:
+            continue
+        out.update(aliases)
+    return {_norm_text_strict(x) for x in out if _norm_text_strict(x)}
+
+
+def _collect_non_evidence_blocked_terms(
+    *,
+    folder: str,
+    subject: str,
+    location: str,
+    file_name: str,
+) -> Set[str]:
+    blob = _context_evidence_blob(folder, subject, location, file_name)
+    if not blob:
+        return set()
+    blocked: Set[str] = set()
+    for variants in _EVIDENCE_GATED_TERM_GROUPS.values():
+        if not any(re.search(r"\b" + re.escape(v) + r"\b", blob, flags=re.IGNORECASE) for v in variants):
+            blocked.update(variants)
+    return {_norm_text_strict(t) for t in blocked if _norm_text_strict(t)}
+
+
+def _strip_blocked_terms_from_text(text: str, blocked_terms: Set[str]) -> str:
+    out = str(text or "")
+    if not out or not blocked_terms:
+        return out
+    terms = sorted(
+        {
+            _norm_text_strict(t)
+            for t in blocked_terms
+            if _norm_text_strict(t) and len(_norm_text_strict(t)) >= 3
+        },
+        key=len,
+        reverse=True,
+    )
+    for term in terms:
+        out = re.sub(r"\b" + re.escape(term) + r"\b", " ", out, flags=re.IGNORECASE)
+    # Normalize dash variants and hyphen compounds after term stripping.
+    out = re.sub(r"[‐‑‒–—−]", "-", out)
+    out = re.sub(r"\b([A-Za-z]+)-([A-Za-z]+)\b", r"\1 \2", out)
+    # Normalize dangling/broken hyphen compounds that can appear after term stripping:
+    # e.g. "City- view" -> "City view", "low- light" -> "low light", "City-" -> "City".
+    out = re.sub(r"\b([A-Za-z]+)-\s+([A-Za-z]+)\b", r"\1 \2", out)
+    out = re.sub(r"\b([A-Za-z]+)-(?=[\s,.;!?]|$)", r"\1", out)
+    out = re.sub(r"(?:(?<=\s)|^)-([A-Za-z]+)\b", r"\1", out)
+    out = _WS_RE.sub(" ", out).strip(" ,.;:-")
+    out = re.sub(r"\b(a|an)\s+(?=[,.;!?]|$)", "", out, flags=re.IGNORECASE)
+    out = re.sub(r"\s+,", ",", out)
+    out = re.sub(r"\s+\.", ".", out)
+    out = re.sub(
+        r"\b(a|an)\s+(?=(in|on|at|with|near|under|over|against|across|through|by|from|during|while|amid|around|between|along|behind|before|after|into|onto)\b)",
+        "",
+        out,
+        flags=re.IGNORECASE,
+    )
+    out = re.sub(r"\band\s+(a|an)\s+([a-z]+ing)\b", r"and \2", out, flags=re.IGNORECASE)
+    out = re.sub(r"\band\s+(a|an)\s+horizon\b", "and the horizon", out, flags=re.IGNORECASE)
+    out = _WS_RE.sub(" ", out).strip()
+    return out
+
+
+def _apply_phrase_replacements(text: str, replacements: Dict[str, str]) -> str:
+    out = str(text or "")
+    if not out or not replacements:
+        return out
+    for src, dst in sorted(replacements.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if not src:
+            continue
+        out = re.sub(r"\b" + re.escape(src) + r"\b", dst, out, flags=re.IGNORECASE)
+    return _WS_RE.sub(" ", out).strip()
+
+
+def _cleanup_guardrail_artifacts(text: str) -> str:
+    out = str(text or "")
+    if not out:
+        return out
+    out = re.sub(
+        r"\bopen terrain\s+(?:below|above|across|near|with|and)\s+open terrain\b",
+        "open terrain",
+        out,
+        flags=re.IGNORECASE,
+    )
+    out = _WS_RE.sub(" ", out).strip()
+    return out
+
+
+def _keyword_has_blocked_term(keyword: str, blocked_terms: Set[str]) -> bool:
+    if not blocked_terms:
+        return False
+    kn = _norm_text_strict(keyword)
+    if not kn:
+        return False
+    parts = set(kn.split())
+    if parts & blocked_terms:
+        return True
+    return any((" " in term) and (term in kn) for term in blocked_terms)
+
+
+def _refill_guarded_keywords(
+    *,
+    kw_list: Sequence[str],
+    keywords_n: int,
+    folder: str,
+    subject: str,
+    location: str,
+    caption: str,
+    alt_text: str,
+    blocked_terms: Set[str],
+    preferred_terms: Sequence[str],
+    lowland_context: bool,
+) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    target_n = max(0, int(keywords_n))
+
+    for kw in _clean_keywords_list(kw_list):
+        kn = _normalize_keyword(kw)
+        if not kn or kn in seen:
+            continue
+        if _keyword_has_blocked_term(kn, blocked_terms):
+            continue
+        seen.add(kn)
+        out.append(kn)
+
+    def _try_add(candidate: str) -> None:
+        if len(out) >= target_n:
+            return
+        kn = _normalize_keyword(candidate)
+        if not kn or kn in seen:
+            return
+        if kn in _KW_BANNED or kn in _KW_STOPWORDS:
+            return
+        if _keyword_has_blocked_term(kn, blocked_terms):
+            return
+        seen.add(kn)
+        out.append(kn)
+
+    for term in preferred_terms:
+        _try_add(term)
+
+    refill_pool: List[str] = []
+    refill_pool.extend(_extract_phrase_keywords(folder, subject, location, f"{caption} {alt_text}"))
+    refill_pool.extend(_visual_keyword_candidates(caption, alt_text, location))
+    refill_pool.extend(_context_tail_keywords(folder, subject))
+    if lowland_context:
+        refill_pool.extend(
+            [
+                "canal",
+                "polder",
+                "waterway",
+                "shoreline",
+                "fields",
+                "fog",
+                "mist",
+                "trees",
+                "park",
+                "amsterdam",
+                "netherlands",
+            ]
+        )
+
+    for cand in refill_pool:
+        _try_add(cand)
+
+    return _clean_keywords_list(out)[:target_n]
+
+
+def _apply_context_guardrails(
+    *,
+    caption: str,
+    alt_text: str,
+    kw_list: Sequence[str],
+    folder: str,
+    subject: str,
+    location: str,
+    file_name: str,
+    keywords_n: int,
+) -> Tuple[str, str, List[str]]:
+    cap = _clean_text_output(caption)
+    alt = _clean_text_output(alt_text)
+    kws = _clean_keywords_list(kw_list)
+
+    blocked_terms: Set[str] = set()
+    preferred_terms: List[str] = []
+    replacement_maps: List[Dict[str, str]] = []
+    kind_now = _infer_subject_kind(folder, subject)
+    subj_label = _subject_label(folder, subject)
+    subj_plain = _strip_leading_article(subj_label) or "subject"
+    ctx_blob = _context_evidence_blob(folder, subject, location, file_name)
+    is_amsterdam = "amsterdam" in ctx_blob
+    is_fireworks = bool(any(h in ctx_blob for h in _FIREWORK_HINTS))
+
+    lowland_context = _is_lowland_nl_context(folder, subject, location, file_name)
+    sunrise_hint, sunset_hint = _filename_time_hints(file_name)
+    season_hint = _detect_context_season(folder, subject, location, file_name)
+
+    # Global strictness: avoid abstract non-evidence labels.
+    blocked_terms |= {"wildlife", "animal", "habitat", "foraging"}
+
+    if lowland_context:
+        blocked_terms |= set(_LOWLAND_MOUNTAIN_TERMS)
+        replacement_maps.append(_LOWLAND_TEXT_REPLACEMENTS)
+
+    if sunrise_hint:
+        blocked_terms |= set(_SUNRISE_BLOCK_TERMS)
+        preferred_terms.extend(["sunrise", "morning"])
+        replacement_maps.append(_SUNRISE_TEXT_REPLACEMENTS)
+    elif sunset_hint:
+        blocked_terms |= set(_SUNSET_BLOCK_TERMS)
+        preferred_terms.extend(["sunset", "evening"])
+        replacement_maps.append(_SUNSET_TEXT_REPLACEMENTS)
+
+    if season_hint:
+        blocked_terms |= _blocked_season_terms(season_hint)
+        preferred_terms.append(season_hint)
+        season_map = _SEASON_TEXT_REPLACEMENTS.get(season_hint, {})
+        if season_map:
+            replacement_maps.append(season_map)
+
+    if kind_now != "wildlife":
+        ctx_terms = set(ctx_blob.split())
+        allowed_fauna = _FAUNA_TERMS & ctx_terms
+        blocked_terms |= (_FAUNA_TERMS - allowed_fauna)
+        replacement_maps.append(
+            {
+                "a wildlife subject": subj_label,
+                "an wildlife subject": subj_label,
+                "wildlife subject": subj_plain,
+                "animal subject": subj_plain,
+            }
+        )
+
+    if kind_now in {"architecture", "urban", "structure", "vehicle"}:
+        blocked_terms |= set(_LOWLAND_MOUNTAIN_TERMS) | {
+            "terrain",
+            "hills",
+            "habitat",
+            "field",
+            "fields",
+            "meadow",
+            "meadows",
+            "burrow",
+        }
+        replacement_maps.append(
+            {
+                "rolling hills": "urban backdrop",
+                "open terrain": "surrounding area",
+                "field cover": "surroundings",
+                "short grass": "surrounding area",
+                "burrow-area": "ground-level",
+            }
+        )
+
+    if kind_now == "night":
+        blocked_terms |= {"daylight", "morning", "terrain", "hills", "field", "fields", "meadow", "meadows"}
+        blocked_terms |= set(_NIGHT_FIREWORK_BLOCK_TERMS)
+        replacement_maps.append(
+            {
+                "clear daylight": "nighttime sky",
+                "daylight conditions": "nighttime conditions",
+                "daylight": "night",
+                "rolling hills": "night backdrop",
+                "open terrain": "night backdrop",
+                "field cover": "night backdrop",
+            }
+        )
+
+    if is_fireworks:
+        blocked_terms |= set(_NIGHT_FIREWORK_BLOCK_TERMS)
+        blocked_terms |= set(_LOWLAND_MOUNTAIN_TERMS)
+        replacement_maps.append(
+            {
+                "sunny day": "night sky",
+                "clear sky": "night sky",
+                "open terrain": "night backdrop",
+                "rolling hills": "night backdrop",
+                "field cover": "night backdrop",
+                "wildlife subject": subj_plain,
+                "animal subject": subj_plain,
+            }
+        )
+
+    if is_amsterdam:
+        blocked_terms |= set(_AMSTERDAM_FORCE_BLOCK_TERMS)
+        replacement_maps.append(
+            {
+                "river": "canal",
+                "rivers": "canals",
+                "lake": "waterway",
+                "lakes": "waterways",
+            }
+        )
+
+    # Strict evidence-only gating: if a risky scene term is not explicit in
+    # context (folder/subject/location/file name), block it.
+    blocked_terms |= _collect_non_evidence_blocked_terms(
+        folder=folder,
+        subject=subject,
+        location=location,
+        file_name=file_name,
+    )
+    blocked_terms = {_norm_text_strict(t) for t in blocked_terms if _norm_text_strict(t)}
+
+    for mapping in replacement_maps:
+        cap = _apply_phrase_replacements(cap, mapping)
+        alt = _apply_phrase_replacements(alt, mapping)
+    cap = _cleanup_guardrail_artifacts(cap)
+    alt = _cleanup_guardrail_artifacts(alt)
+
+    cap = _sanitize_sentence(_deawkward_sentence(cap))
+    cap = _trim_caption(cap, max_words=24)
+    alt = _sanitize_sentence(_deawkward_sentence(alt))
+    alt = _trim_or_pad_alt(alt, min_words=10, max_words=18)
+
+    # trim/pad may reintroduce generic cues from template paths; enforce guardrails again
+    for mapping in replacement_maps:
+        cap = _apply_phrase_replacements(cap, mapping)
+        alt = _apply_phrase_replacements(alt, mapping)
+    cap = _cleanup_guardrail_artifacts(cap)
+    alt = _cleanup_guardrail_artifacts(alt)
+    cap = _trim_caption(_sanitize_sentence(_deawkward_sentence(cap)), max_words=24)
+    alt = _trim_or_pad_alt(_sanitize_sentence(_deawkward_sentence(alt)), min_words=10, max_words=18)
+
+    # Final hard scrub for blocked scene terms.
+    cap = _strip_blocked_terms_from_text(cap, blocked_terms)
+    alt = _strip_blocked_terms_from_text(alt, blocked_terms)
+    cap = _trim_caption(_sanitize_sentence(_deawkward_sentence(cap)), max_words=24)
+    alt = _trim_or_pad_alt(_sanitize_sentence(_deawkward_sentence(alt)), min_words=10, max_words=18)
+    if not cap:
+        cap = _fallback_caption_candidate(
+            folder=folder,
+            subject=subject,
+            location=location,
+            variant=0,
+            sequence_no=0,
+        )
+        cap = _strip_blocked_terms_from_text(cap, blocked_terms)
+        cap = _trim_caption(_sanitize_sentence(_deawkward_sentence(cap)), max_words=24)
+    if not alt:
+        alt = _fallback_alt_candidate(
+            folder=folder,
+            subject=subject,
+            location=location,
+            variant=0,
+            sequence_no=0,
+        )
+        alt = _strip_blocked_terms_from_text(alt, blocked_terms)
+        alt = _trim_or_pad_alt(_sanitize_sentence(_deawkward_sentence(alt)), min_words=10, max_words=18)
+
+    kws = _refill_guarded_keywords(
+        kw_list=kws,
+        keywords_n=keywords_n,
+        folder=folder,
+        subject=subject,
+        location=location,
+        caption=cap,
+        alt_text=alt,
+        blocked_terms=blocked_terms,
+        preferred_terms=preferred_terms,
+        lowland_context=lowland_context,
+    )
+    return cap, alt, kws
+
+
 def _split_keywords(raw: str) -> List[str]:
     raw = (raw or "").strip()
     if not raw:
@@ -1136,6 +2394,14 @@ def _sanitize_sentence(s: str) -> str:
     s = _WS_RE.sub(" ", s).strip()
     if not s:
         return ""
+    # Normalize unicode dash variants first.
+    s = re.sub(r"[‐‑‒–—−]", "-", s)
+    # Normalize compound hyphenation that hurts readability in generated metadata.
+    s = re.sub(r"\b([A-Za-z]+)-([A-Za-z]+)\b", r"\1 \2", s)
+    # Normalize awkward hyphen spacing in generated text.
+    s = re.sub(r"\b([A-Za-z]+)-\s+([A-Za-z]+)\b", r"\1 \2", s)
+    s = re.sub(r"\b([A-Za-z]+)-(?=[\s,.;!?]|$)", r"\1", s)
+    s = re.sub(r"(?:(?<=\s)|^)-([A-Za-z]+)\b", r"\1", s)
     s = re.sub(r"\s+,", ",", s)
     s = re.sub(r",\s*\.", ".", s)
     s = re.sub(r"\.\s*,", ".", s)
@@ -1177,9 +2443,20 @@ def _deawkward_sentence(s: str) -> str:
     s = _clean_text_output(s)
     if not s:
         return s
+    s = re.sub(
+        r"\b(?:roadside|roadway|street level|street-level|highway side|highway-side|route level|route-level|park side|park-side|lakeside|slope side|slope-side|trail corridor|trail-corridor|ground level|ground-level|natural)\s+view of\b",
+        "view of",
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(r"\bmountains and a mountain\b", "mountains", s, flags=re.IGNORECASE)
     s = re.sub(r"\b([A-Za-z]+)\s+and\s+a\s+\1\b", r"\1", s, flags=re.IGNORECASE)
     s = re.sub(r"\b([A-Za-z]+)\s+\1\b", r"\1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bview of\s+(along|in|with|over|showing|across|near)\b", r"view \1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+edge\s+of\s+(?:a|the)\s+water\b", "the edge of the water", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+edge\s+of\s+water\b", "the edge of the water", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+water's\s+edge\b", "the water's edge", s, flags=re.IGNORECASE)
+    s = re.sub(r"\ba\s+(calm|still|clear)\s+water\b", r"\1 water", s, flags=re.IGNORECASE)
     s = _WS_RE.sub(" ", s).strip()
     return s
 
@@ -1215,15 +2492,42 @@ def _has_low_quality_phrase(s: str) -> bool:
     if any(len(tok) >= 19 for tok in re.findall(r"[A-Za-z]+", raw)):
         return True
     bad_patterns = (
+        r"\b(?:a|an)\s+is\b",
+        r"\bof with\b",
+        r"\bwith an and\b",
+        r"\bwildlife subject\b",
         r"\bwith background detail\b",
         r"\bwith simple scene detail\b",
         r"\bwith straightforward context\b",
         r"\bin daylight conditions\b",
+        r"\bthe scene appears\b",
+        r"\bscene appears in open terrain\b",
         r"\bthe scene remains visible\b",
         r"\bvisible in broad daylight\b",
         r"\bvisible in the background\b",
         r"\bwith context\b",
         r"\bshows? a with\b",
+        r"\bview of (?:a|an|the) with\b",
+        r"\bof (?:a|an|the) with\b",
+        r"\bscene view of scene\b",
+        r"\bopen[- ]air view of scene\b",
+        r"\boutdoor view of scene\b",
+        r"\bscene (?:with|showing) surrounding landscape context\b",
+        r"\bshowing surrounding landscape context\b",
+        r"\bacross an open outdoor setting\b",
+        r"\bopen outdoor setting\b",
+        r"\bground[- ]level view of subject\b",
+        r"\bvisible habitat cover and profile detail\b",
+        r"\bvisible cover and profile detail\b",
+        r"\bcrosses an (?:intersection )?approach\b",
+        r"\bfollows a visible (?:street )?segment\b",
+        r"\burban scene (?:crosses|follows)\b",
+        r"\burban depth\b",
+        r"\bnatural view of natural landscape\b",
+        r"\bscene is framed by surrounding landscape\b",
+        r"\bwide background terrain remains visible\b",
+        r"\ba\s+(?:in|on|at|with|near|under|over|against|across|through|by|from)\b",
+        r"\band\s+a\s+[a-z]+ing\b",
         r"\b[a-z]+-\s+with\b",
         r"\b[a-z]+-\.$",
         r"\bfeatures a [a-z ]{1,48} that\b",
@@ -1235,6 +2539,9 @@ def _has_low_quality_phrase(s: str) -> bool:
         r"\bsits among dense city buildings\b",
         r"\bappears within downtown streets\b",
         r"\bstreet-level city view of urban scene\b",
+        r"\bparked wall\b",
+        r"\bvisible surroundings\b",
+        r"\bnatural ground texture\b",
         r"\bin this photo\b",
         r",\s*\.$",
     )
@@ -1283,6 +2590,91 @@ def _scene_evidence_counts(caption: str, alt_text: str) -> Tuple[int, int]:
         nature_hits += 1
 
     return urban_hits, nature_hits
+
+
+def _has_context_hallucination(
+    *,
+    caption: str,
+    alt_text: str,
+    folder: str,
+    subject: str,
+    location: str,
+) -> bool:
+    kind_now = _infer_subject_kind(folder, subject)
+    txt = _norm_text_strict(f"{caption} {alt_text}")
+    ctx = _norm_text_strict(f"{folder} {subject} {location}")
+    if not txt:
+        return True
+    if re.search(r"\b(?:a|an)\s+is\b", txt):
+        return True
+    if " of with " in f" {txt} ":
+        return True
+    if any(
+        p in txt
+        for p in (
+            "scene view of scene",
+            "surrounding landscape context",
+            "open outdoor setting",
+            "crosses an approach",
+            "follows a visible segment",
+            "with an and",
+        )
+    ):
+        return True
+    if kind_now != "wildlife" and ("wildlife subject" in txt or "animal subject" in txt):
+        return True
+    if kind_now != "wildlife":
+        txt_terms = set(txt.split())
+        ctx_terms = set(ctx.split())
+        leaked_fauna = (txt_terms & _FAUNA_TERMS) - (ctx_terms & _FAUNA_TERMS)
+        if leaked_fauna:
+            return True
+    if kind_now in {"architecture", "urban", "structure", "vehicle"}:
+        if any(
+            p in txt
+            for p in (
+                "open terrain",
+                "rolling hills",
+                "distant hills",
+                "field cover",
+                "habitat",
+                "burrow area",
+                "rocky slope",
+                "rocky slopes",
+                "ridgeline",
+                "ridgelines",
+                "rugged",
+            )
+        ):
+            return True
+    if kind_now == "night":
+        if any(p in txt for p in ("clear daylight", "daylight", "rolling hills", "open terrain", "field cover")):
+            return True
+    is_lowland_or_amsterdam = (
+        "amsterdam" in ctx
+        or "netherlands" in ctx
+        or _is_lowland_nl_context(folder, subject, location)
+    )
+    if is_lowland_or_amsterdam:
+        if any(
+            p in txt
+            for p in (
+                "rolling hills",
+                "distant hills",
+                "rocky slope",
+                "rocky slopes",
+                "steep terrain",
+                "rugged",
+                "ridgeline",
+                "ridgelines",
+                "alpine",
+                "valley",
+                "mountain",
+                "foothill",
+            )
+        ):
+            return True
+    return False
 
 
 def _visual_nature_without_urban(caption: str, alt_text: str) -> bool:
@@ -1595,6 +2987,15 @@ def _payload_quality_score(
     if _caption_alt_scene_conflict(caption, alt_text):
         score -= 22
         issues.append("caption-alt scene conflict")
+    if _has_context_hallucination(
+        caption=caption,
+        alt_text=alt_text,
+        folder=folder,
+        subject=subject,
+        location=location,
+    ):
+        score -= 45
+        issues.append("context hallucination")
 
     kind_now = _infer_subject_kind(folder, subject)
     if kind_now == "vehicle":
@@ -1608,31 +3009,11 @@ def _payload_quality_score(
             score -= 18
             issues.append("vehicle mountain context mismatch")
     elif kind_now == "wildlife":
-        subj_low = _norm_text_strict(subject)
         cap_alt = _norm_text_strict(f"{caption} {alt_text}")
-        anchors: List[str] = []
-        for a in (
-            "prairie dog",
-            "ground squirrel",
-            "squirrel",
-            "hawk",
-            "bird",
-            "elk",
-            "deer",
-            "rabbit",
-            "fox",
-            "coyote",
-            "bear",
-            "moose",
-            "bison",
-            "rodent",
-            "wildlife",
-            "animal",
-        ):
-            if a in subj_low:
-                anchors.append(a)
-        if anchors and not any(a in cap_alt for a in anchors):
-            score -= 20
+        anchors = _subject_anchor_terms(subject)
+        specific_anchors = [a for a in anchors if _norm_text_strict(a) not in _WILDLIFE_GENERIC_TERMS]
+        if specific_anchors and not _has_anchor_in_text(cap_alt, specific_anchors):
+            score -= 30
             issues.append("wildlife subject missing")
 
     kw_penalty, kw_issues = _keywords_quality_penalty(kw_list, keywords_n)
@@ -1759,6 +3140,209 @@ def _subject_phrase(subject: str) -> str:
     return " ".join(toks[:5])
 
 
+def _extract_subject_species_hint(subject: str, file_name: str = "") -> str:
+    raw = _clean_phrase(f"{subject} {Path(file_name or '').stem}")
+    toks: List[str] = []
+    for t in re.split(r"[\s]+", raw):
+        n = _norm_text_strict(t)
+        if not n:
+            continue
+        if n in _KW_BANNED or n in _KW_STOPWORDS:
+            continue
+        if n in {"canon", "eos", "r5", "mark", "ii", "iii", "iv", "v"}:
+            continue
+        if n.isdigit():
+            continue
+        if toks and n in _SUBJECT_BREAK_TOKENS:
+            break
+        toks.append(n)
+        if len(toks) >= 6:
+            break
+
+    informative = [t for t in toks if t not in _SUBJECT_HINT_NOISE_TERMS]
+    if not informative:
+        return ""
+    if len(informative) >= 2:
+        return " ".join(informative[:2]).strip()
+    return informative[0].strip()
+
+
+def _classifier_subject_hint(classifier_hint: Optional[Dict[str, object]]) -> str:
+    if not classifier_hint:
+        return ""
+    fam = _norm_text_strict(str(classifier_hint.get("family") or ""))
+    if fam not in {"bird", "animal"}:
+        return ""
+    label = _norm_text_strict(str(classifier_hint.get("label") or ""))
+    if not label:
+        return ""
+    if label in _NATURE_GENERIC_ALLOW or label in _WILDLIFE_GENERIC_TERMS:
+        return ""
+    toks = [
+        t
+        for t in label.split()
+        if t
+        and t not in _KW_STOPWORDS
+        and t not in _SUBJECT_HINT_NOISE_TERMS
+        and len(t) > 2
+    ]
+    if not toks:
+        return ""
+    if len(toks) >= 2:
+        return " ".join(toks[:2])
+    return toks[0]
+
+
+def _with_indefinite_article(term: str) -> str:
+    t = _norm_text_strict(term)
+    if not t:
+        return ""
+    article = "an" if t[:1] in {"a", "e", "i", "o", "u"} else "a"
+    return f"{article} {t}"
+
+
+def _enforce_subject_hint_text(text: str, hint: str) -> str:
+    out = _sanitize_sentence(_deawkward_sentence(text))
+    h = _norm_text_strict(hint)
+    if not out or not h:
+        return out
+    if h in _norm_text_strict(out):
+        return out
+
+    hinted = _with_indefinite_article(h)
+    replacements = [
+        (r"\ba bird\b", hinted),
+        (r"\ban bird\b", hinted),
+        (r"\bbird\b", h),
+        (r"\bsongbird\b", h),
+        (r"\ba wildlife subject\b", hinted),
+        (r"\ban wildlife subject\b", hinted),
+        (r"\bwildlife subject\b", h),
+        (r"\ban animal\b", hinted),
+        (r"\ba animal\b", hinted),
+        (r"\banimal subject\b", h),
+        (r"\bmammal\b", h),
+    ]
+    for pat, rep in replacements:
+        nxt = re.sub(pat, rep, out, count=1, flags=re.IGNORECASE)
+        if nxt != out:
+            return _sanitize_sentence(_deawkward_sentence(nxt))
+    return out
+
+
+def _enforce_subject_hint_keywords(kw_list: Sequence[str], hint: str, keywords_n: int) -> List[str]:
+    kws = _clean_keywords_list(list(kw_list))
+    h = _normalize_keyword(hint)
+    if not h:
+        return kws[: int(keywords_n)]
+    if h in {_normalize_keyword(k) for k in kws}:
+        return kws[: int(keywords_n)]
+
+    out = [h]
+    for k in kws:
+        kn = _normalize_keyword(k)
+        if kn in {"bird", "songbird", "wildlife", "wildlife subject", "animal", "animal subject", "mammal"}:
+            continue
+        if kn == h:
+            continue
+        out.append(k)
+    return _clean_keywords_list(out)[: int(keywords_n)]
+
+
+def _is_wildlife_subject_context(folder: str, subject: str, file_name: str = "") -> bool:
+    if _infer_subject_kind(folder, subject) == "wildlife":
+        return True
+    blob = _norm_text_strict(f"{folder} {subject} {Path(file_name or '').stem}")
+    if any(t in blob for t in _WILDLIFE_BIRD_HINTS):
+        return True
+    if any(t in blob for t in _WILDLIFE_MAMMAL_HINTS):
+        return True
+    return bool({"wildlife", "animal", "animals", "bird", "birds"} & set(blob.split()))
+
+
+def _subject_anchor_terms(subject: str, file_name: str = "", subject_hint: str = "") -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+
+    def _push(term: str):
+        t = _norm_text_strict(term)
+        if not t:
+            return
+        if t in seen:
+            return
+        seen.add(t)
+        out.append(t)
+
+    hint = _norm_text_strict(subject_hint)
+    if hint:
+        _push(hint)
+        for t in hint.split():
+            if (
+                len(t) > 2
+                and t not in _KW_STOPWORDS
+                and t not in _KW_BANNED
+                and t not in _SUBJECT_HINT_NOISE_TERMS
+            ):
+                _push(t)
+
+    extracted = _extract_subject_species_hint(subject, file_name)
+    if extracted and extracted != hint:
+        _push(extracted)
+        for t in extracted.split():
+            _push(t)
+
+    blob = _norm_text_strict(f"{subject} {Path(file_name or '').stem}")
+    for t in blob.split():
+        if t in {"bird", "birds", "animal", "animals", "wildlife", "mammal"}:
+            _push(t)
+
+    if not out:
+        _push("animal")
+    return out
+
+
+def _has_anchor_in_text(text: str, anchors: Sequence[str]) -> bool:
+    low = _norm_text_strict(text)
+    if not low:
+        return False
+    for a in anchors:
+        n = _norm_text_strict(a)
+        if not n:
+            continue
+        variants: List[str] = [n]
+        if " " not in n:
+            if len(n) > 3 and n.endswith("s"):
+                variants.append(n[:-1])
+            elif len(n) > 2:
+                variants.append(n + "s")
+        for v in variants:
+            if v and re.search(rf"\b{re.escape(v)}\b", low):
+                return True
+    return False
+
+
+def _wildlife_context_missing(
+    caption: str,
+    alt_text: str,
+    *,
+    folder: str,
+    subject: str,
+    file_name: str = "",
+    subject_hint: str = "",
+) -> bool:
+    if not _is_wildlife_subject_context(folder, subject, file_name):
+        return False
+    anchors = _subject_anchor_terms(subject, file_name=file_name, subject_hint=subject_hint)
+    specific_anchors = [a for a in anchors if _norm_text_strict(a) not in _WILDLIFE_GENERIC_TERMS]
+    if not specific_anchors:
+        return False
+    cap_ok = _has_anchor_in_text(caption, specific_anchors)
+    alt_ok = _has_anchor_in_text(alt_text, specific_anchors)
+    # Require wildlife anchor in at least one field; requiring both is too strict
+    # for legitimate variations across caption/alt text.
+    return not (cap_ok or alt_ok)
+
+
 def _subject_label(folder: str, subject: str) -> str:
     kind = _infer_subject_kind(folder, subject)
     toks = [_norm_text_strict(x) for x in _clean_phrase(subject).split()]
@@ -1793,9 +3377,14 @@ def _subject_label(folder: str, subject: str) -> str:
             return "a passenger jet"
         if "aircraft" in ts or "airplane" in ts or "plane" in ts:
             return "an aircraft"
-        return "an aviation subject"
+        return "an aircraft"
 
     if kind == "wildlife":
+        species_hint = _extract_subject_species_hint(subject, "")
+        if species_hint:
+            if species_hint[:1].lower() in {"a", "e", "i", "o", "u"}:
+                return f"an {species_hint}"
+            return f"a {species_hint}"
         if "prairie" in ts and "dog" in ts:
             return "a prairie dog"
         if "ground" in ts and "squirrel" in ts:
@@ -1850,11 +3439,24 @@ def _subject_label(folder: str, subject: str) -> str:
     if kind == "urban":
         if "skyline" in ts:
             return "a city skyline"
+        if "canal" in ts or "gracht" in ts or "vaart" in ts:
+            return "a canal-side city view"
         if "street" in ts:
             return "an urban street scene"
         if "bridge" in ts:
             return "a city bridge"
-        return "an urban scene"
+        return "a cityscape"
+
+    if kind == "people":
+        if "cyclist" in ts or "bicycle" in ts or "bike" in ts:
+            return "people with bicycles"
+        if "snow" in ts or "snowy" in ts:
+            return "people in snowfall"
+        if "park" in ts:
+            return "people in a park"
+        if "street" in ts:
+            return "people on a street"
+        return "people outdoors"
 
     if kind == "architecture":
         if "bridge" in ts:
@@ -1893,8 +3495,21 @@ def _subject_label(folder: str, subject: str) -> str:
         return "a nighttime scene"
 
     if kind == "landscape":
+        season_hint = _detect_context_season(folder, subject, "", "")
+        if "leafless" in ts and ("tree" in ts or "trees" in ts):
+            if season_hint:
+                return f"a {season_hint} leafless-tree landscape"
+            return "a leafless-tree landscape"
+        if ("tree" in ts or "trees" in ts) and season_hint:
+            return f"a {season_hint} tree-lined landscape"
+        if ("reed" in ts or "reeds" in ts) and season_hint:
+            return f"a {season_hint} reed-fringed landscape"
         if "trail" in ts and "road" in ts:
             return "a mountain road"
+        if "dune" in ts or "dunes" in ts:
+            if season_hint:
+                return f"a {season_hint} dune landscape"
+            return "a dune landscape"
         if "lake" in ts:
             return "a lake"
         if "mountain" in ts:
@@ -1903,14 +3518,42 @@ def _subject_label(folder: str, subject: str) -> str:
             return "a forest landscape"
         if "rural" in ts:
             return "a rural landscape"
+        if season_hint:
+            return f"a {season_hint} landscape"
         return "a natural landscape"
 
+    subj_hint = _subject_phrase(subject)
+    if subj_hint and subj_hint != "subject":
+        return f"the {subj_hint}"
     return "the scene"
 
 
 def _caption_style_bad(caption: str) -> bool:
     txt = _norm_text(caption)
     if not txt:
+        return True
+    # Grammar artifact: sentence starts with article directly followed by a verb.
+    m = re.match(r"^(a|an|the)\s+([a-z]+)\b", txt)
+    if m and m.group(2) in {
+        "crosses",
+        "runs",
+        "shows",
+        "moves",
+        "appears",
+        "stands",
+        "sits",
+        "extends",
+        "lies",
+        "spreads",
+        "follows",
+        "passes",
+        "continues",
+        "reveals",
+        "captures",
+        "presents",
+        "is",
+        "are",
+    }:
         return True
     wc = _word_count(txt)
     if wc < 8 or wc > 24:
@@ -1921,15 +3564,38 @@ def _caption_style_bad(caption: str) -> bool:
         return True
     if txt.count(",") > 2:
         return True
+    if re.search(r"\ba\s+(in|on|at|with|near|under|over|against|across|through|by|from)\b", txt):
+        return True
+    if re.search(r"\band\s+a\s+[a-z]+ing\b", txt):
+        return True
     if re.search(r"\b(with|in)\b[^.]{0,28}\b\1\b", txt):
         return True
     if re.search(r"\bfeatures a [a-z ]{1,48} that\b", txt):
+        return True
+    if re.search(r"\bscenery\s+[a-z]{4,}\s+landscape\b", txt):
         return True
     if re.search(r",\s*\.$", txt):
         return True
     if any(p in txt for p in ("distant context", "environmental context", "foreground depth", "outdoor scenic frame")):
         return True
+    if any(
+        p in txt
+        for p in (
+            "scene appears",
+            "scene view of scene",
+            "surrounding landscape context",
+            "open outdoor setting",
+            "crosses an approach",
+            "follows a visible segment",
+            "urban depth",
+            "with an and",
+            "wide background terrain remains visible",
+        )
+    ):
+        return True
     if re.search(r"\b(captured|shown|appears)\s+with\b", txt):
+        return True
+    if _weak_token_hits(txt) >= 5:
         return True
     return False
 
@@ -1937,6 +3603,28 @@ def _caption_style_bad(caption: str) -> bool:
 def _alt_style_bad(alt_text: str) -> bool:
     txt = _norm_text(alt_text)
     if not txt:
+        return True
+    m = re.match(r"^(a|an|the)\s+([a-z]+)\b", txt)
+    if m and m.group(2) in {
+        "crosses",
+        "runs",
+        "shows",
+        "moves",
+        "appears",
+        "stands",
+        "sits",
+        "extends",
+        "lies",
+        "spreads",
+        "follows",
+        "passes",
+        "continues",
+        "reveals",
+        "captures",
+        "presents",
+        "is",
+        "are",
+    }:
         return True
     wc = _word_count(txt)
     if wc < 10 or wc > 18:
@@ -1947,6 +3635,16 @@ def _alt_style_bad(alt_text: str) -> bool:
         return True
     if re.search(r"\b(with|in|on|at|to|for|by|under)\.?$", txt):
         return True
+    if re.search(r"\ba\s+(in|on|at|with|near|under|over|against|across|through|by|from)\b", txt):
+        return True
+    if re.search(r"\band\s+a\s+[a-z]+ing\b", txt):
+        return True
+    if re.search(r"\bin natural\.$", txt):
+        return True
+    if txt.startswith("detailed image of "):
+        return True
+    if txt.startswith("natural scene featuring "):
+        return True
     if re.search(r"\b(with|in)\b[^.]{0,24}\b\1\b", txt):
         return True
     if re.search(r",\s*\.$", txt):
@@ -1956,6 +3654,25 @@ def _alt_style_bad(alt_text: str) -> bool:
     if txt.startswith("mountain view of mountain road"):
         return True
     if any(p in txt for p in ("distant context", "environmental context", "outdoor scenic frame", "stable.")):
+        return True
+    if any(
+        p in txt
+        for p in (
+            "scene view of scene",
+            "open air view of scene",
+            "outdoor view of scene",
+            "surrounding landscape context",
+            "open outdoor setting",
+            "ground level view of subject",
+            "visible cover and profile detail",
+            "crosses an approach",
+            "follows a visible segment",
+            "urban depth",
+            "with an and",
+        )
+    ):
+        return True
+    if _weak_token_hits(txt) >= 4:
         return True
     return False
 
@@ -2097,8 +3814,38 @@ def _infer_setting_phrase(folder: str, subject: str) -> str:
 
 
 def _infer_subject_kind(folder: str, subject: str) -> str:
-    folder_display = _FOLDER_MAP_BY_KEY.get(str(folder or "").strip().lower(), "")
+    folder_key = str(folder or "").strip().lower()
+    folder_display = _FOLDER_MAP_BY_KEY.get(folder_key, "")
     low = _norm_text_strict(f"{folder} {folder_display} {subject}")
+
+    # Folder is the strongest signal; do not let noisy subject tokens override it.
+    if folder_key in {"architecture", "architectural"}:
+        return "architecture"
+    if folder_key in {"cityscape", "urban"}:
+        return "urban"
+    if folder_key in {"aviation"}:
+        return "aviation"
+    if folder_key in {"night", "astrophotography"}:
+        return "night"
+    if folder_key in {"glassball"}:
+        return "glassball"
+    if folder_key in {"water"}:
+        return "macro"
+    if folder_key in {"people_creative_collection", "people", "people_creative"}:
+        return "people"
+    if folder_key in {"macro", "closeup", "close-up"}:
+        return "macro"
+    if folder_key in {"miscellaneous", "misc"} and any(x in low for x in ("firework", "fireworks", "new year eve", "new years eve", "night", "dusk", "sunset", "twilight")):
+        return "night"
+    if folder_key in {"nature", "birds", "birds_photography"}:
+        if any(x in low for x in _WILDLIFE_BIRD_HINTS) or any(x in low for x in _WILDLIFE_MAMMAL_HINTS) or "wildlife" in low or "animal" in low:
+            return "wildlife"
+        if any(x in low for x in ("waterfall", "river", "ocean", "sea", "coast", "shore", "shoreline", "canal")):
+            return "waterscape"
+        if any(x in low for x in ("mountain", "lake", "river", "forest", "landscape", "valley", "ridge")):
+            return "landscape"
+        return "general"
+
     if any(x in low for x in ("glassball", "glass ball", "lensball", "crystal ball", "crystalball")):
         return "glassball"
     if any(x in low for x in ("macro", "closeup", "close up", "flower", "petal", "insect", "bee", "butterfly", "spider", "texture", "droplet")):
@@ -2116,6 +3863,8 @@ def _infer_subject_kind(folder: str, subject: str) -> str:
         return "wildlife"
     if any(x in low for x in ("industrial", "silo", "factory", "facility", "warehouse", "oil")):
         return "structure"
+    if any(x in low for x in ("people", "person", "pedestrian", "pedestrians", "cyclist", "cyclists", "runner", "runners", "crowd", "individuals", "group")):
+        return "people"
     if any(x in low for x in ("city", "urban", "downtown", "skyline", "town", "street")):
         return "urban"
     if any(x in low for x in ("architecture", "architectural", "building", "bridge", "tower", "facade", "cabin")):
@@ -2124,7 +3873,23 @@ def _infer_subject_kind(folder: str, subject: str) -> str:
         return "waterscape"
     if any(x in low for x in ("desert", "canyon", "mesa", "butte", "dunes", "arid")):
         return "desert"
-    if any(x in low for x in ("night", "dusk", "dawn", "sunset", "sunrise", "stars", "milky", "twilight")):
+    if any(
+        x in low
+        for x in (
+            "night",
+            "dusk",
+            "dawn",
+            "sunset",
+            "sunrise",
+            "stars",
+            "milky",
+            "twilight",
+            "firework",
+            "fireworks",
+            "new year eve",
+            "new years eve",
+        )
+    ):
         return "night"
     if any(x in low for x in ("mountain", "lake", "river", "forest", "landscape", "valley", "ridge")):
         return "landscape"
@@ -2219,7 +3984,7 @@ def _fallback_caption_candidate(
             "open sky and cloud layers",
             "airport approach corridor",
             "runway environment in the distance",
-            "clear sky with soft cloud cover",
+            "clear sky and soft cloud cover",
             "high-altitude backdrop",
             "airspace over an urban edge",
             "flight-path perspective",
@@ -2255,7 +4020,35 @@ def _fallback_caption_candidate(
             "street signage and buildings",
             "glass and concrete towers",
             "a broad city corridor",
-            "urban street depth",
+            "background city buildings",
+        ),
+        "people": (
+            "snow-covered ground",
+            "park trees and open space",
+            "winter weather and tree lines",
+            "people across a public space",
+            "buildings along the park edge",
+            "falling snow across the scene",
+            "a snowy park field",
+            "urban park surroundings",
+            "pedestrians and open ground",
+            "canal-side paths and trees",
+            "public-space activity in winter",
+            "tree-lined park background",
+        ),
+        "people": (
+            "snow-covered ground",
+            "park trees in the background",
+            "buildings along the park edge",
+            "pedestrians across open space",
+            "winter weather and tree lines",
+            "people spread across the scene",
+            "a snowy park field",
+            "canal-side paths and trees",
+            "urban park surroundings",
+            "falling snow across open space",
+            "street-side activity and buildings",
+            "public-space activity in winter",
         ),
         "architecture": (
             "structural lines and facade detail",
@@ -2518,18 +4311,48 @@ def _fallback_caption_candidate(
             )
     elif kind == "urban":
         acts = (
-            "runs along a main street corridor",
-            "shows storefronts and sidewalks",
-            "passes through a town-center block",
-            "includes mixed street and building detail",
-            "follows a visible street segment",
-            "shows parked vehicles near shopfronts",
-            "is framed by street-facing buildings",
-            "crosses an intersection approach",
-            "shows architectural detail along the street",
-            "includes a built roadside setting",
-            "shows a town street with urban elements",
-            "extends through a developed neighborhood",
+            "shows a canal-side city view",
+            "shows buildings and winter trees",
+            "includes city facades and open water",
+            "shows a built district with visible structures",
+            "shows an urban area with buildings in view",
+            "shows city architecture near water",
+            "is framed by trees and city buildings",
+            "shows a winter cityscape with open foreground",
+            "shows architectural detail in a city setting",
+            "includes a canal or waterfront urban edge",
+            "shows a developed neighborhood in view",
+            "shows city buildings under winter weather",
+        )
+    elif kind == "people":
+        acts = (
+            "are visible in a public outdoor setting",
+            "move across snow-covered ground",
+            "gather in a park during winter weather",
+            "walk through a snowy urban park",
+            "stand on open snow near buildings",
+            "appear across a park field in snowfall",
+            "move through a winter park scene",
+            "walk near trees and open ground",
+            "are shown in outdoor winter activity",
+            "cross a snowy public space",
+            "gather near a park edge with trees",
+            "are visible during falling snow",
+        )
+    elif kind == "people":
+        acts = (
+            "are visible in a public outdoor setting",
+            "move across snow-covered ground",
+            "gather in a park during winter weather",
+            "walk through a snowy urban park",
+            "stand on open snow near buildings",
+            "appear across a park field in snowfall",
+            "move through a winter park scene",
+            "walk near trees and open ground",
+            "are shown in outdoor winter activity",
+            "cross a snowy public space",
+            "gather near a park edge with trees",
+            "are visible during falling snow",
         )
     elif kind == "architecture":
         acts = (
@@ -2669,22 +4492,59 @@ def _fallback_caption_candidate(
             )
     else:
         acts = (
-            "stands within an outdoor setting",
-            "appears in open terrain",
-            "sits against a natural backdrop",
+            "stands in an outdoor setting",
+            "appears outdoors with visible surroundings",
+            "sits against a visible background",
             "appears under clear daylight",
-            "is positioned within surrounding landscape",
-            "appears beside nearby terrain",
-            "is visible against distant hills",
-            "sits in a clear outdoor scene",
+            "is positioned within visible surroundings",
+            "appears beside nearby trees or buildings",
+            "is visible with distant background detail",
+            "sits in a clear outdoor setting",
             "appears in a broad natural view",
             "stands near open ground and sky",
-            "remains visible within outdoor terrain",
-            "is framed by surrounding landscape",
+            "remains visible within the outdoor setting",
+            "is framed by visible surroundings",
         )
+
+    is_lowland_landscape = kind == "landscape" and _is_lowland_nl_context(folder, subject, location)
+    if is_lowland_landscape:
+        season_hint = _detect_context_season(folder, subject, location, "")
+        if season_hint == "winter":
+            acts = (
+                "extends across winter dune grass and leafless shrubs",
+                "stretches over lowland grass under winter light",
+                "shows leafless vegetation and a broad winter horizon",
+                "spreads across flat winter terrain with sparse trees",
+                "reveals muted winter tones across open lowland ground",
+                "shows dry winter grasses with distant tree lines",
+                "opens over sandy lowland textures in winter conditions",
+                "shows winter field texture with clouded sky above",
+            )
+        else:
+            acts = (
+                "extends across lowland grass and sparse shrubs",
+                "stretches over flat terrain with a broad horizon",
+                "shows dune grass textures and open sky",
+                "spreads across sandy lowland ground and tree lines",
+                "reveals dry vegetation and layered cloud cover",
+                "shows open field structure with muted natural tones",
+                "opens across broad lowland habitat and distant trees",
+                "shows grassland texture with a clear horizon line",
+            )
 
     seed = _stable_seed(folder, subject, loc, str(variant), str(max(0, sequence_no)))
     bg_pool = bg_by_kind.get(kind, bg_by_kind["general"])
+    if is_lowland_landscape:
+        bg_pool = (
+            "a broad lowland horizon",
+            "leafless shrubs and open grassland",
+            "dune grass and sandy ground",
+            "flat terrain with distant tree lines",
+            "muted winter tones under cloud cover",
+            "open meadow textures and sparse trees",
+            "lowland vegetation and a wide sky",
+            "reed and grass patterns across flat ground",
+        )
     if kind == "vehicle" and vehicle_mode == "mountain":
         bg_pool = (
             "mountain slopes in view",
@@ -2710,11 +4570,11 @@ def _fallback_caption_candidate(
             "Near {loc}, {subj} {act} with {bg}.",
             "Against {bg}, {subj} {act} in {loc}.",
             "Across {loc}, {subj} {act} with {bg}.",
-            "{subj_cap} {act} while {bg} remains visible in {loc}.",
+            "{subj_cap} {act} with {bg} visible in {loc}.",
             "With {bg} in view, {subj} {act} in {loc}.",
-            "{subj_cap} {act} through {loc} with {bg}.",
-            "{subj_cap} {act} as {bg} frames the scene in {loc}.",
-            "From {loc}, {subj} {act} against {bg}.",
+            "{subj_cap} {act} in {loc} with {bg}.",
+            "{subj_cap} {act} against {bg} in {loc}.",
+            "From {loc}, {subj} {act} with {bg}.",
         )
     else:
         templates = (
@@ -2722,10 +4582,10 @@ def _fallback_caption_candidate(
             "Against {bg}, {subj} {act}.",
             "Across the frame, {subj} {act} with {bg}.",
             "{subj_cap} {act} with {bg} in the background.",
-            "{subj_cap} {act} as {bg} fills the background.",
+            "{subj_cap} {act} against {bg}.",
             "{subj_cap} {act} with {bg} in view.",
             "With {bg} in the background, {subj} {act}.",
-            "{subj_cap} {act} while {bg} stays in view.",
+            "{subj_cap} {act} with {bg} visible.",
         )
 
     tpl = _pick_from_pool(templates, folder, subject, loc, str(variant), str(max(0, sequence_no)), "caption_tpl")
@@ -2804,14 +4664,24 @@ def _fallback_alt_candidate(
             "Utility-site view of",
         ),
         "urban": (
-            "Urban view of",
-            "Downtown view of",
-            "City-street view of",
-            "Street-level city view of",
+            "City view of",
+            "Urban city view of",
             "Cityscape view of",
-            "Metro-area view of",
-            "Intersection view of",
-            "City-corridor view of",
+            "Canal-side city view of",
+            "Winter city view of",
+            "Waterfront city view of",
+            "Built-city view of",
+            "Open city view of",
+        ),
+        "people": (
+            "People view of",
+            "Winter park view of",
+            "Snowy park view of",
+            "Public-space view of",
+            "Outdoor people view of",
+            "Park-side view of",
+            "Winter activity view of",
+            "Open-space people view of",
         ),
         "architecture": (
             "Architectural view of",
@@ -2897,13 +4767,12 @@ def _fallback_alt_candidate(
         ),
         "general": (
             "Outdoor view of",
-            "Scene view of",
             "Wide view of",
             "Ground-level view of",
-            "Open-air view of",
-            "Context view of",
+            "Outdoor view of",
+            "Detailed view of",
             "Daylight view of",
-            "General view of",
+            "Wide outdoor view of",
         ),
     }
 
@@ -2963,18 +4832,32 @@ def _fallback_alt_candidate(
             "near utility lines and site fencing",
         ),
         "urban": (
-            "with city blocks and side streets in view",
-            "along a downtown corridor with storefronts",
-            "with crosswalk markings and street signs",
-            "with layered storefronts and facades",
-            "with sidewalk detail and road lanes",
+            "with city buildings and winter trees in view",
+            "with layered facades and open foreground",
+            "with canal water and surrounding buildings",
             "with urban building lines in the background",
-            "with an intersection and city depth",
-            "with street-level perspective and signage",
-            "with glass and concrete buildings nearby",
-            "with urban street texture and perspective",
-            "across a built city district",
-            "with visible downtown architectural forms",
+            "with architectural detail and open sky",
+            "with a city waterfront and buildings nearby",
+            "with tree lines and city structures visible",
+            "with winter weather across a built district",
+            "with city architecture and open space in view",
+            "with building facades and waterfront detail",
+            "with urban structures and background trees",
+            "with visible city forms under winter light",
+        ),
+        "people": (
+            "with people visible across snow-covered ground",
+            "with park trees and winter weather in the background",
+            "showing outdoor activity in falling snow",
+            "with open public space and people in view",
+            "with a snowy park setting and tree lines",
+            "showing people near buildings and park edges",
+            "with winter conditions and visible park surroundings",
+            "showing people spread across a snowy field",
+            "with public-space activity and background trees",
+            "showing people and snow-covered ground detail",
+            "with pedestrians in a winter park setting",
+            "showing outdoor winter activity near trees",
         ),
         "architecture": (
             "with facade geometry and window detail",
@@ -3067,7 +4950,7 @@ def _fallback_alt_candidate(
             "with broad valley depth and ridgelines",
             "with forested slopes and exposed rock",
             "with alpine terrain and distant peaks",
-            "with autumn color across the hillsides",
+            "with muted seasonal color across the hillsides",
             "with high-elevation road and tree cover",
             "with mountain shoulders and cloud breaks",
             "with open slopes and a long horizon",
@@ -3079,7 +4962,7 @@ def _fallback_alt_candidate(
             "with switchback context and alpine backdrop",
             "with ridgeline layers and open daylight",
             "with steep terrain and forest patches",
-            "with mountain contours and autumn brush",
+            "with mountain contours and dry brush",
             "with broad upland terrain and sky",
             "with distant peaks and tree-lined slopes",
             "with elevated road context and ridges",
@@ -3093,35 +4976,33 @@ def _fallback_alt_candidate(
             "with terrain layers and sparse pine clusters",
         ),
         "general": (
-            "with visible outdoor surroundings and terrain",
+            "with visible outdoor surroundings and background detail",
             "in clear daylight with distant backdrop",
             "with nearby trees and open horizon",
-            "showing broad terrain and sky detail",
+            "showing sky and background detail",
             "with mixed natural elements in view",
-            "across an open outdoor setting",
-            "with distant hills and foreground detail",
-            "showing surrounding landscape context",
+            "with visible surroundings in daylight",
+            "with distant background and foreground detail",
+            "showing visible surroundings",
             "with natural ground texture and trees",
-            "with a broad background terrain view",
+            "with a broad background view",
             "showing clear outdoor scene detail",
-            "with layered terrain and sky conditions",
+            "with layered background and sky tones",
         ),
     }
 
     templates = (
-        "{prefix} {subj_bare} {detail}",
-        "{prefix} {subj_bare} {detail}",
-        "{prefix} {subj_bare} {detail}",
-        "{prefix} {subj_bare} {detail}",
-        "{prefix} {subj_bare} {detail}",
         "{subj_cap} {detail}",
-        "{prefix} {subj_bare} {detail}",
-        "{prefix} {subj_bare} {detail}",
+        "{subj_cap} {detail}",
+        "{subj_cap} {detail}",
+        "{subj_cap} {detail}",
+        "{subj_cap} {detail}",
+        "{subj_cap} {detail}",
+        "{subj_cap} {detail}",
+        "{subj_cap} {detail}",
     )
 
     seed = _stable_seed(folder, subject, loc, str(variant), str(max(0, sequence_no)))
-    prefix_pool = view_prefix_by_kind.get(kind, view_prefix_by_kind["general"])
-    prefix = _pick_from_pool(prefix_pool, folder, subject, loc, str(variant), str(max(0, sequence_no)), "alt_prefix")
     detail_pool = details_by_kind.get(kind, details_by_kind["general"])
     if kind == "vehicle":
         if vehicle_mode == "urban":
@@ -3192,27 +5073,53 @@ def _fallback_alt_candidate(
                 "with surrounding grassland and habitat depth",
                 "showing clear fur and body detail at ground level",
             )
+    elif kind == "landscape":
+        if _is_lowland_nl_context(folder, subject, location):
+            detail_pool = (
+                "with dune grass and leafless shrubs under open sky",
+                "with lowland grasses and a distant horizon line",
+                "with muted winter tones across open field vegetation",
+                "with wind-shaped grass and sparse trees in view",
+                "with sandy lowland textures and dry vegetation",
+                "with open polder-like terrain and clouded sky",
+                "with reed and grass patterns across flat terrain",
+                "with leafless tree forms and broad sky backdrop",
+                "with lowland field structure and winter color palette",
+                "with dry meadow textures and distant tree lines",
+            )
     detail = _pick_from_pool(detail_pool, folder, subject, loc, str(variant), str(max(0, sequence_no)), "alt_detail")
     if kind == "landscape":
-        hint_pool = (
-            "at elevation",
-            "in autumn light",
-            "in clear daylight",
-            "under mixed cloud",
-            "near the ridgeline",
-            "across upland terrain",
-            "in mountain weather",
-            "above the valley",
-            "along the pass",
-            "across alpine ground",
-            "in high terrain",
-            "near open slopes",
-        )
+        if _is_lowland_nl_context(folder, subject, location):
+            hint_pool = (
+                "in winter light",
+                "under mixed cloud",
+                "across lowland terrain",
+                "near a distant horizon",
+                "with open field structure",
+                "in clear daylight",
+                "across dune-grass habitat",
+                "near leafless trees",
+            )
+        else:
+            hint_pool = (
+                "at elevation",
+                "in seasonal light",
+                "in clear daylight",
+                "under mixed cloud",
+                "near the ridgeline",
+                "across upland terrain",
+                "in mountain weather",
+                "above the valley",
+                "along the pass",
+                "across alpine ground",
+                "in high terrain",
+                "near open slopes",
+            )
         hint = _pick_from_pool(hint_pool, folder, subject, loc, str(variant), str(max(0, sequence_no)), "alt_hint")
         detail = f"{hint} {detail}"
     tpl = _pick_from_pool(templates, folder, subject, loc, str(variant), str(max(0, sequence_no)), "alt_tpl")
     subj_cap = subj_bare[:1].upper() + subj_bare[1:] if subj_bare else "Subject"
-    txt = tpl.format(prefix=prefix, subj_bare=subj_bare, subj_cap=subj_cap, detail=detail).rstrip(".")
+    txt = tpl.format(subj_bare=subj_bare, subj_cap=subj_cap, detail=detail).rstrip(".")
     use_loc_tail = True
     if loc_short:
         loc_seed = _stable_seed(folder, subject, loc, str(variant), str(max(0, sequence_no)), "alt_loc_tail")
@@ -3352,6 +5259,95 @@ def _force_keyword_replacements(
     return _clean_keywords_list(out)[:keywords_n]
 
 
+def _has_term_evidence(evidence_blob: str, term: str) -> bool:
+    forms = _EVIDENCE_TERM_ALIASES.get(term, (term,))
+    for form in forms:
+        fs = _norm_text_strict(form)
+        if not fs:
+            continue
+        if re.search(rf"(^|[^a-z]){re.escape(fs)}($|[^a-z])", evidence_blob):
+            return True
+    return False
+
+
+def _evidence_refill_candidates(
+    *,
+    folder: str,
+    subject: str,
+    location: str,
+    caption: str,
+    alt_text: str,
+) -> List[str]:
+    pool: List[str] = []
+    pool.extend(_extract_phrase_keywords(folder, subject, location, f"{caption} {alt_text}"))
+    pool.extend(_visual_keyword_candidates(caption, alt_text, location))
+
+    evidence = _norm_text_strict(f"{folder} {subject} {location} {caption} {alt_text}")
+    for tok in evidence.split():
+        if len(tok) < 3:
+            continue
+        if tok in _KW_STOPWORDS or tok in _KW_BANNED:
+            continue
+        pool.append(tok)
+
+    return _clean_keywords_list(pool)
+
+
+def _apply_evidence_keyword_guardrails(
+    *,
+    kw_list: Sequence[str],
+    folder: str,
+    subject: str,
+    location: str,
+    caption: str,
+    alt_text: str,
+    keywords_n: int,
+) -> List[str]:
+    evidence_blob = _norm_text_strict(f"{folder} {subject} {location} {caption} {alt_text}")
+    is_amsterdam = "amsterdam" in evidence_blob
+
+    out: List[str] = []
+    seen: Set[str] = set()
+    for raw in _clean_keywords_list(kw_list):
+        kn = _norm_text_strict(raw)
+        if not kn or kn in seen:
+            continue
+
+        if kn in _EVIDENCE_SENSITIVE_KEYWORDS and not _has_term_evidence(evidence_blob, kn):
+            continue
+
+        # Amsterdam guardrail: do not inject river/lake terms unless explicitly evidenced.
+        if is_amsterdam and kn in {"river", "rivers", "lake", "lakes"}:
+            if not _has_term_evidence(evidence_blob, kn):
+                continue
+
+        out.append(kn)
+        seen.add(kn)
+
+    if len(out) < int(keywords_n):
+        for cand in _evidence_refill_candidates(
+            folder=folder,
+            subject=subject,
+            location=location,
+            caption=caption,
+            alt_text=alt_text,
+        ):
+            if len(out) >= int(keywords_n):
+                break
+            kn = _norm_text_strict(cand)
+            if not kn or kn in seen:
+                continue
+            if kn in _EVIDENCE_SENSITIVE_KEYWORDS and not _has_term_evidence(evidence_blob, kn):
+                continue
+            if is_amsterdam and kn in {"river", "rivers", "lake", "lakes"}:
+                if not _has_term_evidence(evidence_blob, kn):
+                    continue
+            out.append(kn)
+            seen.add(kn)
+
+    return _clean_keywords_list(out)[: int(keywords_n)]
+
+
 def _finalize_keywords(
     *,
     kw_list: Sequence[str],
@@ -3435,6 +5431,16 @@ def _finalize_keywords(
             seen_kw.add(kn)
 
     kw_work = _apply_scene_keyword_guardrails(
+        kw_list=kw_work,
+        folder=folder,
+        subject=subject,
+        location=location,
+        caption=caption,
+        alt_text=alt_text,
+        keywords_n=keywords_n,
+    )
+
+    kw_work = _apply_evidence_keyword_guardrails(
         kw_list=kw_work,
         folder=folder,
         subject=subject,
@@ -3536,6 +5542,7 @@ def _fallback_unique_payload(
     keywords_n: int,
     prefix_words: int,
     sequence_no: int = 0,
+    file_name: str = "",
 ) -> Optional[Tuple[str, str, str]]:
     seed = _stable_seed(folder, subject, location, str(image_path))
     for i in range(520):
@@ -3554,6 +5561,14 @@ def _fallback_unique_payload(
             variant=v + 11,
             sequence_no=sequence_no,
         )
+        if _has_context_hallucination(
+            caption=caption,
+            alt_text=alt_text,
+            folder=folder,
+            subject=subject,
+            location=location,
+        ):
+            continue
 
         if not _caption_not_garbage(caption):
             continue
@@ -3581,6 +5596,16 @@ def _fallback_unique_payload(
             keywords_n=keywords_n,
             variant=v + 23,
             sequence_no=sequence_no,
+        )
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
         )
         if len(kw_list) != keywords_n:
             continue
@@ -3638,6 +5663,14 @@ def _resolve_duplicate_payload(
             sequence_no=sequence_no + i,
         )
         alt = _trim_or_pad_alt(alt, min_words=10, max_words=18)
+        if _has_context_hallucination(
+            caption=cap,
+            alt_text=alt,
+            folder=folder,
+            subject=subject,
+            location=location,
+        ):
+            continue
 
         if not _caption_not_garbage(cap):
             continue
@@ -3919,6 +5952,7 @@ def build_prompt(
     avoid_caption_prefixes: Sequence[str],
     avoid_alt_prefixes: Sequence[str],
     avoid_kw_sigs: Sequence[str],
+    classifier_hint: Optional[Dict[str, object]] = None,
     sequence_no: int = 0,
     series_size: int = 1,
 ) -> str:
@@ -3949,6 +5983,7 @@ def build_prompt(
     lines.append("1) Describe ONLY what is clearly visible in the image.")
     lines.append("2) Do NOT guess species, brand, model, or exact location if not clearly visible.")
     lines.append("3) If unsure, use only conservative visible terms (for example: bird, aircraft, flower, building, tree, water, skyline).")
+    lines.append("3b) If subject context includes a specific species/common name, prefer that exact subject label over generic words.")
     lines.append("4) If location string is provided below, you MAY include it. If it is empty, do NOT invent one.")
     lines.append("5) Never use uncertainty words: maybe, possibly, likely, perhaps.")
     lines.append("")
@@ -3970,6 +6005,7 @@ def build_prompt(
     lines.append("J) Sun in sky is not a street light; trees are not buildings.")
     lines.append("K) Do not add mountain, lake, forest, or river keywords unless clearly visible or explicit in context.")
     lines.append("L) Do not add country/state/city names unless present in provided location or clearly visible context.")
+    lines.append("M) If context is Amsterdam, do not output river/lake unless explicitly evidenced; prefer canal only when actually supported.")
     lines.append("")
     lines.append("Context (assist only, do not copy blindly):")
     if folder:
@@ -3978,6 +6014,17 @@ def build_prompt(
         lines.append(f"subject: {subject}")
     if location:
         lines.append(f"location: {location}")
+    if classifier_hint:
+        fam = str(classifier_hint.get("family") or "")
+        lab = str(classifier_hint.get("label") or "")
+        sc = classifier_hint.get("score")
+        lines.append("nature_classifier: (use ONLY if clearly consistent with filename and visible evidence)")
+        if fam:
+            lines.append(f"nature_classifier_family: {fam}")
+        if lab:
+            lines.append(f"nature_classifier_label: {lab}")
+        if sc is not None:
+            lines.append(f"nature_classifier_score: {sc}")
     if sequence_no > 0:
         lines.append(f"sequence_no: {sequence_no}")
     if series_size > 1:
@@ -4009,6 +6056,7 @@ def build_rewrite_prompt(
     quality_issues: Sequence[str],
     avoid_caption_prefixes: Sequence[str],
     avoid_alt_prefixes: Sequence[str],
+    classifier_hint: Optional[Dict[str, object]] = None,
     sequence_no: int = 0,
     series_size: int = 1,
 ) -> str:
@@ -4032,6 +6080,7 @@ def build_rewrite_prompt(
     lines.append("6) Avoid repetitive phrasing and avoid generic filler words.")
     lines.append("6b) Do not inject mountain/lake/forest/river keywords unless clearly visible or in context.")
     lines.append("6c) Do not inject country/state/city names unless present in provided location or context.")
+    lines.append("6d) If context is Amsterdam, do not inject river/lake unless explicitly evidenced; use canal only when supported.")
     lines.append("7) Do not start every caption with A/An/The; vary opening style.")
     lines.append("8) Avoid 'features ... that ...' and malformed punctuation like ',.'.")
     lines.append("")
@@ -4050,6 +6099,17 @@ def build_rewrite_prompt(
         lines.append(f"subject: {subject}")
     if location:
         lines.append(f"location: {location}")
+    if classifier_hint:
+        fam = str(classifier_hint.get("family") or "")
+        lab = str(classifier_hint.get("label") or "")
+        sc = classifier_hint.get("score")
+        lines.append("nature_classifier: (use ONLY if clearly consistent with filename and visible evidence)")
+        if fam:
+            lines.append(f"nature_classifier_family: {fam}")
+        if lab:
+            lines.append(f"nature_classifier_label: {lab}")
+        if sc is not None:
+            lines.append(f"nature_classifier_score: {sc}")
     if sequence_no > 0:
         lines.append(f"sequence_no: {sequence_no}")
     if series_size > 1:
@@ -4083,6 +6143,7 @@ def rewrite_weak_payload(
     quality_issues: Sequence[str],
     avoid_caption_prefixes: Sequence[str],
     avoid_alt_prefixes: Sequence[str],
+    classifier_hint: Optional[Dict[str, object]] = None,
     sequence_no: int = 0,
     series_size: int = 1,
 ) -> Optional[Tuple[str, str, List[str]]]:
@@ -4097,6 +6158,7 @@ def rewrite_weak_payload(
         quality_issues=quality_issues,
         avoid_caption_prefixes=avoid_caption_prefixes,
         avoid_alt_prefixes=avoid_alt_prefixes,
+        classifier_hint=classifier_hint,
         sequence_no=sequence_no,
         series_size=series_size,
     )
@@ -4362,6 +6424,18 @@ def process_one(
         return False, "", "", f"missing file: {image_path}"
 
     location = _enrich_location(location, folder, subject)
+    subject_kind = _infer_subject_kind(folder, subject)
+    classifier_hint = _run_nature_classifier(image_path, folder, subject, file_name)
+    if subject_kind != "wildlife":
+        classifier_hint = None
+    subject_hint = _extract_subject_species_hint(subject, file_name)
+    if not subject_hint:
+        subject_hint = _classifier_subject_hint(classifier_hint)
+    subject_gen = subject_hint if subject_hint else subject
+    if classifier_hint and not subject_hint and subject_kind == "wildlife":
+        ident = _label_to_subject_identifier(str(classifier_hint.get("label") or ""))
+        if ident:
+            subject_gen = ident.replace("_", " ")
     image_b64 = image_to_base64_jpeg(image_path, img_max_side, img_quality)
     last_reason = "not_started"
     base_seed = _stable_seed(folder, subject, location, file_name, str(image_path))
@@ -4396,12 +6470,13 @@ def process_one(
 
         prompt = build_prompt(
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             keywords_n=keywords_n,
             avoid_caption_prefixes=avoid_caps,
             avoid_alt_prefixes=avoid_alts,
             avoid_kw_sigs=avoid_kws,
+            classifier_hint=classifier_hint,
             sequence_no=sequence_no,
             series_size=series_size,
         )
@@ -4430,6 +6505,20 @@ def process_one(
         alt_text = _sanitize_sentence(_deawkward_sentence(alt_text))
         alt_text = _trim_or_pad_alt(alt_text, min_words=10, max_words=18)
         kw_list = _clean_keywords_list(kw_list)
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject_gen,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
+        if subject_hint:
+            caption = _enforce_subject_hint_text(caption, subject_hint)
+            alt_text = _enforce_subject_hint_text(alt_text, subject_hint)
+            kw_list = _enforce_subject_hint_keywords(kw_list, subject_hint, keywords_n)
 
         # Rewrite weak model output before deterministic fallbacks.
         initial_score, initial_issues = _payload_quality_score(
@@ -4438,7 +6527,7 @@ def process_one(
             kw_list=kw_list,
             keywords_n=keywords_n,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
         )
         if rewrite_weak and rewrite_passes > 0 and initial_score < quality_floor:
@@ -4456,7 +6545,7 @@ def process_one(
                     options=opts,
                     image_b64=image_b64,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     keywords_n=keywords_n,
                     draft_caption=best_caption,
@@ -4465,19 +6554,30 @@ def process_one(
                     quality_issues=best_issues,
                     avoid_caption_prefixes=avoid_caps,
                     avoid_alt_prefixes=avoid_alts,
+                    classifier_hint=classifier_hint,
                     sequence_no=sequence_no + attempt + rp,
                     series_size=series_size,
                 )
                 if rewritten is None:
                     continue
                 rc, ra, rk = rewritten
+                rc, ra, rk = _apply_context_guardrails(
+                    caption=rc,
+                    alt_text=ra,
+                    kw_list=rk,
+                    folder=folder,
+                    subject=subject_gen,
+                    location=location,
+                    file_name=file_name,
+                    keywords_n=keywords_n,
+                )
                 r_score, r_issues = _payload_quality_score(
                     caption=rc,
                     alt_text=ra,
                     kw_list=rk,
                     keywords_n=keywords_n,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                 )
                 if r_score >= best_score:
@@ -4498,7 +6598,7 @@ def process_one(
         ):
             caption = _fallback_caption_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 7,
                 sequence_no=sequence_no,
@@ -4513,7 +6613,7 @@ def process_one(
         ):
             alt_text = _fallback_alt_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 11,
                 sequence_no=sequence_no,
@@ -4525,7 +6625,7 @@ def process_one(
         ):
             alt_text = _fallback_alt_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 17,
                 sequence_no=sequence_no + 1,
@@ -4535,11 +6635,26 @@ def process_one(
         if _caption_alt_too_similar(caption, alt_text):
             caption = _fallback_caption_candidate(
                 folder=folder,
-                subject=subject,
+                subject=subject_gen,
                 location=location,
                 variant=base_seed + attempt * 19,
                 sequence_no=sequence_no + 2,
             )
+
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject_gen,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
+        if subject_hint:
+            caption = _enforce_subject_hint_text(caption, subject_hint)
+            alt_text = _enforce_subject_hint_text(alt_text, subject_hint)
+            kw_list = _enforce_subject_hint_keywords(kw_list, subject_hint, keywords_n)
 
         if not _caption_not_garbage(caption):
             last_reason = "caption quality check failed"
@@ -4572,12 +6687,26 @@ def process_one(
         kw_list = _finalize_keywords(
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             caption=caption,
             alt_text=alt_text,
             keywords_n=keywords_n,
         )
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject_gen,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
+        if subject_hint:
+            caption = _enforce_subject_hint_text(caption, subject_hint)
+            alt_text = _enforce_subject_hint_text(alt_text, subject_hint)
+            kw_list = _enforce_subject_hint_keywords(kw_list, subject_hint, keywords_n)
 
         # Strict quality score gate before uniqueness checks.
         score_now, issues_now = _payload_quality_score(
@@ -4586,7 +6715,7 @@ def process_one(
             kw_list=kw_list,
             keywords_n=keywords_n,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
         )
 
@@ -4605,7 +6734,7 @@ def process_one(
                     options=opts,
                     image_b64=image_b64,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     keywords_n=keywords_n,
                     draft_caption=best_caption,
@@ -4614,6 +6743,7 @@ def process_one(
                     quality_issues=best_issues,
                     avoid_caption_prefixes=avoid_caps,
                     avoid_alt_prefixes=avoid_alts,
+                    classifier_hint=classifier_hint,
                     sequence_no=sequence_no + attempt + rp + 100,
                     series_size=series_size,
                 )
@@ -4623,10 +6753,20 @@ def process_one(
                 rk = _finalize_keywords(
                     kw_list=rk,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                     caption=rc,
                     alt_text=ra,
+                    keywords_n=keywords_n,
+                )
+                rc, ra, rk = _apply_context_guardrails(
+                    caption=rc,
+                    alt_text=ra,
+                    kw_list=rk,
+                    folder=folder,
+                    subject=subject_gen,
+                    location=location,
+                    file_name=file_name,
                     keywords_n=keywords_n,
                 )
                 r_score, r_issues = _payload_quality_score(
@@ -4635,7 +6775,7 @@ def process_one(
                     kw_list=rk,
                     keywords_n=keywords_n,
                     folder=folder,
-                    subject=subject,
+                    subject=subject_gen,
                     location=location,
                 )
                 if r_score >= best_score:
@@ -4653,7 +6793,7 @@ def process_one(
             series_key=series_key,
             kw_list=kw_list,
             folder=folder,
-            subject=subject,
+            subject=subject_gen,
             location=location,
             caption=caption,
             keywords_n=keywords_n,
@@ -4774,6 +6914,21 @@ def process_one(
             last_reason = why
             continue
 
+        caption, alt_text, kw_list = _apply_context_guardrails(
+            caption=caption,
+            alt_text=alt_text,
+            kw_list=kw_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+        )
+        if subject_hint:
+            caption = _enforce_subject_hint_text(caption, subject_hint)
+            alt_text = _enforce_subject_hint_text(alt_text, subject_hint)
+            kw_list = _enforce_subject_hint_keywords(kw_list, subject_hint, keywords_n)
+
         final_score, final_issues = _payload_quality_score(
             caption=caption,
             alt_text=alt_text,
@@ -4786,6 +6941,17 @@ def process_one(
         if final_score < quality_floor:
             short_issues = ", ".join(final_issues[:3]) if final_issues else "low score"
             last_reason = f"post-dup quality score {final_score} < {quality_floor} ({short_issues})"
+            continue
+
+        if _wildlife_context_missing(
+            caption,
+            alt_text,
+            folder=folder,
+            subject=subject,
+            file_name=file_name,
+            subject_hint=subject_hint,
+        ):
+            last_reason = "wildlife subject missing in caption/alt_text"
             continue
 
         ledger.add(
@@ -4808,10 +6974,24 @@ def process_one(
         keywords_n=keywords_n,
         prefix_words=prefix_words_eff,
         sequence_no=sequence_no,
+        file_name=file_name,
     )
     if fallback is not None:
         cap, kws, alt = fallback
-        return True, cap, kws, alt
+        if subject_hint:
+            cap = _enforce_subject_hint_text(cap, subject_hint)
+            alt = _enforce_subject_hint_text(alt, subject_hint)
+            kws = ", ".join(_enforce_subject_hint_keywords(_split_keywords(kws), subject_hint, keywords_n))
+        if not _wildlife_context_missing(
+            cap,
+            alt,
+            folder=folder,
+            subject=subject,
+            file_name=file_name,
+            subject_hint=subject_hint,
+        ):
+            return True, cap, kws, alt
+        last_reason = "wildlife subject missing in fallback payload"
 
     # Emergency path for very large series: preserve exact uniqueness even if prefix uniqueness is saturated.
     for i in range(900):
@@ -4830,6 +7010,14 @@ def process_one(
             variant=v + 31,
             sequence_no=sequence_no + i,
         )
+        if _has_context_hallucination(
+            caption=cap,
+            alt_text=alt,
+            folder=folder,
+            subject=subject,
+            location=location,
+        ):
+            continue
         kws_list = _variant_keywords(
             kw_list=[],
             folder=folder,
@@ -4839,6 +7027,16 @@ def process_one(
             keywords_n=keywords_n,
             variant=v + 53,
             sequence_no=sequence_no + i,
+        )
+        cap, alt, kws_list = _apply_context_guardrails(
+            caption=cap,
+            alt_text=alt,
+            kw_list=kws_list,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
         )
         if len(kws_list) != keywords_n:
             continue
@@ -4856,6 +7054,20 @@ def process_one(
         ledger.caption_global.add(cap_norm)
         ledger.alt_global.add(alt_norm)
         ledger._series_set(ledger.kw_sig_by_series, series_key).add(kw_sig)
+        if subject_hint:
+            cap = _enforce_subject_hint_text(cap, subject_hint)
+            alt = _enforce_subject_hint_text(alt, subject_hint)
+            kws_list = _enforce_subject_hint_keywords(kws_list, subject_hint, keywords_n)
+        if _wildlife_context_missing(
+            cap,
+            alt,
+            folder=folder,
+            subject=subject,
+            file_name=file_name,
+            subject_hint=subject_hint,
+        ):
+            last_reason = "wildlife subject missing in emergency payload"
+            continue
         return True, cap, ", ".join(kws_list), alt
 
     return False, "", "", f"failed uniqueness/quality checks after retries last={last_reason}"
@@ -4867,6 +7079,8 @@ def parse_args() -> argparse.Namespace:
     # Ollama
     p.add_argument("--endpoint", default="http://127.0.0.1:11434/api/generate")
     p.add_argument("--model", required=True, help="Vision model, e.g. llama3.2-vision:11b or qwen2.5vl:7b-q4_K_M")
+    p.add_argument("--fallback-model", default="", help="Optional fallback vision model used only when primary model fails a row.")
+    p.add_argument("--fallback-max-tries", type=int, default=2, help="Max tries for fallback model per failed row.")
     p.add_argument("--timeout", type=int, default=240)
     p.add_argument("--ollama-opts", default="", help='JSON dict for options (example: {"num_ctx":2048,"num_predict":180,"temperature":0.25})')
 
@@ -4919,6 +7133,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     global _PRECISION_TERMS
     args = parse_args()
+    fallback_model = (str(args.fallback_model or "").strip())
+    use_fallback = bool(fallback_model) and (fallback_model != str(args.model).strip())
+    fallback_tries = max(1, int(args.fallback_max_tries))
 
     # force your requirement: use ollama_path as primary
     if args.path_col != "ollama_path":
@@ -5027,6 +7244,8 @@ def main() -> int:
 
     ok_count = 0
     fail_count = 0
+    fallback_attempt_rows = 0
+    fallback_success_rows = 0
 
     try:
         for r in bar:
@@ -5072,6 +7291,44 @@ def main() -> int:
                 rewrite_max_passes=args.rewrite_max_passes,
                 quality_min_score=args.quality_min_score,
             )
+
+            if (not ok) and use_fallback:
+                fallback_attempt_rows += 1
+                print(
+                    f"[RETRY] id={rid} primary model '{args.model}' failed; "
+                    f"trying fallback '{fallback_model}' (max_tries={fallback_tries})"
+                )
+                ok_fb, cap_fb, kws_fb, alt_fb = process_one(
+                    ledger=ledger,
+                    series_key=series_key,
+                    file_name=file_name,
+                    sequence_no=sequence_no,
+                    series_size=series_size,
+                    folder=folder,
+                    subject=subject,
+                    location=location,
+                    image_path=image_path,
+                    endpoint=args.endpoint,
+                    model=fallback_model,
+                    timeout=args.timeout,
+                    options=options,
+                    img_max_side=args.image_max_side,
+                    img_quality=args.image_quality,
+                    keywords_n=args.keywords_n,
+                    prefix_words=args.prefix_words,
+                    series_large_threshold=args.series_large_threshold,
+                    max_tries=fallback_tries,
+                    rewrite_weak=args.rewrite_weak,
+                    rewrite_max_passes=args.rewrite_max_passes,
+                    quality_min_score=args.quality_min_score,
+                )
+                if ok_fb:
+                    ok = True
+                    cap, kws, alt = cap_fb, kws_fb, alt_fb
+                    fallback_success_rows += 1
+                    print(f"[RETRY-OK] id={rid} accepted from fallback model '{fallback_model}'")
+                else:
+                    alt = f"{alt} | fallback={alt_fb}"
 
             dt = time.time() - t0
 
@@ -5125,6 +7382,12 @@ def main() -> int:
         con.close()
     except Exception:
         pass
+
+    if use_fallback:
+        print(
+            f"[INFO] Fallback usage: attempted={fallback_attempt_rows} "
+            f"success={fallback_success_rows} model={fallback_model}"
+        )
 
     print(f"[OK] Completed. Updated rows: {ok_count} (failures: {fail_count})")
     return 0 if fail_count == 0 else 1
