@@ -20,9 +20,6 @@ This project automates the path from intake to reviewed metadata and publish:
 - Review editor metadata retry:
   - `Generate` button in `review_editor.py` regenerates caption/alt/keywords on demand
   - Regenerated output is persisted to DB with current row status
-- Publish completion UX:
-  - One final completion popup in `review_editor.py`
-  - Clicking `OK` closes the review window
 - Ollama startup visibility:
   - App startup logs one line with loaded model processor/context/VRAM
   - Example: `processor=GPU context=32768 vram=6.5GiB`
@@ -61,8 +58,7 @@ This project automates the path from intake to reviewed metadata and publish:
 |   |-- preflight_multiset.ps1
 |   |-- build_multiset.ps1
 |   |-- runtime_hook_samevenv_classifier.py
-|   |-- copy_pack.ps1
-|   `-- sanitize_for_github.ps1
+|   `-- (local/private helper scripts are not included in this repo)
 |
 |-- utils/
 |-- vendor/
@@ -147,22 +143,6 @@ Output:
 
 - `dist/Amir2000ImageAutomation-MultiSet.exe`
 
-## Backup and Sanitize
-
-Curated runnable backup:
-
-```powershell
-Set-Location "YOUR_PATH_HERE"
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\copy_pack.ps1
-```
-
-GitHub-safe sanitized export:
-
-```powershell
-Set-Location "YOUR_PATH_HERE"
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\sanitize_for_github.ps1 -Latest
-```
-
 ## Notes on Generated Folders
 
 These are generated at runtime and can be removed when app is closed:
@@ -175,4 +155,10 @@ Optional report/history files that can be recreated:
 
 - `data/new_taxonomy_log.json`
 - `data/prefill_qc_last.json`
+
+## Documentation Index
+
+- `docs/init/review_queue.sql`
+- `docs/init/photos_info_revamp.sql`
+- Full documentation can be found on: https://www.amir2000.com/
 

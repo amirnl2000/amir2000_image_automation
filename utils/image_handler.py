@@ -14,7 +14,7 @@ def copy_and_rename_original(src_path, new_name, folder_key):
 
         # Construct destination folder
         dest_folder = os.path.join(
-            "C:/Users/ad341/Pictures/amir2000photos/new", year, folder_key
+            "./export/new", year, folder_key
         )
         os.makedirs(dest_folder, exist_ok=True)
 
@@ -28,3 +28,4 @@ def copy_and_rename_original(src_path, new_name, folder_key):
     except Exception as e:
         print(f"Error copying {src_path}: {e}")
         return None
+

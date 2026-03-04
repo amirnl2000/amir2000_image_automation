@@ -3,9 +3,6 @@ import os
 import sys
 import sqlite3
 import argparse
-import shutil
-import stat
-import time
 import cv2
 import numpy as np
 from PIL import Image
@@ -13,178 +10,8 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = 300_000_000  # ~300 MP cap; your 129 MP file is safe
 from tqdm import tqdm
 
-# Keep HF/timm cache deterministic and local to this app tree.
-# IMPORTANT: do this before importing pyiqa/timm, otherwise those libraries may
-# lock cache paths from parent env (e.g. Anaconda XDG cache).
-_APP_ROOT = (
-    os.path.dirname(sys.executable)
-    if getattr(sys, "frozen", False)
-    else os.path.dirname(os.path.abspath(__file__))
-)
-_APP_CACHE_ROOT = os.path.join(_APP_ROOT, ".cache")
-_HF_HOME = os.path.join(_APP_CACHE_ROOT, "huggingface")
-_HF_HUB_CACHE = os.path.join(_HF_HOME, "hub")
-os.makedirs(_HF_HUB_CACHE, exist_ok=True)
-os.makedirs(os.path.join(_APP_CACHE_ROOT, "pyiqa"), exist_ok=True)
-os.environ["XDG_CACHE_HOME"] = _APP_CACHE_ROOT
-os.environ["HF_HOME"] = _HF_HOME
-os.environ["HUGGINGFACE_HUB_CACHE"] = _HF_HUB_CACHE
-os.environ["PYIQA_ROOT"] = os.path.join(_APP_CACHE_ROOT, "pyiqa")
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-
-# Strict mode is ON by default: scoring must use pyiqa (NIMA/BRISQUE) or fail.
-SAFE_SCORING_MODE = os.getenv("AMIR_SCORE_SAFE_MODE", "0") == "1"
-STRICT_PYIQA_REQUIRED = os.getenv("AMIR_SCORE_REQUIRE_PYIQA", "1") == "1"
-
-def _known_timm_model_cache_dir() -> str:
-    hf_cache_root = os.path.join(
-        os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(
-            os.environ.get("HF_HOME") or os.path.join(
-                os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
-                "huggingface",
-            ),
-            "hub",
-        )
-    )
-    return os.path.join(hf_cache_root, "models--timm--inception_resnet_v2.tf_in1k")
-
-
-def _try_open_readable(path: str) -> bool:
-    try:
-        with open(path, "rb") as fh:
-            fh.read(16)
-        return True
-    except Exception:
-        return False
-
-
-def _rmtree_force(path: str, retries: int = 3) -> bool:
-    def _on_rm_error(func, p, exc_info):
-        try:
-            os.chmod(p, stat.S_IWRITE)
-            func(p)
-        except Exception:
-            pass
-
-    for _ in range(max(1, int(retries))):
-        try:
-            if os.path.lexists(path):
-                shutil.rmtree(path, onerror=_on_rm_error)
-        except Exception:
-            pass
-        if not os.path.lexists(path):
-            return True
-        time.sleep(0.4)
-    return not os.path.lexists(path)
-
-
-def _materialize_regular_file(target_path: str, source_path: str) -> bool:
-    """
-    Replace target_path with a regular file copied from source_path.
-    Useful when target_path is a broken symlink in HF snapshot cache.
-    """
-    try:
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        if os.path.lexists(target_path):
-            try:
-                os.chmod(target_path, stat.S_IWRITE)
-            except Exception:
-                pass
-            try:
-                os.remove(target_path)
-            except Exception:
-                try:
-                    shutil.rmtree(target_path, ignore_errors=True)
-                except Exception:
-                    pass
-        shutil.copy2(source_path, target_path)
-        return _try_open_readable(target_path)
-    except Exception:
-        return False
-
-
-def _ensure_known_timm_model_file(max_attempts: int = 3) -> str:
-    """
-    Ensure the timm backbone file exists and is actually readable.
-    This protects strict scoring from broken symlink/snapshot states.
-    """
-    last_err: Exception | None = None
-    model_dir = _known_timm_model_cache_dir()
-
-    for attempt in range(1, max(1, int(max_attempts)) + 1):
-        try:
-            from huggingface_hub import hf_hub_download  # type: ignore
-
-            model_path = hf_hub_download(
-                repo_id="timm/inception_resnet_v2.tf_in1k",
-                filename="model.safetensors",
-                force_download=(attempt > 1),
-            )
-            if _try_open_readable(model_path):
-                return model_path
-
-            # Fallback: fetch a plain local file (no symlinks), then materialize
-            # that file at the cache snapshot path expected by timm/hf_hub.
-            fallback_dir = os.path.join(_APP_CACHE_ROOT, "hf_fallback_files", "timm_inception_resnet_v2_tf_in1k")
-            os.makedirs(fallback_dir, exist_ok=True)
-            fallback_file = hf_hub_download(
-                repo_id="timm/inception_resnet_v2.tf_in1k",
-                filename="model.safetensors",
-                local_dir=fallback_dir,
-                local_dir_use_symlinks=False,
-                force_download=True,
-            )
-            if not _try_open_readable(fallback_file):
-                raise FileNotFoundError(f"Fallback model file is not readable: {fallback_file}")
-            if _materialize_regular_file(model_path, fallback_file):
-                return model_path
-            raise FileNotFoundError(f"Downloaded model path is not readable: {model_path}")
-        except Exception as e:
-            last_err = e
-            if attempt < max_attempts:
-                print(
-                    "[WARN] Detected broken timm cache snapshot for strict scoring; "
-                    "clearing cache entry and retrying once."
-                )
-                _rmtree_force(model_dir, retries=3)
-                time.sleep(min(1.2, 0.4 * attempt))
-                continue
-            break
-
-    raise RuntimeError(f"Unable to prepare timm cache for strict scoring: {last_err}")
-
-
-def _repair_known_timm_cache_if_broken() -> bool:
-    """
-    Repair known broken HF cache state for timm/inception_resnet_v2.tf_in1k.
-    This keeps strict scoring enabled while allowing one self-heal retry.
-    """
-    try:
-        _ensure_known_timm_model_file(max_attempts=2)
-        return True
-    except Exception:
-        return False
-
-
-def _create_metric_with_single_repair_retry(metric_name: str):
-    if pyiqa is None:
-        return None
-    try:
-        return pyiqa.create_metric(metric_name).cpu()
-    except Exception as first_err:
-        msg = str(first_err)
-        should_try_repair = (
-            "No such file or directory" in msg
-            and "models--timm--inception_resnet_v2.tf_in1k" in msg
-        )
-        if should_try_repair and _repair_known_timm_cache_if_broken():
-            return pyiqa.create_metric(metric_name).cpu()
-        raise
-
-if SAFE_SCORING_MODE and STRICT_PYIQA_REQUIRED:
-    print("[ERROR] Invalid scoring config: safe mode is enabled while strict pyiqa scoring is required.")
-    sys.exit(2)
+# Safe mode is ON by default to avoid native crashes during scoring retries.
+SAFE_SCORING_MODE = os.getenv("AMIR_SCORE_SAFE_MODE", "1") == "1"
 
 pyiqa = None
 if not SAFE_SCORING_MODE:
@@ -193,21 +20,9 @@ if not SAFE_SCORING_MODE:
         pyiqa = _pyiqa
     except Exception as e:
         pyiqa = None
-        if STRICT_PYIQA_REQUIRED:
-            print(f"[ERROR] pyiqa unavailable and strict scoring is enabled: {e}")
-            sys.exit(2)
         print(f"[WARN] pyiqa unavailable, running without NIMA/BRISQUE: {e}")
 else:
     print("[INFO] Safe scoring mode enabled: skipping pyiqa (NIMA/BRISQUE).")
-
-if pyiqa is not None:
-    try:
-        _ensure_known_timm_model_file(max_attempts=3)
-    except Exception as e:
-        if STRICT_PYIQA_REQUIRED:
-            print(f"[ERROR] TIMM cache unavailable and strict scoring is enabled: {e}")
-            sys.exit(2)
-        print(f"[WARN] TIMM cache unavailable, proceeding with fallback scoring: {e}")
 
 # ---------------- resource helpers ----------------
 from pathlib import Path
@@ -286,7 +101,7 @@ DB_PATH = os.environ.get(
 os.environ.setdefault(
     "PYIQA_ROOT",
     os.path.join(
-        (os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))),
+        (os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.expanduser("~")),
         ".cache",
         "pyiqa",
     )
@@ -306,24 +121,18 @@ def _load_pil_proxy(path: str, max_edge: int = 4096):
 nima = None
 if pyiqa is not None:
     try:
-        nima = _create_metric_with_single_repair_retry("nima")
+        nima = pyiqa.create_metric("nima").cpu()
     except Exception as e:
         nima = None
-        if STRICT_PYIQA_REQUIRED:
-            print(f"[ERROR] NIMA unavailable and strict scoring is enabled: {e}")
-            sys.exit(2)
         print(f"[WARN] NIMA unavailable, using fallback score: {e}")
 
 # BRISQUE (pyiqa). If creation fails, we’ll return None for BRISQUE.
 _py_brisque = None
 if pyiqa is not None:
     try:
-        _py_brisque = _create_metric_with_single_repair_retry("brisque")
-    except Exception as e:
+        _py_brisque = pyiqa.create_metric("brisque").cpu()
+    except Exception:
         _py_brisque = None
-        if STRICT_PYIQA_REQUIRED:
-            print(f"[ERROR] BRISQUE unavailable and strict scoring is enabled: {e}")
-            sys.exit(2)
 
 def _brisque(path: str):
     if _py_brisque is None:
@@ -570,10 +379,6 @@ if __name__ == "__main__":
         if not os.path.isfile(path):
             alt = os.path.join(INCOMING_DIR, file_name)
             if not os.path.isfile(alt):
-                if STRICT_PYIQA_REQUIRED:
-                    print(f"[ERROR] Missing in incoming during strict scoring: {orig_file_name} (id {img_id})")
-                    had_error = True
-                    break
                 # Do not skip: write deterministic worst-case scores so all fields are non-null.
                 nima_score = 0.0
                 blur_s = 0.0
@@ -620,20 +425,14 @@ if __name__ == "__main__":
                 try:
                     nima_score = float(nima(pim).item())
                 except Exception as e:
-                    if STRICT_PYIQA_REQUIRED:
-                        raise RuntimeError(f"NIMA failed for id={img_id}: {e}")
                     print(f"[WARN] NIMA failed for id={img_id}: {e}")
                     nima_score = max(0.0, min(10.0, (bright_s + contr_s) / 2.0))
             else:
-                if STRICT_PYIQA_REQUIRED:
-                    raise RuntimeError(f"NIMA metric unavailable for id={img_id}")
                 # Lightweight fallback when pyiqa is disabled/unavailable.
                 nima_score = max(0.0, min(10.0, (bright_s + contr_s) / 2.0))
 
             # BRISQUE (pyiqa) and CLIP aesthetic
             brisque   = _brisque(path)  # may be None
-            if STRICT_PYIQA_REQUIRED and brisque is None:
-                raise RuntimeError(f"BRISQUE failed or unavailable for id={img_id}")
             clip_aes = None
             if get_image_aesthetic_score is not None:
                 try:
@@ -672,8 +471,6 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[ERROR] Error processing {path}: {e}")
             had_error = True
-            if STRICT_PYIQA_REQUIRED:
-                break
             try:
                 nima_score = 0.0
                 blur_s = 0.0
@@ -705,8 +502,7 @@ if __name__ == "__main__":
 
 
     if had_error:
-        print("\n[ERROR] One or more images failed to score.")
-        sys.exit(2)
+        print("\n[WARN] One or more images failed to score. Check 'Error' rows in the editor.")
 
 
     print("\n[OK] All done! Scores written to your database.")

@@ -4,11 +4,6 @@ import re
 from typing import Dict, Iterable, List, Set, Tuple
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z']*")
-_MAX_SPELL_TOKEN_LEN = 24
-_MAX_SPELL_CORRECTIONS_PER_CALL = 64
-_SPELL_SUGGESTIONS_ENABLED = os.getenv("AMIR_SPELL_SUGGEST", "0").strip().lower() in (
-    "1", "true", "yes", "on"
-)
 
 # Optional dependency. If missing, we fall back to mapping-only.
 try:
@@ -196,29 +191,6 @@ def _apply_case(original: str, corrected: str) -> str:
     return corrected
 
 
-def _skip_spell_token(word: str) -> bool:
-    w = str(word or "")
-    if not w:
-        return True
-    if len(w) < 3:
-        return True
-    if w.isupper():
-        return True
-    wl = w.lower()
-    if len(wl) > _MAX_SPELL_TOKEN_LEN:
-        return True
-    if any(ch.isdigit() for ch in wl):
-        return True
-    if "_" in wl or "-" in wl:
-        return True
-    if wl.count("'") > 1:
-        return True
-    # Skip very repetitive tokens that trigger expensive candidate generation.
-    if len(wl) >= 7 and len(set(wl.replace("'", ""))) <= 2:
-        return True
-    return False
-
-
 def spellcheck_text(text: str, data_dir: str) -> Tuple[str, bool]:
     """
     Dictionary-based spellcheck with a strict safety filter.
@@ -240,13 +212,15 @@ def spellcheck_text(text: str, data_dir: str) -> Tuple[str, bool]:
         return src, False
 
     changed = False
-    corrections_used = 0
 
     def repl(match: re.Match) -> str:
-        nonlocal changed, corrections_used
+        nonlocal changed
         w = match.group(0)
 
-        if _skip_spell_token(w):
+        # skip very short words and all-caps acronyms
+        if len(w) < 3:
+            return w
+        if w.isupper():
             return w
 
         wl = w.lower()
@@ -255,15 +229,8 @@ def spellcheck_text(text: str, data_dir: str) -> Tuple[str, bool]:
         if wl in sp:
             return w
 
-        if corrections_used >= _MAX_SPELL_CORRECTIONS_PER_CALL:
-            return w
-
         # attempt correction
-        try:
-            cand = sp.correction(wl)
-        except Exception:
-            return w
-        corrections_used += 1
+        cand = sp.correction(wl)
         if not cand or cand == wl:
             return w
 
@@ -299,12 +266,13 @@ def find_misspellings(text: str, data_dir: str) -> List[dict]:
         return []
 
     out: List[dict] = []
-    corrections_used = 0
 
     for m in _WORD.finditer(src):
         w = m.group(0)
 
-        if _skip_spell_token(w):
+        if len(w) < 3:
+            continue
+        if w.isupper():
             continue
 
         wl = w.lower()
@@ -313,20 +281,14 @@ def find_misspellings(text: str, data_dir: str) -> List[dict]:
         if wl in sp:
             continue
 
-        cand = ""
-        if _SPELL_SUGGESTIONS_ENABLED:
-            if corrections_used >= _MAX_SPELL_CORRECTIONS_PER_CALL:
-                break
-            try:
-                cand = sp.correction(wl) or ""
-            except Exception:
-                cand = ""
-            corrections_used += 1
-            if cand and cand != wl:
-                dist = _levenshtein(wl, cand.lower())
-                max_dist = 1 if len(wl) <= 4 else (2 if len(wl) <= 8 else 3)
-                if dist > max_dist:
-                    cand = ""
+        cand = sp.correction(wl)
+        if not cand or cand == wl:
+            continue
+
+        dist = _levenshtein(wl, cand.lower())
+        max_dist = 1 if len(wl) <= 4 else (2 if len(wl) <= 8 else 3)
+        if dist > max_dist:
+            continue
 
         out.append({
             "start": m.start(),

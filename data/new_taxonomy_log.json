@@ -1,128 +1,116 @@
 [
   {
     "kind": "location",
-    "display": "Test",
+    "ts": "2025-12-27 01:06:46",
     "key": "Test",
-    "ts": "2025-12-27 01:06:46"
+    "display": "Test"
   },
   {
     "kind": "location",
-    "display": "amber",
+    "ts": "2025-12-27 15:13:56",
     "key": "amber",
-    "ts": "2025-12-27 15:13:56"
+    "display": "amber"
   },
   {
     "kind": "location",
-    "display": "Sedona Arizona USA",
+    "ts": "2025-12-28 16:11:54",
     "key": "Sedona_Arizona_USA",
-    "ts": "2025-12-28 16:11:54"
+    "display": "Sedona Arizona USA"
   },
   {
     "kind": "location",
-    "display": "New Mexico USA",
+    "ts": "2026-01-01 17:30:06",
     "key": "New_Mexico_USA",
-    "ts": "2026-01-01 17:30:06"
+    "display": "New Mexico USA"
   },
   {
     "kind": "location",
-    "display": "Colorado USA",
+    "ts": "2026-01-05 00:17:31",
     "key": "Colorado_USA",
-    "ts": "2026-01-05 00:17:31"
+    "display": "Colorado USA"
   },
   {
     "kind": "location",
-    "display": "Colorado Springs Colorado USA",
+    "ts": "2026-01-05 21:06:18",
     "key": "Colorado_Springs_Colorado_USA",
-    "ts": "2026-01-05 21:06:18"
+    "display": "Colorado Springs Colorado USA"
   },
   {
     "kind": "location",
-    "display": "Cortez Colorado USA",
+    "ts": "2026-01-05 21:20:25",
     "key": "Cortez_Colorado_USA",
-    "ts": "2026-01-05 21:20:25"
+    "display": "Cortez Colorado USA"
   },
   {
     "kind": "location",
-    "display": "Colorado Springs USA",
+    "ts": "2026-01-06 21:03:02",
     "key": "Colorado_Springs_USA",
-    "ts": "2026-01-06 21:03:02"
+    "display": "Colorado Springs USA"
   },
   {
     "kind": "location",
-    "display": "Denver Colorado USA",
+    "ts": "2026-01-27 19:49:25",
     "key": "Denver_Colorado_USA",
-    "ts": "2026-01-27 19:49:25"
+    "display": "Denver Colorado USA"
   },
   {
     "kind": "location",
-    "display": "Estes Park Colorado USA",
+    "ts": "2026-02-01 13:11:32",
     "key": "Estes_Park_Colorado_USA",
-    "ts": "2026-02-01 13:11:32"
+    "display": "Estes Park Colorado USA"
   },
   {
     "kind": "location",
-    "display": "Rocky Mountain National Park Colorado",
+    "ts": "2026-02-08 21:54:44",
     "key": "Rocky_Mountain_National_Park_Colorado",
-    "ts": "2026-02-08 21:54:44"
+    "display": "Rocky Mountain National Park Colorado"
   },
   {
     "kind": "location",
-    "display": "Avon Eagle County Colorado",
+    "ts": "2026-02-09 18:38:07",
     "key": "Avon_Eagle_County_Colorado",
-    "ts": "2026-02-09 18:38:07"
+    "display": "Avon Eagle County Colorado"
   },
   {
     "kind": "location",
-    "display": "Maroon Bells Aspen Colorado",
+    "ts": "2026-02-14 10:55:15",
     "key": "Maroon_Bells_Aspen_Colorado",
-    "ts": "2026-02-14 10:55:15"
+    "display": "Maroon Bells Aspen Colorado"
   },
   {
     "kind": "location",
-    "display": "St. George Utah",
+    "ts": "2026-02-15 20:14:08",
     "key": "St._George_Utah",
-    "ts": "2026-02-15 20:14:08"
+    "display": "St. George Utah"
   },
   {
     "kind": "location",
-    "display": "Mycography",
+    "ts": "2026-02-16 19:15:50",
     "key": "Mycography",
-    "ts": "2026-02-16 19:15:50"
+    "display": "Mycography"
   },
   {
     "kind": "location",
-    "display": "Zandvoort Netherlands",
+    "ts": "2026-02-16 22:13:11",
     "key": "Zandvoort_Netherlands",
-    "ts": "2026-02-16 22:13:11"
+    "display": "Zandvoort Netherlands"
   },
   {
     "kind": "location",
-    "display": "Galilee Ha Galil Israel",
+    "ts": "2026-02-18 00:15:52",
     "key": "Galilee_Ha_Galil_Israel",
-    "ts": "2026-02-18 00:15:52"
+    "display": "Galilee Ha Galil Israel"
   },
   {
     "kind": "location",
-    "display": "North Israel",
+    "ts": "2026-02-18 16:33:35",
     "key": "North_Israel",
-    "ts": "2026-02-18 16:33:35"
+    "display": "North Israel"
   },
   {
     "kind": "location",
-    "display": "Double Exposure Experiment",
+    "ts": "2026-02-19 18:49:46",
     "key": "Double_Exposure_Experiment",
-    "ts": "2026-02-19 18:49:46"
-  },
-  {
-    "kind": "location",
-    "display": "Botanical Photography",
-    "key": "Botanical_Photography",
-    "ts": "2026-02-22 11:22:50"
-  },
-  {
-    "kind": "location",
-    "display": "Abstract Photography",
-    "key": "Abstract_Photography",
-    "ts": "2026-02-24 12:02:43"
+    "display": "Double Exposure Experiment"
   }
 ]
