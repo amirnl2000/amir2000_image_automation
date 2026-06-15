@@ -1,17 +1,341 @@
+# AMIR_FORCE_LOGS_DIR_IMPORT_START
+from pathlib import Path as _amir_force_logs_pathlib_path
+import sys as _amir_force_logs_sys
+
+_amir_force_logs_script = _amir_force_logs_pathlib_path(__file__).resolve()
+_amir_force_logs_candidates = [
+    _amir_force_logs_script.parent,
+    *_amir_force_logs_script.parents[:4],
+    _amir_force_logs_pathlib_path.cwd(),
+    _amir_force_logs_pathlib_path(_amir_force_logs_sys.executable).resolve().parent,
+    _amir_force_logs_pathlib_path(_amir_force_logs_sys.executable).resolve().parent.parent,
+]
+_amir_force_logs_root = None
+
+for _amir_force_logs_candidate in _amir_force_logs_candidates:
+    try:
+        if (_amir_force_logs_candidate / "utils" / "force_logs_dir.py").exists():
+            _amir_force_logs_root = _amir_force_logs_candidate
+            break
+    except Exception:
+        pass
+
+if _amir_force_logs_root is None:
+    _amir_force_logs_root = (
+        _amir_force_logs_script.parents[2]
+        if len(_amir_force_logs_script.parents) > 2
+        else _amir_force_logs_script.parent
+    )
+
+if str(_amir_force_logs_root) not in _amir_force_logs_sys.path:
+    _amir_force_logs_sys.path.insert(0, str(_amir_force_logs_root))
+
+try:
+    from utils.force_logs_dir import install as _amir_force_logs_install
+    _amir_force_logs_install()
+except Exception as _amir_force_logs_exc:
+    _amir_force_logs_dir = _amir_force_logs_root / "logs"
+    _amir_force_logs_dir.mkdir(parents=True, exist_ok=True)
+    import os as _amir_force_logs_os
+    _amir_force_logs_os.environ["AMIR_LOG_DIR"] = str(_amir_force_logs_dir)
+    print(f"[WARN] force_logs_dir unavailable; using logs dir {_amir_force_logs_dir}: {_amir_force_logs_exc}")
+# AMIR_FORCE_LOGS_DIR_IMPORT_END
+
 # batch_image_quality_score.py
 import os
 import sys
 import sqlite3
 import argparse
+import shutil
+import stat
+import time
 import cv2
 import numpy as np
+try:
+    import torch
+    _AMIR_TORCH_IMPORT_ERROR = None
+except Exception as _amir_torch_import_error:
+    torch = None  # type: ignore[assignment]
+    _AMIR_TORCH_IMPORT_ERROR = _amir_torch_import_error
 from PIL import Image
 # Avoid Pillow's decompression-bomb warning while still keeping a guard
 Image.MAX_IMAGE_PIXELS = 300_000_000  # ~300 MP cap; your 129 MP file is safe
 from tqdm import tqdm
 
-# Safe mode is ON by default to avoid native crashes during scoring retries.
-SAFE_SCORING_MODE = os.getenv("AMIR_SCORE_SAFE_MODE", "1") == "1"
+# Keep HF/timm cache deterministic and local to this app tree.
+# IMPORTANT: do this before importing pyiqa/timm, otherwise those libraries may
+# lock cache paths from parent env (e.g. Anaconda XDG cache).
+_APP_ROOT = (
+    os.path.dirname(sys.executable)
+    if getattr(sys, "frozen", False)
+    else os.path.dirname(os.path.abspath(__file__))
+)
+_APP_CACHE_ROOT = os.path.join(_APP_ROOT, ".cache")
+_HF_HOME = os.path.join(_APP_CACHE_ROOT, "huggingface")
+_HF_HUB_CACHE = os.path.join(_HF_HOME, "hub")
+os.makedirs(_HF_HUB_CACHE, exist_ok=True)
+os.makedirs(os.path.join(_APP_CACHE_ROOT, "pyiqa"), exist_ok=True)
+os.environ["XDG_CACHE_HOME"] = _APP_CACHE_ROOT
+os.environ["HF_HOME"] = _HF_HOME
+os.environ["HUGGINGFACE_HUB_CACHE"] = _HF_HUB_CACHE
+os.environ["PYIQA_ROOT"] = os.path.join(_APP_CACHE_ROOT, "pyiqa")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+# Scoring must be row-complete: every selected row gets all score columns
+# populated. Torch/pyiqa are preferred when available; deterministic local
+# metrics fill the same columns when Windows policy or dependency failures block
+# ML scoring.
+SAFE_SCORING_MODE = os.getenv("AMIR_SCORE_SAFE_MODE", "0") == "1" or torch is None
+PYIQA_REQUESTED = os.getenv("AMIR_SCORE_REQUIRE_PYIQA", "1") == "1"
+STRICT_PYIQA_REQUIRED = (
+    PYIQA_REQUESTED
+    and os.getenv("AMIR_SCORE_HARD_FAIL_ON_ML_UNAVAILABLE", "0") == "1"
+    and torch is not None
+)
+FORCE_SCORING_RUN = os.getenv("AMIR_SCORE_FORCE_RUN", "0") == "1"
+if torch is None:
+    print(
+        "[WARN] Torch unavailable; all score columns will be computed with deterministic fallback metrics. "
+        f"Reason: {type(_AMIR_TORCH_IMPORT_ERROR).__name__}: {_AMIR_TORCH_IMPORT_ERROR}"
+    )
+elif PYIQA_REQUESTED and not STRICT_PYIQA_REQUIRED:
+    print("[INFO] ML scoring requested; deterministic fallback remains enabled for row-complete scoring.")
+_PYIQA_DEVICE = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
+
+def _known_timm_model_cache_dir() -> str:
+    hf_cache_root = os.path.join(
+        os.environ.get("HUGGINGFACE_HUB_CACHE") or os.path.join(
+            os.environ.get("HF_HOME") or os.path.join(
+                os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
+                "huggingface",
+            ),
+            "hub",
+        )
+    )
+    return os.path.join(hf_cache_root, "models--timm--inception_resnet_v2.tf_in1k")
+
+
+def _try_open_readable(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            fh.read(16)
+        return True
+    except Exception:
+        return False
+
+
+def _rmtree_force(path: str, retries: int = 3) -> bool:
+    def _on_rm_error(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    for _ in range(max(1, int(retries))):
+        try:
+            if os.path.lexists(path):
+                shutil.rmtree(path, onerror=_on_rm_error)
+        except Exception:
+            pass
+        if not os.path.lexists(path):
+            return True
+        time.sleep(0.4)
+    return not os.path.lexists(path)
+
+
+def _materialize_regular_file(target_path: str, source_path: str) -> bool:
+    """
+    Replace target_path with a regular file copied from source_path.
+    Useful when target_path is a broken symlink in HF snapshot cache.
+    """
+    try:
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        if os.path.lexists(target_path):
+            try:
+                os.chmod(target_path, stat.S_IWRITE)
+            except Exception:
+                pass
+            try:
+                os.remove(target_path)
+            except Exception:
+                try:
+                    shutil.rmtree(target_path, ignore_errors=True)
+                except Exception:
+                    pass
+        shutil.copy2(source_path, target_path)
+        return _try_open_readable(target_path)
+    except Exception:
+        return False
+
+
+
+def _find_strict_timm_checkpoint() -> str:
+    candidates: list[str] = []
+
+    override = os.environ.get("AMIR_TIMM_INCEPTION_RESNET_V2_WEIGHTS", "").strip()
+    if override:
+        candidates.append(os.path.abspath(os.path.expandvars(os.path.expanduser(override))))
+
+    model_dir = _known_timm_model_cache_dir()
+
+    if os.path.isdir(model_dir):
+        for dirpath, _dirnames, filenames in os.walk(model_dir):
+            for filename in filenames:
+                if filename in {"pytorch_model.bin", "model.safetensors"}:
+                    candidates.append(os.path.join(dirpath, filename))
+
+    seen: set[str] = set()
+    valid: list[str] = []
+
+    for path in candidates:
+        norm = os.path.normcase(os.path.abspath(path))
+
+        if norm in seen:
+            continue
+
+        seen.add(norm)
+
+        if not os.path.isfile(path):
+            continue
+
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+
+        if size < 100 * 1024 * 1024:
+            continue
+
+        if not _try_open_readable(path):
+            continue
+
+        valid.append(path)
+
+    if not valid:
+        raise RuntimeError(
+            "Missing strict local timm checkpoint. Expected local pytorch_model.bin or model.safetensors "
+            "under .cache\\huggingface\\hub\\models--timm--inception_resnet_v2.tf_in1k\\snapshots\\... "
+            "or AMIR_TIMM_INCEPTION_RESNET_V2_WEIGHTS."
+        )
+
+    return sorted(valid, key=lambda item: os.path.getsize(item), reverse=True)[0]
+
+
+def _load_strict_timm_state_dict(checkpoint_path: str):
+    if checkpoint_path.lower().endswith(".safetensors"):
+        from safetensors.torch import load_file
+        state = load_file(checkpoint_path, device="cpu")
+    else:
+        try:
+            state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state = torch.load(checkpoint_path, map_location="cpu")
+
+    if isinstance(state, dict):
+        for key in ["state_dict", "model"]:
+            value = state.get(key)
+            if isinstance(value, dict):
+                return value
+
+    return state
+
+
+def _install_strict_local_timm_loader() -> str:
+    checkpoint_path = _find_strict_timm_checkpoint()
+
+    import timm.models._hub as timm_hub
+    import timm.models._builder as timm_builder
+
+    original_hub_loader = getattr(
+        timm_hub,
+        "__amir_original_load_state_dict_from_hf",
+        getattr(timm_hub, "load_state_dict_from_hf", None),
+    )
+
+    original_builder_loader = getattr(
+        timm_builder,
+        "__amir_original_load_state_dict_from_hf",
+        getattr(timm_builder, "load_state_dict_from_hf", None),
+    )
+
+    timm_hub.__amir_original_load_state_dict_from_hf = original_hub_loader
+    timm_builder.__amir_original_load_state_dict_from_hf = original_builder_loader
+
+    def _amir_load_state_dict_from_hf(*args, **kwargs):
+        model_id = str(args[0] if args else kwargs.get("model_id", ""))
+
+        if "inception_resnet_v2" in model_id:
+            print(f"[STRICT SCORING] Loading local timm checkpoint: {checkpoint_path}", file=sys.stderr)
+            return _load_strict_timm_state_dict(checkpoint_path)
+
+        if original_hub_loader is not None:
+            return original_hub_loader(*args, **kwargs)
+
+        raise RuntimeError(f"No Hugging Face loader available for {model_id}")
+
+    timm_hub.load_state_dict_from_hf = _amir_load_state_dict_from_hf
+    timm_builder.load_state_dict_from_hf = _amir_load_state_dict_from_hf
+
+    return checkpoint_path
+
+
+try:
+    if torch is None:
+        _AMIR_STRICT_TIMM_CHECKPOINT = None
+        print("[INFO] Strict local timm loader not loaded because torch is unavailable; fallback scoring will fill NIMA/BRISQUE proxies.")
+    else:
+        _AMIR_STRICT_TIMM_CHECKPOINT = _install_strict_local_timm_loader()
+        print(f"[INFO] Strict local timm checkpoint ready: {_AMIR_STRICT_TIMM_CHECKPOINT}")
+except Exception as e:
+    if STRICT_PYIQA_REQUIRED:
+        print(f"[ERROR] Strict local timm loader failed: {e}")
+        sys.exit(2)
+    print(f"[WARN] Strict local timm loader failed: {e}")
+
+def _ensure_known_timm_model_file(max_attempts: int = 3) -> str:
+    """
+    Strict local scoring only.
+
+    No Hugging Face download.
+    No force_download.
+    No cache deletion.
+    No fallback scoring.
+    """
+    return _find_strict_timm_checkpoint()
+
+
+def _repair_known_timm_cache_if_broken() -> bool:
+    """
+    Offline strict mode cannot repair by downloading.
+    It can only confirm that the local checkpoint is present and reinstall the loader.
+    """
+    try:
+        _install_strict_local_timm_loader()
+        return True
+    except Exception:
+        return False
+
+
+def _create_metric_with_single_repair_retry(metric_name: str):
+    if pyiqa is None:
+        return None
+    try:
+        return pyiqa.create_metric(metric_name, device=_PYIQA_DEVICE)
+    except Exception as first_err:
+        msg = str(first_err)
+        should_try_repair = (
+            "No such file or directory" in msg
+            and "models--timm--inception_resnet_v2.tf_in1k" in msg
+        )
+        if should_try_repair and _repair_known_timm_cache_if_broken():
+            return pyiqa.create_metric(metric_name, device=_PYIQA_DEVICE)
+        raise
+
+if SAFE_SCORING_MODE and STRICT_PYIQA_REQUIRED:
+    print("[ERROR] Invalid scoring config: safe mode is enabled while strict pyiqa scoring is required.")
+    sys.exit(2)
 
 pyiqa = None
 if not SAFE_SCORING_MODE:
@@ -20,9 +344,21 @@ if not SAFE_SCORING_MODE:
         pyiqa = _pyiqa
     except Exception as e:
         pyiqa = None
+        if STRICT_PYIQA_REQUIRED:
+            print(f"[ERROR] pyiqa unavailable and strict scoring is enabled: {e}")
+            sys.exit(2)
         print(f"[WARN] pyiqa unavailable, running without NIMA/BRISQUE: {e}")
 else:
-    print("[INFO] Safe scoring mode enabled: skipping pyiqa (NIMA/BRISQUE).")
+    print("[INFO] Deterministic scoring mode active: populating NIMA/BRISQUE/CLIP proxy columns without pyiqa.")
+
+if pyiqa is not None:
+    try:
+        _ensure_known_timm_model_file(max_attempts=3)
+    except Exception as e:
+        if STRICT_PYIQA_REQUIRED:
+            print(f"[ERROR] TIMM cache unavailable and strict scoring is enabled: {e}")
+            sys.exit(2)
+        print(f"[WARN] TIMM cache unavailable, proceeding with fallback scoring: {e}")
 
 # ---------------- resource helpers ----------------
 from pathlib import Path
@@ -101,7 +437,7 @@ DB_PATH = os.environ.get(
 os.environ.setdefault(
     "PYIQA_ROOT",
     os.path.join(
-        (os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.expanduser("~")),
+        (os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))),
         ".cache",
         "pyiqa",
     )
@@ -121,18 +457,24 @@ def _load_pil_proxy(path: str, max_edge: int = 4096):
 nima = None
 if pyiqa is not None:
     try:
-        nima = pyiqa.create_metric("nima").cpu()
+        nima = _create_metric_with_single_repair_retry("nima")
     except Exception as e:
         nima = None
+        if STRICT_PYIQA_REQUIRED:
+            print(f"[ERROR] NIMA unavailable and strict scoring is enabled: {e}")
+            sys.exit(2)
         print(f"[WARN] NIMA unavailable, using fallback score: {e}")
 
 # BRISQUE (pyiqa). If creation fails, we’ll return None for BRISQUE.
 _py_brisque = None
 if pyiqa is not None:
     try:
-        _py_brisque = pyiqa.create_metric("brisque").cpu()
-    except Exception:
+        _py_brisque = _create_metric_with_single_repair_retry("brisque")
+    except Exception as e:
         _py_brisque = None
+        if STRICT_PYIQA_REQUIRED:
+            print(f"[ERROR] BRISQUE unavailable and strict scoring is enabled: {e}")
+            sys.exit(2)
 
 def _brisque(path: str):
     if _py_brisque is None:
@@ -280,11 +622,14 @@ if __name__ == "__main__":
 
     where_parts = [
         "COALESCE(Review_Status,'Queued') IN ('Pending','Queued','Error')",
-        "(" + " OR ".join(missing_conds) + ")",
     ]
     params: list[object] = []
 
     scoped_ids = _parse_id_list(args.id_list)
+
+    if not (FORCE_SCORING_RUN and scoped_ids):
+        where_parts.append("(" + " OR ".join(missing_conds) + ")")
+
     if scoped_ids:
         q = ",".join(["?"] * len(scoped_ids))
         where_parts.append(f"id IN ({q})")
@@ -301,9 +646,11 @@ if __name__ == "__main__":
     rows = cur.fetchall()
     if scoped_ids:
         print(f"[INFO] Scoring scope ids: {len(scoped_ids)}")
+    if FORCE_SCORING_RUN and scoped_ids:
+        print("[INFO] Forced scoring enabled for scoped rows; existing QC values will be refreshed.")
     print(f"Scoring {len(rows)} images pending quality...")
 
-    had_error = False
+    row_errors = 0
 
     def _write_scores(
         *,
@@ -379,6 +726,10 @@ if __name__ == "__main__":
         if not os.path.isfile(path):
             alt = os.path.join(INCOMING_DIR, file_name)
             if not os.path.isfile(alt):
+                if STRICT_PYIQA_REQUIRED:
+                    print(f"[ERROR] Missing in incoming during strict scoring: {orig_file_name} (id {img_id})")
+                    row_errors += 1
+                    break
                 # Do not skip: write deterministic worst-case scores so all fields are non-null.
                 nima_score = 0.0
                 blur_s = 0.0
@@ -402,7 +753,7 @@ if __name__ == "__main__":
                 )
                 conn.commit()
                 print(f"[ERROR] Missing in incoming -> fallback scores written: {orig_file_name} (id {img_id})")
-                had_error = True
+                row_errors += 1
                 continue
             path = alt
 
@@ -425,14 +776,20 @@ if __name__ == "__main__":
                 try:
                     nima_score = float(nima(pim).item())
                 except Exception as e:
+                    if STRICT_PYIQA_REQUIRED:
+                        raise RuntimeError(f"NIMA failed for id={img_id}: {e}")
                     print(f"[WARN] NIMA failed for id={img_id}: {e}")
                     nima_score = max(0.0, min(10.0, (bright_s + contr_s) / 2.0))
             else:
+                if STRICT_PYIQA_REQUIRED:
+                    raise RuntimeError(f"NIMA metric unavailable for id={img_id}")
                 # Lightweight fallback when pyiqa is disabled/unavailable.
                 nima_score = max(0.0, min(10.0, (bright_s + contr_s) / 2.0))
 
             # BRISQUE (pyiqa) and CLIP aesthetic
             brisque   = _brisque(path)  # may be None
+            if STRICT_PYIQA_REQUIRED and brisque is None:
+                raise RuntimeError(f"BRISQUE failed or unavailable for id={img_id}")
             clip_aes = None
             if get_image_aesthetic_score is not None:
                 try:
@@ -470,7 +827,9 @@ if __name__ == "__main__":
 
         except Exception as e:
             print(f"[ERROR] Error processing {path}: {e}")
-            had_error = True
+            row_errors += 1
+            if STRICT_PYIQA_REQUIRED:
+                break
             try:
                 nima_score = 0.0
                 blur_s = 0.0
@@ -501,9 +860,42 @@ if __name__ == "__main__":
     conn.close()
 
 
-    if had_error:
-        print("\n[WARN] One or more images failed to score. Check 'Error' rows in the editor.")
+    if row_errors:
+        print(
+            "\n[WARN] Scoring completed with fallback/error scores for "
+            f"{row_errors} row(s); all writable score columns were populated."
+        )
+
+    if STRICT_PYIQA_REQUIRED and row_errors:
+        print("[ERROR] Hard-fail ML scoring mode requested and one or more rows failed.")
+        sys.exit(2)
 
 
+    # AMIR_SCORING_GPU_CLEANUP_BEFORE_OLLAMA_START
+    print("[INFO] Scoring cleanup: clearing PyTorch/CUDA cache before Ollama caption stage when available...")
+    try:
+        import gc as _amir_gc
+        _amir_gc.collect()
+        if torch is not None:
+            _amir_torch = torch
+            if _amir_torch.cuda.is_available():
+                _amir_torch.cuda.synchronize()
+                _amir_torch.cuda.empty_cache()
+                try:
+                    _amir_torch.cuda.reset_peak_memory_stats()
+                except Exception:
+                    pass
+                try:
+                    _amir_torch.cuda.reset_accumulated_memory_stats()
+                except Exception:
+                    pass
+        else:
+            print("[INFO] Torch unavailable; CUDA cleanup not needed.")
+        _amir_gc.collect()
+    except Exception as _amir_cleanup_error:
+        print(f"[WARN] Scoring cleanup skipped: {_amir_cleanup_error}")
+    print("[INFO] GPU driver cooldown: waiting 10 seconds before Ollama caption stage...")
+    time.sleep(10)
+    print("[INFO] GPU cooldown complete. Scoring process can exit now.")
+    # AMIR_SCORING_GPU_CLEANUP_BEFORE_OLLAMA_END
     print("\n[OK] All done! Scores written to your database.")
-

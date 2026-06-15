@@ -80,15 +80,22 @@ if (-not (Test-Path -LiteralPath $venvPy)) {
 Write-Progress -Activity "Preflight" -Status "Upgrade pip" -PercentComplete 12
 & $venvPy -m pip install -U pip | Out-Null
 
-Write-Progress -Activity "Preflight" -Status "Install base runtime deps" -PercentComplete 18
-& $venvPy -m pip install -U pyinstaller pillow pyspellchecker piexif mysql-connector-python | Out-Null
+Write-Progress -Activity "Preflight" -Status "Install base runtime deps" -PercentComplete 16
+& $venvPy -m pip install -U pyinstaller pillow pyspellchecker piexif mysql-connector-python requests packaging "setuptools<82" | Out-Null
 
-Write-Progress -Activity "Preflight" -Status "Install scoring deps (numpy tqdm opencv pyiqa)" -PercentComplete 24
-& $venvPy -m pip install -U numpy tqdm opencv-python pyiqa | Out-Null
+Write-Progress -Activity "Preflight" -Status "Install AI/runtime deps" -PercentComplete 22
+& $venvPy -m pip install -U numpy tqdm opencv-python pyiqa huggingface_hub transformers | Out-Null
+
+Write-Progress -Activity "Preflight" -Status "Install OpenAI CLIP scorer" -PercentComplete 28
+& $venvPy -m pip show clip *> $null
+if ($LASTEXITCODE -eq 0) {
+    & $venvPy -m pip uninstall -y clip | Out-Null
+}
+& $venvPy -m pip install -U "git+https://github.com/openai/CLIP.git" | Out-Null
 
 # Torch install (Full always, Lite tries but does not fail the whole preflight if it errors)
 $useCuda = $false
-Write-Progress -Activity "Preflight" -Status "Detect NVIDIA GPU (nvidia-smi)" -PercentComplete 28
+Write-Progress -Activity "Preflight" -Status "Detect NVIDIA GPU (nvidia-smi)" -PercentComplete 32
 $nvsmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 if ($nvsmi) {
     try {
@@ -101,12 +108,12 @@ if ($nvsmi) {
 
 try {
     if ($useCuda) {
-        Write-Host "[INFO] NVIDIA detected. Installing Torch CUDA wheels (cu121)."
-        Write-Progress -Activity "Preflight" -Status "Install torch + torchvision (CUDA cu121)" -PercentComplete 34
-        & $venvPy -m pip install -U torch torchvision --index-url https://download.pytorch.org/whl/cu121 | Out-Null
+        Write-Host "[INFO] NVIDIA detected. Installing Torch CUDA wheels (cu128)."
+        Write-Progress -Activity "Preflight" -Status "Install torch + torchvision (CUDA cu128)" -PercentComplete 38
+        & $venvPy -m pip install -U torch torchvision --index-url https://download.pytorch.org/whl/cu128 | Out-Null
     } else {
         Write-Host "[INFO] No working NVIDIA detected. Installing Torch CPU wheels."
-        Write-Progress -Activity "Preflight" -Status "Install torch + torchvision (CPU)" -PercentComplete 34
+        Write-Progress -Activity "Preflight" -Status "Install torch + torchvision (CPU)" -PercentComplete 38
         & $venvPy -m pip install -U torch torchvision --index-url https://download.pytorch.org/whl/cpu | Out-Null
     }
 } catch {
@@ -164,6 +171,11 @@ Test-Import "Pillow" "PIL" "pillow" | Out-Null
 Test-Import "pyspellchecker" "spellchecker" "pyspellchecker" | Out-Null
 Test-Import "piexif" "piexif" "piexif" | Out-Null
 Test-Import "mysql connector" "mysql.connector" "mysql-connector-python" | Out-Null
+Test-Import "requests" "requests" "requests" | Out-Null
+Test-Import "packaging" "packaging" "packaging" | Out-Null
+Test-Import "huggingface_hub" "huggingface_hub" "huggingface_hub" | Out-Null
+Test-Import "transformers" "transformers" "transformers" | Out-Null
+Test-Import "OpenAI CLIP" "clip" "git+https://github.com/openai/CLIP.git" | Out-Null
 
 Write-Progress -Activity "Preflight" -Status "Imports (scoring stack)" -PercentComplete 80
 

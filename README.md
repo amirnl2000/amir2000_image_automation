@@ -1,70 +1,95 @@
-# Amir2000 Image Automation
+# Amir2000 Image Automation V1.0
 
-Local-first photo publishing pipeline for high-volume image sets.
+Local-first photography workflow for preparing large image batches for review and publishing.
 
-This project automates the path from intake to reviewed metadata and publish:
+This project automates the path from image intake to upload-ready metadata:
 
-1. Queue and normalize image sets
-2. Extract EXIF and insert/refresh review rows
-3. Score quality (NIMA, BRISQUE, CLIP aesthetic)
-4. Generate caption, alt text, keywords with local Ollama
-5. Review/approve/reject in editor UI
-6. Upload approved images/thumbnails to FTP
-7. Sync metadata to MySQL and local mirror DB
+1. Import one or more image sets.
+2. Extract EXIF and create local review rows.
+3. Score technical and aesthetic image quality.
+4. Suggest or identify subjects from image evidence.
+5. Generate captions, alt text, and keywords.
+6. Repair weak metadata before review.
+7. Prove metadata quality in a dedicated audit table.
+8. Review, approve, reject, and publish approved rows.
 
-## Production Updates (Current)
+The workflow is designed for repeatable batches of different subjects, locations, and image types. It should not depend on per-topic hardcoded fixes.
 
-- Nature classifier integration in production:
-  - Subject suggestion path in `main_set.py` (classifier-first, Ollama fallback)
-  - Caption/alt/keyword generation hints in `caption_review_local.py`
-- Review editor metadata retry:
-  - `Generate` button in `review_editor.py` regenerates caption/alt/keywords on demand
-  - Regenerated output is persisted to DB with current row status
-- Ollama startup visibility:
-  - App startup logs one line with loaded model processor/context/VRAM
-  - Example: `processor=GPU context=32768 vram=6.5GiB`
-- Optional auto-close of Ollama app process at run end:
-  - Controlled by `OLLAMA_CLOSE_ON_RUN_END` (default enabled)
+## V1.0 Focus
+
+V1.0 adds the identifier and metadata-quality layers needed for a reproducible workflow:
+
+- Multi-set batch orchestration in `main_set.py`.
+- Subject suggestion and identification through the `scripts/` identifier modules.
+- Image-evidence metadata generation through `metadata_evidence_pipeline.py`.
+- Deterministic repair through `scripts/metadata_auto_repair_loop.py`.
+- Upload-readiness proof through `scripts/metadata_quality_production.py`.
+- Review and publish control through `review_editor.py` and `db_uploader.py`.
+
+## Metadata Quality and ML Readiness
+
+`metadata_quality` is the proof and audit table for generated captions, alt text, and keywords.
+
+It stores the generated fields, repaired fields, pass/fail status, quality issues, subject evidence, series context, and upload state. This makes the workflow measurable instead of only manual. Approved, rejected, repaired, and uploaded rows can later become the first evaluation dataset for metadata improvement.
+
+In V1.0 this is the start of the ML feedback layer: the system records what passed, what failed, and why.
 
 ## Key Files
 
 ```text
 .
-|-- amir2000_config.py
 |-- main_set.py
-|-- batch_image_quality_score.py
-|-- caption_review_local.py
 |-- review_editor.py
+|-- caption_review_local.py
+|-- batch_image_quality_score.py
+|-- metadata_evidence_pipeline.py
+|-- run_metadata_quality_production.ps1
 |-- db_uploader.py
 |-- init_db.py
 |-- simple_inference.py
-|-- sac+logos+ava1-l14-linearMSE.pth
+|-- amir2000_config.py
 |
 |-- data/
-|   |-- review.db
-|   |-- photos_info_revamp.db
-|   |-- folder_map.json
-|   |-- location_list.json
-|   |-- used_filenames.json
-|   |-- autofix_dict.json
-|   |-- spellcheck_exceptions.json        # optional but recommended
-|   |-- ui_state.json                     # optional, UI preference state
 |   `-- init/
 |       |-- review_queue.sql
-|       `-- photos_info_revamp.sql
+|       |-- photos_info_revamp.sql
+|       `-- metadata_quality.sql
+|
+|-- docs/
+|   `-- init/
+|       |-- review_queue.sql
+|       |-- photos_info_revamp.sql
+|       `-- metadata_quality.sql
 |
 |-- helpers/
 |   |-- setup_venv313_full.ps1
 |   |-- preflight_multiset.ps1
 |   |-- build_multiset.ps1
-|   |-- runtime_hook_samevenv_classifier.py
-|   `-- (local/private helper scripts are not included in this repo)
+|   `-- runtime_hook_samevenv_classifier.py
+|
+|-- scripts/
+|   |-- subject_identifier_production.py
+|   |-- subject_identifier_engine.py
+|   |-- evidence_subject_pipeline.py
+|   |-- identifier_router.py
+|   |-- identifier_biology_runner.py
+|   |-- identifier_biology_inaturalist.py
+|   |-- identifier_biology_bioclip.py
+|   |-- identifier_general_vision.py
+|   |-- identifier_vehicle_aircraft.py
+|   |-- identifier_visual_evidence.py
+|   |-- identifier_consensus.py
+|   |-- identifier_db_setup.py
+|   |-- apply_identifier_router_result_to_db.py
+|   |-- download_identifier_models.py
+|   |-- series_versioning.py
+|   |-- metadata_auto_repair_loop.py
+|   `-- metadata_quality_production.py
 |
 |-- utils/
 |-- vendor/
-|   |-- brisque/
-|   `-- clip/
-`-- fonts/
+|-- fonts/
+`-- sac+logos+ava1-l14-linearMSE.pth
 ```
 
 ## Required Config
@@ -73,22 +98,24 @@ Edit `amir2000_config.py` and replace all `YOUR_*` placeholders before real runs
 
 Required areas:
 
-- MySQL: `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASS`, `MYSQL_DB`
-- FTP: `FTP_HOST`, `FTP_PORT`, `FTP_USER`, `FTP_PASS`
-- Publish targets: `PUBLIC_URL_BASE`, `REMOTE_BASE`
-- Paths: `DATA_DIR`, `INCOMING_DIR`, `BASE_PICK_DIR`, `STAGED_DIR`, `REJECTED_DIR`
-- Site/Ollama values: `OLLAMA["host"]`, `WEBSITE_V2["base_url"]`, `WEBSITE_V2["resized_root"]`, `WEBSITE_V2["orig_root"]`
+- MySQL settings
+- FTP settings
+- Publish target URLs and remote paths
+- Local image intake paths
+- Ollama host/model settings
 
-## Environment (Python 3.13)
+Do not commit private credentials, local run logs, generated databases, image folders, temporary model caches, or backup packs.
 
-Preferred:
+## Environment
+
+Preferred setup:
 
 ```powershell
 Set-Location "YOUR_PATH_HERE"
 pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\setup_venv313_full.ps1
 ```
 
-Manual:
+Manual setup:
 
 ```powershell
 Set-Location "YOUR_PATH_HERE"
@@ -105,11 +132,10 @@ python -m pip install -U torch torchvision --index-url https://download.pytorch.
 Set-Location "YOUR_PATH_HERE"
 .\.venv313\Scripts\Activate.ps1
 python .\init_db.py
-ollama pull llama3.2-vision:latest
-ollama pull minicpm-v:latest
+ollama pull qwen3-vl:4b
 ```
 
-Keep `sac+logos+ava1-l14-linearMSE.pth` in repo root for full CLIP aesthetic behavior.
+Keep `sac+logos+ava1-l14-linearMSE.pth` in the repo root for CLIP aesthetic scoring.
 
 ## Run
 
@@ -118,19 +144,6 @@ Set-Location "YOUR_PATH_HERE"
 .\.venv313\Scripts\Activate.ps1
 python .\main_set.py
 ```
-
-In EXE mode, check startup console line:
-
-- `[INFO] Ollama startup check: model=... processor=GPU/CPU context=... vram=...`
-
-## Useful Runtime Flags
-
-- `NATURE_SUBJECT_ENABLE=1` (default)
-- `NATURE_SUBJECT_MODEL=openai/clip-vit-large-patch14`
-- `NATURE_CLASSIFIER_ENABLE=1` (default)
-- `NATURE_CLASSIFIER_MODEL=openai/clip-vit-large-patch14`
-- `OLLAMA_CLOSE_ON_RUN_END=1` (default)
-- `AUTO_AI_SUBJECT_ON_SELECT=0` (optional, disable auto subject suggest on selection)
 
 ## Build EXE
 
@@ -141,24 +154,26 @@ pwsh -NoProfile -ExecutionPolicy Bypass -File .\helpers\build_multiset.ps1 -Clea
 
 Output:
 
-- `dist/Amir2000ImageAutomation-MultiSet.exe`
+```text
+dist/Amir2000ImageAutomation-MultiSet.exe
+```
 
-## Notes on Generated Folders
+## Generated Runtime Files
 
-These are generated at runtime and can be removed when app is closed:
+Generated runtime folders and files should not be committed:
 
 - `data/ollama_tmp`
 - `data/_runtime_scripts`
-- `logs/*` run/build logs
+- `data/*_tmp`
+- `logs/*`
+- local `.db` files
+- backup packs
+- model cache folders
 
-Optional report/history files that can be recreated:
+## Public Documentation
 
-- `data/new_taxonomy_log.json`
-- `data/prefill_qc_last.json`
+The V1.0 workflow is documented as a public case study on:
 
-## Documentation Index
-
-- `docs/init/review_queue.sql`
-- `docs/init/photos_info_revamp.sql`
-- Full documentation can be found on: https://www.amir2000.com/
-
+```text
+https://www.amir2000.com/
+```

@@ -104,21 +104,25 @@ $piArgs = @(
     # and can crash PyInstaller on large onefile builds.
     "--hidden-import","tqdm",
     "--hidden-import","tqdm.auto",
+    "--hidden-import","tqdm.contrib",
+    "--hidden-import","tqdm.contrib.concurrent",
     "--collect-submodules","mysql.connector.plugins",
     "--hidden-import","mysql.connector.plugins.mysql_native_password",
     "--hidden-import","mysql.connector.plugins.caching_sha2_password",
-    "--hidden-import","mysql.connector.plugins.sha256_password"
+    "--hidden-import","mysql.connector.plugins.sha256_password",
 
 
     "--hidden-import","ftfy",
     "--hidden-import","regex",
     "--hidden-import","piexif",
     "--collect-all","piexif",
-    # review_editor imports caption_review_local dynamically at runtime.
-    # Include it (and a couple of transitive modules it needs) explicitly.
-    "--hidden-import","caption_review_local",
+    # caption_review_local.py is shipped as external data and run via external
+    # Python in Stage 6. Do not hidden-import it in the EXE build, because
+    # PyInstaller+Python 3.13 can crash while bytecode-scanning that module.
     "--hidden-import","requests",
     "--hidden-import","http.cookies",
+    "--hidden-import","metadata_evidence_pipeline",
+    "--hidden-import","scripts.evidence_subject_pipeline",
 
     # Pillow for runpy scripts
     "--hidden-import","PIL.Image",
@@ -139,13 +143,14 @@ $addData = @(
     "caption_review_local.py;.",
     "review_editor.py;.",
     "db_uploader.py;.",
-    "amir2000_config.py;.",
     "simple_inference.py;.",
+    "metadata_evidence_pipeline.py;.",
     "utils;utils",
-    "vendor;vendor",
+    "scripts;scripts",
+    "helpers;helpers",
     "fonts;fonts",
-    "sac+logos+ava1-l14-linearMSE.pth;.",
-    "data;data"
+    "docs;docs",
+    "sac+logos+ava1-l14-linearMSE.pth;."
 )
 
 foreach ($d in $addData) {
@@ -241,8 +246,122 @@ if (Test-Path -LiteralPath $exe) {
         Copy-Item -Force $configSrc (Join-Path $distDir "amir2000_config.py")
     }
 
+    # AMIR_COPY_NIMA_SCORING_CACHE_TO_DIST_START
+    # Keep strict scoring fully offline in the built EXE.
+    # PyIQA/torch looks for NIMA here at runtime:
+    #   dist\.cache\torch\hub\pyiqa\NIMA_InceptionV2_ava-b0c77c00.pth
+    $NimaFileName = "NIMA_InceptionV2_ava-b0c77c00.pth"
+    $ProjectRootForNima = $root
+
+    $NimaCandidates = @(
+        (Join-Path $ProjectRootForNima ".cache\torch\hub\pyiqa\$NimaFileName"),
+        (Join-Path $ProjectRootForNima "data\_runtime_scripts\.cache\torch\hub\pyiqa\$NimaFileName"),
+        (Join-Path $ProjectRootForNima "dist\.cache\torch\hub\pyiqa\$NimaFileName")
+    )
+
+    $NimaSource = $null
+
+    foreach ($Candidate in $NimaCandidates) {
+        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+            $NimaSource = $Candidate
+            break
+        }
+    }
+
+    if ($NimaSource) {
+        $NimaDistTarget = Join-Path $ProjectRootForNima "dist\.cache\torch\hub\pyiqa\$NimaFileName"
+        $NimaRuntimeTarget = Join-Path $ProjectRootForNima "data\_runtime_scripts\.cache\torch\hub\pyiqa\$NimaFileName"
+
+        New-Item -ItemType Directory -Force -Path (Split-Path $NimaDistTarget -Parent) | Out-Null
+        New-Item -ItemType Directory -Force -Path (Split-Path $NimaRuntimeTarget -Parent) | Out-Null
+
+        Copy-Item -LiteralPath $NimaSource -Destination $NimaDistTarget -Force
+        Copy-Item -LiteralPath $NimaSource -Destination $NimaRuntimeTarget -Force
+
+        Write-Host "[OK] Copied NIMA scoring checkpoint to EXE runtime cache."
+    } else {
+        Write-Host "[WARN] NIMA checkpoint not found locally. Strict scoring may try to download at runtime."
+    }
+    # AMIR_COPY_NIMA_SCORING_CACHE_TO_DIST_END
+
+    # AMIR_COPY_BRISQUE_SCORING_CACHE_TO_DIST_START
+    # PyIQA/torch looks for BRISQUE here at runtime:
+    #   dist\.cache\torch\hub\pyiqa\brisque_svm_weights.pth
+    # If this file is missing, strict scoring may try to download during a batch.
+    $BrisqueFileName = "brisque_svm_weights.pth"
+
+    $BrisqueCandidates = @(
+        (Join-Path $ProjectRootForNima ".cache\torch\hub\pyiqa\$BrisqueFileName"),
+        (Join-Path $ProjectRootForNima "data\_runtime_scripts\.cache\torch\hub\pyiqa\$BrisqueFileName"),
+        (Join-Path $ProjectRootForNima "dist\.cache\torch\hub\pyiqa\$BrisqueFileName")
+    )
+
+    $BrisqueSource = $null
+
+    foreach ($Candidate in $BrisqueCandidates) {
+        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+            $BrisqueSource = $Candidate
+            break
+        }
+    }
+
+    if ($BrisqueSource) {
+        $BrisqueDistTarget = Join-Path $ProjectRootForNima "dist\.cache\torch\hub\pyiqa\$BrisqueFileName"
+        $BrisqueRuntimeTarget = Join-Path $ProjectRootForNima "data\_runtime_scripts\.cache\torch\hub\pyiqa\$BrisqueFileName"
+
+        New-Item -ItemType Directory -Force -Path (Split-Path $BrisqueDistTarget -Parent) | Out-Null
+        New-Item -ItemType Directory -Force -Path (Split-Path $BrisqueRuntimeTarget -Parent) | Out-Null
+
+        Copy-Item -LiteralPath $BrisqueSource -Destination $BrisqueDistTarget -Force
+        Copy-Item -LiteralPath $BrisqueSource -Destination $BrisqueRuntimeTarget -Force
+
+        Write-Host "[OK] Copied BRISQUE scoring checkpoint to EXE runtime cache."
+    } else {
+        Write-Host "[WARN] BRISQUE checkpoint not found locally. Strict scoring may try to download at runtime."
+    }
+    # AMIR_COPY_BRISQUE_SCORING_CACHE_TO_DIST_END
+
+    # AMIR_SIGN_LOCAL_EXE_START
+    # Keep rebuilt EXEs trusted on this machine. Device Guard/Smart App Control
+    # treats each clean rebuild as a new unsigned binary unless it is signed.
+    try {
+        $certSubject = "CN=Amir2000 Local Code Signing"
+        $cert = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert |
+            Where-Object { $_.Subject -eq $certSubject -and $_.HasPrivateKey } |
+            Sort-Object NotAfter -Descending |
+            Select-Object -First 1
+
+        if (-not $cert) {
+            $cert = New-SelfSignedCertificate `
+                -Type CodeSigningCert `
+                -Subject $certSubject `
+                -KeyUsage DigitalSignature `
+                -KeyAlgorithm RSA `
+                -KeyLength 3072 `
+                -HashAlgorithm SHA256 `
+                -CertStoreLocation Cert:\CurrentUser\My `
+                -NotAfter (Get-Date).AddYears(5)
+        }
+
+        $certExportPath = Join-Path $root "data\amir2000_local_code_signing.cer"
+        New-Item -ItemType Directory -Force -Path (Split-Path $certExportPath -Parent) | Out-Null
+        Export-Certificate -Cert $cert -FilePath $certExportPath -Force | Out-Null
+        Import-Certificate -FilePath $certExportPath -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+        Import-Certificate -FilePath $certExportPath -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+
+        $signature = Set-AuthenticodeSignature -FilePath $exe -Certificate $cert -HashAlgorithm SHA256
+
+        if ($signature.Status -eq "Valid") {
+            Write-Host "[OK] Signed EXE with local trusted certificate: $($cert.Thumbprint)"
+        } else {
+            Write-Host "[WARN] EXE signing status: $($signature.Status) - $($signature.StatusMessage)"
+        }
+    } catch {
+        Write-Host "[WARN] EXE signing failed: $($_.Exception.Message)"
+    }
+    # AMIR_SIGN_LOCAL_EXE_END
+
     exit 0
 }
 
 throw "PyInstaller failed (no EXE created). Exit code: $code. See log: $LogPath"
-

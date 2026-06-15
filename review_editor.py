@@ -1,3 +1,19 @@
+# AMIR_FORCE_LOGS_DIR_IMPORT_START
+from pathlib import Path as _amir_force_logs_pathlib_path
+import sys as _amir_force_logs_sys
+
+_amir_force_logs_root = _amir_force_logs_pathlib_path(__file__).resolve().parent
+
+while not (_amir_force_logs_root / "utils").exists() and _amir_force_logs_root.parent != _amir_force_logs_root:
+    _amir_force_logs_root = _amir_force_logs_root.parent
+
+if str(_amir_force_logs_root) not in _amir_force_logs_sys.path:
+    _amir_force_logs_sys.path.insert(0, str(_amir_force_logs_root))
+
+from utils.force_logs_dir import install as _amir_force_logs_install
+_amir_force_logs_install()
+# AMIR_FORCE_LOGS_DIR_IMPORT_END
+
 # review_editor.py
 import os
 import sys
@@ -9,7 +25,8 @@ import traceback
 import threading
 import uuid
 import tempfile
-from tkinter import Tk, Label, Entry, Button, StringVar, messagebox, Frame, Text, END, DISABLED, Menu
+import time
+from tkinter import Tk, Label, Entry, Button, StringVar, messagebox, Frame, Text, END, DISABLED, Menu, Canvas
 from tkinter import ttk
 from PIL import Image, ImageTk
 from datetime import datetime
@@ -136,8 +153,10 @@ DB_PATH = os.environ.get("AMIR_REVIEW_DB", PATHS.get("REVIEW_DB_PATH", os.path.j
 TABLE_NAME = PUBLISH.get("REVIEW_QUEUE_TABLE", "review_queue")
 
 # Other folders
+BASE_PICK_DIR   = PATHS.get("BASE_PICK_DIR", r"YOUR_PATH_HERE")
+STAGED_DIR      = PATHS.get("STAGED_DIR", os.path.join(BASE_PICK_DIR, "staged"))
 INCOMING_DIR    = PATHS.get("INCOMING_DIR", r"YOUR_PATH_HERE")
-REJECTED_FOLDER = PATHS.get("REJECTED_DIR", r"YOUR_PATH_HERE")
+REJECTED_FOLDER = PATHS.get("REJECTED_DIR", os.path.join(PATHS.get("BASE_PICK_DIR", r"YOUR_PATH_HERE"), "rejected"))
 LOCAL_BASE      = PATHS.get("LOCAL_SITE_IMAGES_BASE", r"YOUR_PATH_HERE")
 DESKTOP_ROOT    = PATHS.get("DESKTOP_ROOT", r"YOUR_PATH_HERE")
 ARCHIVE_ROOT    = PATHS.get("ARCHIVE_ROOT", r"YOUR_PATH_HERE")
@@ -147,8 +166,8 @@ WATERMARK_TEXT = "© YOUR_HOST\nPhotography"
 
 # ---- Regenerate (caption/alt/keywords) via caption_review_local.py ----
 CAPTION_ENDPOINT = os.getenv("CAPTION_ENDPOINT", "http://127.0.0.1:11434/api/generate")
-CAPTION_MODEL = os.getenv("OLLAMA_MODEL_CAPTION", "llava:13b")
-CAPTION_MODEL_FALLBACK = os.getenv("OLLAMA_MODEL_CAPTION_FALLBACK", "").strip()
+CAPTION_MODEL = os.getenv("OLLAMA_MODEL_CAPTION", "qwen2.5vl:3b")
+CAPTION_MODEL_FALLBACK = os.getenv("OLLAMA_MODEL_CAPTION_FALLBACK", "qwen2.5vl:3b").strip()
 CAPTION_TIMEOUT_SEC = int(os.getenv("CAPTION_TIMEOUT_SEC", "420"))
 CAPTION_OPTS = {
     "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "4096")),
@@ -167,12 +186,12 @@ if _caption_num_gpu >= 0:
     CAPTION_OPTS["num_gpu"] = _caption_num_gpu
 if _caption_main_gpu >= 0:
     CAPTION_OPTS["main_gpu"] = _caption_main_gpu
-CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "15"))
+CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "8"))
 CAPTION_PREFIX_WORDS = int(os.getenv("CAPTION_PREFIX_WORDS", "8"))
 CAPTION_SERIES_LARGE_THRESHOLD = int(os.getenv("CAPTION_SERIES_LARGE_THRESHOLD", "8"))
-CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "5"))
+CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "1"))
 CAPTION_REWRITE_WEAK = os.getenv("CAPTION_REWRITE_WEAK", "1") == "1"
-CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "3"))
+CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "1"))
 CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "90"))
 
 # Use the one true JSON in DATA_DIR
@@ -237,6 +256,384 @@ def qc_status(qr):
     if q >= 5.5: return "Average"
     if q >= 4.5: return "Low"
     return "Very Low"
+
+
+
+
+def _ensure_metadata_quality_schema(conn: sqlite3.Connection) -> None:
+    """Create/extend the local metadata_quality table.
+
+    Identity rule:
+    - metadata_quality.id is the internal quality-row id.
+    - metadata_quality.revamp_id is the real photos_info_revamp.id, not review_queue.id.
+    - review_queue.id is temporary and must never be stored as revamp_id.
+    """
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata_quality (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            revamp_id INTEGER,
+            revamp_File_Name TEXT NOT NULL,
+            revamp_Original_File_Name TEXT,
+            revamp_Location TEXT,
+            revamp_Folder TEXT,
+            current_caption TEXT,
+            current_alt_text TEXT,
+            current_keywords TEXT,
+            upload_caption TEXT,
+            upload_alt_text TEXT,
+            upload_keywords TEXT,
+            overall_quality_status TEXT,
+            overall_quality_score REAL,
+            overall_quality_issues TEXT,
+            generation_mode TEXT,
+            repair_attempts INTEGER DEFAULT 0,
+            fallback_used INTEGER DEFAULT 0,
+            fallback_reason TEXT,
+            accepted_for_upload INTEGER DEFAULT 0,
+            caption_accepted_for_upload INTEGER DEFAULT 0,
+            alt_text_accepted_for_upload INTEGER DEFAULT 0,
+            keywords_accepted_for_upload INTEGER DEFAULT 0,
+            part_of_serie INTEGER DEFAULT 0,
+            unique_name TEXT,
+            ai_suggested_subject TEXT,
+            final_subject TEXT,
+            subject_seed TEXT,
+            subject_seed_mode TEXT,
+            subject_seed_confidence INTEGER,
+            subject_seed_reason TEXT,
+            manual_decision TEXT,
+            uploaded_to_mysql INTEGER DEFAULT 0,
+            mysql_synced_at TEXT,
+            upload_public_path TEXT,
+            upload_status TEXT,
+            source_review_status TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+    wanted = {
+        "revamp_id": "INTEGER",
+        "revamp_File_Name": "TEXT NOT NULL",
+        "revamp_Original_File_Name": "TEXT",
+        "revamp_Location": "TEXT",
+        "revamp_Folder": "TEXT",
+        "current_caption": "TEXT",
+        "current_alt_text": "TEXT",
+        "current_keywords": "TEXT",
+        "upload_caption": "TEXT",
+        "upload_alt_text": "TEXT",
+        "upload_keywords": "TEXT",
+        "overall_quality_status": "TEXT",
+        "overall_quality_score": "REAL",
+        "overall_quality_issues": "TEXT",
+        "generation_mode": "TEXT",
+        "repair_attempts": "INTEGER DEFAULT 0",
+        "fallback_used": "INTEGER DEFAULT 0",
+        "fallback_reason": "TEXT",
+        "accepted_for_upload": "INTEGER DEFAULT 0",
+        "caption_accepted_for_upload": "INTEGER DEFAULT 0",
+        "alt_text_accepted_for_upload": "INTEGER DEFAULT 0",
+        "keywords_accepted_for_upload": "INTEGER DEFAULT 0",
+        "part_of_serie": "INTEGER DEFAULT 0",
+        "unique_name": "TEXT",
+        "ai_suggested_subject": "TEXT",
+        "final_subject": "TEXT",
+        "subject_seed": "TEXT",
+        "subject_seed_mode": "TEXT",
+        "subject_seed_confidence": "INTEGER",
+        "subject_seed_reason": "TEXT",
+        "manual_decision": "TEXT",
+        "uploaded_to_mysql": "INTEGER DEFAULT 0",
+        "mysql_synced_at": "TEXT",
+        "upload_public_path": "TEXT",
+        "upload_status": "TEXT",
+        "source_review_status": "TEXT",
+        "updated_at": "TEXT",
+    }
+    have = {row[1] for row in conn.execute("PRAGMA table_info(metadata_quality)").fetchall()}
+
+    for name, definition in wanted.items():
+        if name not in have:
+            conn.execute(f"ALTER TABLE metadata_quality ADD COLUMN {name} {definition}")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_metadata_quality_revamp_id ON metadata_quality(revamp_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_metadata_quality_status ON metadata_quality(overall_quality_status)")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_metadata_quality_file ON metadata_quality(revamp_File_Name)")
+
+
+def _upsert_metadata_quality_manual(row_id: int, values: dict, status: str) -> None:
+    """Keep metadata_quality aligned with review_editor edits.
+
+    Important identity rule:
+    row_id is review_queue.id and is temporary.
+    It must not be stored as metadata_quality.revamp_id.
+    metadata_quality.revamp_id is only the real photos_info_revamp.id after upload/sync.
+    """
+    file_name = str(values.get("File_Name") or "").strip()
+
+    if not file_name:
+        return
+
+    with sqlite3.connect(DB_PATH) as mq_conn:
+        mq_conn.row_factory = sqlite3.Row
+        _ensure_metadata_quality_schema(mq_conn)
+
+        if status == "Rejected":
+            mq_conn.execute(
+                "DELETE FROM metadata_quality WHERE revamp_File_Name=?",
+                (file_name,),
+            )
+            mq_conn.commit()
+            return
+
+        decision = ""
+        accepted = 0
+        quality_status = "MANUAL_REVIEW"
+
+        if status == "Approved":
+            decision = "MANUAL_APPROVED"
+            accepted = 1
+            quality_status = "MANUAL_APPROVED"
+        elif status == "Pending":
+            decision = "MANUAL_PENDING"
+            accepted = 0
+            quality_status = "MANUAL_PENDING"
+        else:
+            decision = f"MANUAL_{status.upper()}" if status else "MANUAL_REVIEW"
+            accepted = 0
+            quality_status = decision
+
+        existing = mq_conn.execute(
+            "SELECT id, revamp_id FROM metadata_quality WHERE revamp_File_Name=? ORDER BY id DESC LIMIT 1",
+            (file_name,),
+        ).fetchone()
+
+        real_revamp_id = existing["revamp_id"] if existing and existing["revamp_id"] not in (None, "") else None
+
+        payload = (
+            real_revamp_id,
+            file_name,
+            values.get("Original_File_Name"),
+            values.get("Location"),
+            values.get("Folder"),
+            values.get("Caption"),
+            values.get("alt_text"),
+            values.get("Keywords"),
+            values.get("Caption"),
+            values.get("alt_text"),
+            values.get("Keywords"),
+            quality_status,
+            100 if accepted else 0,
+            "manual_editor_update",
+            "manual_editor",
+            0,
+            0,
+            "manual_editor",
+            accepted,
+            accepted,
+            accepted,
+            accepted,
+            1 if re.search(r"_(\d{3})\.", file_name, flags=re.IGNORECASE) else 0,
+            file_name,
+            values.get("Subject"),
+            values.get("Subject"),
+            values.get("subject_seed") or values.get("Subject"),
+            values.get("subject_seed_mode") or "manual",
+            values.get("subject_seed_confidence"),
+            values.get("subject_seed_reason") or "manual_editor_update",
+            decision,
+            status,
+        )
+
+        if existing:
+            mq_conn.execute(
+                """
+                UPDATE metadata_quality
+                SET
+                    revamp_id=?,
+                    revamp_File_Name=?,
+                    revamp_Original_File_Name=?,
+                    revamp_Location=?,
+                    revamp_Folder=?,
+                    current_caption=?,
+                    current_alt_text=?,
+                    current_keywords=?,
+                    upload_caption=?,
+                    upload_alt_text=?,
+                    upload_keywords=?,
+                    overall_quality_status=?,
+                    overall_quality_score=?,
+                    overall_quality_issues=?,
+                    generation_mode=?,
+                    repair_attempts=?,
+                    fallback_used=?,
+                    fallback_reason=?,
+                    accepted_for_upload=?,
+                    caption_accepted_for_upload=?,
+                    alt_text_accepted_for_upload=?,
+                    keywords_accepted_for_upload=?,
+                    part_of_serie=?,
+                    unique_name=?,
+                    ai_suggested_subject=?,
+                    final_subject=?,
+                    subject_seed=?,
+                    subject_seed_mode=?,
+                    subject_seed_confidence=?,
+                    subject_seed_reason=?,
+                    manual_decision=?,
+                    source_review_status=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (*payload, int(existing["id"])),
+            )
+        else:
+            mq_conn.execute(
+                """
+                INSERT INTO metadata_quality (
+                    revamp_id,
+                    revamp_File_Name,
+                    revamp_Original_File_Name,
+                    revamp_Location,
+                    revamp_Folder,
+                    current_caption,
+                    current_alt_text,
+                    current_keywords,
+                    upload_caption,
+                    upload_alt_text,
+                    upload_keywords,
+                    overall_quality_status,
+                    overall_quality_score,
+                    overall_quality_issues,
+                    generation_mode,
+                    repair_attempts,
+                    fallback_used,
+                    fallback_reason,
+                    accepted_for_upload,
+                    caption_accepted_for_upload,
+                    alt_text_accepted_for_upload,
+                    keywords_accepted_for_upload,
+                    part_of_serie,
+                    unique_name,
+                    ai_suggested_subject,
+                    final_subject,
+                    subject_seed,
+                    subject_seed_mode,
+                    subject_seed_confidence,
+                    subject_seed_reason,
+                    manual_decision,
+                    source_review_status,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                payload,
+            )
+
+        mq_conn.commit()
+
+
+def _move_to_rejected(src_path: str) -> str:
+    os.makedirs(REJECTED_FOLDER, exist_ok=True)
+    dest_path = os.path.join(REJECTED_FOLDER, os.path.basename(src_path))
+    if os.path.exists(dest_path):
+        raise FileExistsError(f"Rejected destination already exists: {dest_path}")
+    shutil.move(src_path, dest_path)
+    return dest_path
+
+
+def _local_site_path_from_public_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw or not PUBLIC_URL_BASE or not LOCAL_BASE:
+        return ""
+    base = str(PUBLIC_URL_BASE).rstrip("/")
+    if not raw.startswith(base + "/"):
+        return ""
+    rel = raw[len(base) + 1 :].replace("/", os.sep)
+    return os.path.join(LOCAL_BASE, rel)
+
+
+def _review_filename_variants(value: str) -> list[str]:
+    raw = "".join(str(value or "").strip().split())
+    if not raw:
+        return []
+
+    name = os.path.basename(raw)
+    variants: list[str] = []
+
+    def add(item: str) -> None:
+        item = str(item or "").strip()
+        if item and item not in variants:
+            variants.append(item)
+
+    add(name)
+
+    prefixed = re.match(r"^\d+_(.+)\.(jpe?g)$", name, flags=re.IGNORECASE)
+    if prefixed:
+        name = prefixed.group(1) + "." + prefixed.group(2)
+        add(name)
+
+    stem, ext = os.path.splitext(name)
+    if stem and ext.lower() in {".jpg", ".jpeg"}:
+        add(stem + ".JPG")
+        add(stem + ".JPEG")
+        add(stem + ".jpg")
+        add(stem + ".jpeg")
+
+    return variants
+
+
+def _candidate_review_source_paths(img: dict, values: dict | None = None, include_ollama: bool = False) -> list[str]:
+    values = values or {}
+    names = []
+    for container in (values, img):
+        for key in ("Original_File_Name", "File_Name"):
+            for val in _review_filename_variants(container.get(key)):
+                if val and val not in names:
+                    names.append(val)
+
+        direct_path = str(container.get("Path") or "").strip()
+        for val in _review_filename_variants(direct_path):
+            if val and val not in names:
+                names.append(val)
+
+        if include_ollama:
+            ollama_path = str(container.get("ollama_path") or "").strip()
+            for val in _review_filename_variants(ollama_path):
+                if val and val not in names:
+                    names.append(val)
+
+    candidates: list[str] = []
+    for name in names:
+        for root in (BASE_PICK_DIR, STAGED_DIR, INCOMING_DIR):
+            cand = os.path.join(root, name)
+            if cand not in candidates:
+                candidates.append(cand)
+
+    for container in (values, img):
+        direct_path = str(container.get("Path") or "").strip()
+        if direct_path:
+            local_from_url = _local_site_path_from_public_url(direct_path)
+            for cand in (direct_path, local_from_url):
+                if cand and cand not in candidates:
+                    candidates.append(cand)
+
+        if include_ollama:
+            ollama_path = str(container.get("ollama_path") or "").strip()
+            if ollama_path and ollama_path not in candidates:
+                candidates.append(ollama_path)
+
+    return candidates
+
+
+def _resolve_reject_source_path(img: dict) -> str:
+    for cand in _candidate_review_source_paths(img):
+        if os.path.exists(cand):
+            return cand
+    return ""
 
 def log_manual_edit(
     image_id, file_name,
@@ -413,10 +810,19 @@ class ReviewApp:
         self.conn = sqlite3.connect(DB_PATH)
         self.cur  = self.conn.cursor()
 
+        self._publish_lock = threading.Lock()
+        self.publish_queue: list[dict] = []
+        self._load_publish_queue()
+
         self.images = self.get_images_to_review()   # list[dict]
         self.idx = 0
-        self.field_vars: dict[str, StringVar] = {}
+        self.field_vars: dict[str, StringVar] = {"QC_Status": StringVar(value="")}
         self.text_widgets: dict[str, Text] = {}
+        self.display_labels: dict[str, Label] = {}
+        self.entry_widgets: dict[str, Entry] = {}
+        self.metadata_warning_var = StringVar(value="")
+        self._generate_running = False
+        self.display_widgets: dict[str, Text] = {}
         self._text_spell_after_ids: dict[str, str] = {}
         self._text_spell_hits: dict[str, list[dict]] = {}
         self._spellcheck_ok_cached: bool | None = None
@@ -427,8 +833,6 @@ class ReviewApp:
         self._autoscan_spell_on_load = os.getenv(
             "AMIR_AUTOSPELLCHECK_ON_LOAD", "0"
         ).strip().lower() in ("1", "true", "yes", "on")
-        self._publish_lock = threading.Lock()
-        self.publish_queue: list[dict] = []
         self._publish_thread: threading.Thread | None = None
         self._publish_running = False
         self._publish_last_result: dict | None = None
@@ -441,7 +845,6 @@ class ReviewApp:
             "last": "",
         }
         self.publish_status_var = StringVar(value="Publish queue: 0 pending")
-        self._load_publish_queue()
 
         self.build_layout()
         self._refresh_publish_status()
@@ -501,6 +904,13 @@ class ReviewApp:
                 self.master.geometry(f"{cw}x{ch}+{nx}+{ny}")
         except Exception:
             pass
+        try:
+            self.master.state("zoomed")
+        except Exception:
+            try:
+                self.master.attributes("-zoomed", True)
+            except Exception:
+                pass
 
     def _save_ui_state(self):
         try:
@@ -668,6 +1078,17 @@ class ReviewApp:
         with self._publish_lock:
             return [dict(x) for x in self.publish_queue if str(x.get("state") or "").lower() != "uploaded"]
 
+    def _pending_publish_row_ids(self) -> set[int]:
+        out: set[int] = set()
+        for item in self._pending_publish_items():
+            try:
+                row_id = int(item.get("row_id") or 0)
+            except Exception:
+                row_id = 0
+            if row_id > 0:
+                out.add(row_id)
+        return out
+
     def _has_pending_publish_items(self) -> bool:
         return bool(self._pending_publish_items())
 
@@ -712,6 +1133,31 @@ class ReviewApp:
                 )
         self._save_publish_queue()
         self._refresh_publish_status()
+
+    def _remove_publish_item_for_row(self, row_id: int) -> int:
+        try:
+            target = int(row_id)
+        except Exception:
+            return 0
+        removed = 0
+        with self._publish_lock:
+            kept = []
+            for item in self.publish_queue:
+                try:
+                    rid = int(item.get("row_id") or 0)
+                except Exception:
+                    rid = 0
+                state = str(item.get("state") or "").lower()
+                if rid == target and state != "uploaded":
+                    removed += 1
+                    continue
+                kept.append(item)
+            if removed:
+                self.publish_queue = kept
+        if removed:
+            self._save_publish_queue()
+            self._refresh_publish_status()
+        return removed
 
     def _refresh_publish_status(self):
         with self._publish_lock:
@@ -780,12 +1226,17 @@ class ReviewApp:
         try:
             if getattr(sys, "frozen", False):
                 import runpy
+                import contextlib
+                import io
+                buf = io.StringIO()
                 try:
-                    runpy.run_path(resource_path("db_uploader.py"), run_name="__main__")
-                    return 0, "Uploader finished."
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        runpy.run_path(resource_path("db_uploader.py"), run_name="__main__")
+                    return 0, (buf.getvalue() or "Uploader finished.").strip()
                 except SystemExit as se:
                     code = int(se.code) if se.code is not None else 0
-                    return code, f"Uploader exit {code}"
+                    out = (buf.getvalue() or "").strip()
+                    return code, out or f"Uploader exit {code}"
             res = subprocess.run(
                 [sys.executable, resource_path("db_uploader.py")],
                 capture_output=True,
@@ -811,11 +1262,28 @@ class ReviewApp:
         if row_id <= 0:
             return False, "missing row_id"
 
+        qcur.execute(f"SELECT * FROM {TABLE_NAME} WHERE id=?", (row_id,))
+        fresh = qcur.fetchone()
+        if not fresh:
+            # Stale publish_queue item. The row was already uploaded/removed, so
+            # do not create another local file from old queue data.
+            return True, ""
+        fresh_cols = [d[0] for d in (qcur.description or [])]
+        fresh_values = dict(zip(fresh_cols, fresh))
+        if str(fresh_values.get("Review_Status") or "").lower() != "approved":
+            return False, f"row_id={row_id} is not approved"
+        merged_original = dict(original_img)
+        if not merged_original.get("Path"):
+            merged_original["Path"] = fresh_values.get("Path", "")
+        if not merged_original.get("File_Name"):
+            merged_original["File_Name"] = fresh_values.get("File_Name", "")
+        values = {**values, **fresh_values}
+
         folder = str(values.get("Folder") or original_img.get("Folder") or "").strip()
         year = str(values.get("DateTime") or original_img.get("DateTime") or "")[:4] or "unknown"
         newname = clean_filename(values.get("File_Name") or original_img.get("File_Name") or "")
-        oldname = clean_filename(original_img.get("File_Name") or "")
-        orig = str(original_img.get("Path") or values.get("Path") or "").strip()
+        oldname = clean_filename(merged_original.get("File_Name") or values.get("File_Name") or "")
+        orig = str(merged_original.get("Path") or values.get("Path") or "").strip()
         if not folder or not newname:
             return False, "missing folder or filename"
 
@@ -854,20 +1322,56 @@ class ReviewApp:
             if not fixed:
                 return False, f"destination collision unresolved for {newname}"
 
-        if os.path.exists(orig):
+        source_path = orig if os.path.exists(orig) else web_path if os.path.exists(web_path) else ""
+        if not source_path:
+            return False, f"source missing and web not found: {orig}"
+
+        tmp_dir = tempfile.mkdtemp(prefix=".publish_tmp_", dir=web_dir)
+        tmp_web = os.path.join(tmp_dir, newname)
+        tmp_thumb = os.path.join(tmp_dir, "thumb_" + newname)
+        tmp_desk = os.path.join(tmp_dir, "desk_" + newname)
+        created_final_paths: list[str] = []
+        try:
+            # Watermark into temp files first. The original/incoming file is not
+            # consumed until the final web, thumb, and desktop outputs exist.
+            ok = resize_and_watermark(source_path, tmp_web, tmp_thumb, tmp_desk, WATERMARK_TEXT, FONT_PATH)
+            if not ok:
+                return False, f"resize/watermark failed for {newname}"
+            for required in (tmp_web, tmp_thumb, tmp_desk):
+                if not os.path.exists(required):
+                    return False, f"resize/watermark output missing for {newname}"
+
+            for src_tmp, dst_final in (
+                (tmp_web, web_path),
+                (tmp_thumb, thumb_path),
+                (tmp_desk, desk_path),
+            ):
+                existed_before = os.path.exists(dst_final)
+                os.replace(src_tmp, dst_final)
+                if not existed_before:
+                    created_final_paths.append(dst_final)
+
             try:
-                if not os.path.exists(arch_path):
+                if os.path.exists(orig) and not os.path.exists(arch_path):
                     shutil.copy2(orig, arch_path)
             except Exception:
                 pass
-            if os.path.abspath(orig) != os.path.abspath(web_path):
-                shutil.move(orig, web_path)
-        elif not os.path.exists(web_path):
-            return False, f"source missing and web not found: {orig}"
 
-        ok = resize_and_watermark(web_path, web_path, thumb_path, desk_path, WATERMARK_TEXT, FONT_PATH)
-        if not ok:
-            return False, f"resize/watermark failed for {newname}"
+            if os.path.exists(orig) and os.path.abspath(orig) != os.path.abspath(web_path):
+                try:
+                    os.remove(orig)
+                except Exception:
+                    pass
+        except Exception as ex:
+            for path in created_final_paths:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
+            return False, f"resize/watermark failed for {newname}: {ex}"
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
         with Image.open(web_path) as im:
             width, height = im.size
@@ -879,6 +1383,38 @@ class ReviewApp:
             f"UPDATE {TABLE_NAME} SET File_Name=?, Width=?, Height=?, Path=?, Thumb_Path=?, Review_Status=? WHERE id=?",
             (newname, width, height, path_url, thumb_url, "Approved", row_id),
         )
+        try:
+            qcur.execute(
+                """
+                UPDATE metadata_quality
+                SET revamp_File_Name=?,
+                    current_caption=?,
+                    current_alt_text=?,
+                    current_keywords=?,
+                    upload_caption=?,
+                    upload_alt_text=?,
+                    upload_keywords=?,
+                    upload_status=NULL,
+                    upload_public_path=NULL,
+                    uploaded_to_mysql=0,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE revamp_File_Name=?
+                   OR revamp_Original_File_Name=?
+                """,
+                (
+                    newname,
+                    values.get("Caption") or "",
+                    values.get("alt_text") or "",
+                    values.get("Keywords") or "",
+                    values.get("Caption") or "",
+                    values.get("alt_text") or "",
+                    values.get("Keywords") or "",
+                    oldname,
+                    values.get("Original_File_Name") or merged_original.get("Original_File_Name") or "",
+                ),
+            )
+        except Exception:
+            pass
         qconn.commit()
 
         if oldname:
@@ -939,7 +1475,12 @@ class ReviewApp:
             rc, out = self._run_db_uploader_worker()
             result["uploader_rc"] = int(rc)
             if rc != 0:
-                result["errors"].append((out or "")[-1600:])
+                remote_msg = (out or "Remote upload failed.").strip()[-1600:]
+                result["errors"].append(
+                    "Remote upload failed after local publish. "
+                    "Local watermarked files and local review DB state were kept for retry.\n"
+                    + remote_msg
+                )
 
             # Reconcile uploaded state: db_uploader deletes uploaded rows from review_queue.
             qcur.execute(f"SELECT id FROM {TABLE_NAME}")
@@ -954,6 +1495,8 @@ class ReviewApp:
                         it["updated_at"] = datetime.now().isoformat(timespec="seconds")
                         it["last_error"] = ""
                         result["uploaded"] += 1
+                    elif rc != 0:
+                        it["last_error"] = "Remote upload failed after local publish; local files are ready for retry."
                 self._publish_progress["uploaded"] = result["uploaded"]
                 self._publish_progress["failed"] = result["failed"]
                 self._publish_progress["phase"] = "done"
@@ -1022,21 +1565,18 @@ class ReviewApp:
         except Exception:
             pass
 
+    def _fixed_metadata_text_height(self, field_name: str) -> int:
+        return {
+            "Keywords": 4,
+            "Caption": 3,
+            "alt_text": 3,
+        }.get(field_name, 2)
+
     def _fit_text_height(self, field_name: str):
         w = self.text_widgets.get(field_name)
         if not w:
             return
-        min_lines = 3 if field_name == "Keywords" else 2
-        max_lines = 8 if field_name == "Keywords" else 6
-        try:
-            disp = int(w.count("1.0", "end-1c", "displaylines")[0])
-        except Exception:
-            try:
-                txt = w.get("1.0", "end-1c")
-                disp = max(1, txt.count("\n") + 1)
-            except Exception:
-                disp = min_lines
-        target = max(min_lines, min(max_lines, disp + 1))
+        target = self._fixed_metadata_text_height(field_name)
         try:
             if int(w.cget("height")) != target:
                 w.configure(height=target)
@@ -1210,12 +1750,62 @@ class ReviewApp:
 
 
     def get_images_to_review(self) -> list[dict]:
-        self.cur.execute(f"""
-            SELECT *
-            FROM {TABLE_NAME}
-            WHERE COALESCE(Review_Status,'Queued') = 'Pending'
-            ORDER BY id DESC
-        """)
+        pending_publish_ids = sorted(self._pending_publish_row_ids())
+        approved_clause_rq = ""
+        approved_clause_plain = ""
+        params: list[int] = []
+        if pending_publish_ids:
+            placeholders = ",".join("?" for _ in pending_publish_ids)
+            approved_clause_rq = (
+                f"\n                    OR (COALESCE(rq.Review_Status,'Queued') = 'Approved' "
+                f"AND rq.id IN ({placeholders}))"
+            )
+            approved_clause_plain = (
+                f"\n                    OR (COALESCE(Review_Status,'Queued') = 'Approved' "
+                f"AND id IN ({placeholders}))"
+            )
+            params = pending_publish_ids
+        try:
+            self.cur.execute(f"""
+                SELECT
+                    rq.*,
+                    mq.overall_quality_status AS _metadata_quality_status,
+                    mq.overall_quality_issues AS _metadata_quality_issues
+                FROM {TABLE_NAME} rq
+                LEFT JOIN metadata_quality mq
+                    ON mq.revamp_File_Name = rq.File_Name
+                WHERE COALESCE(rq.Review_Status,'Queued') IN (
+                    'Pending',
+                    'Metadata_Needs_Work',
+                    'FAIL_BLOCKED'
+                )
+                {approved_clause_rq}
+                ORDER BY
+                    CASE
+                        WHEN COALESCE(rq.Review_Status,'Queued') IN ('Metadata_Needs_Work','FAIL_BLOCKED') THEN 0
+                        WHEN COALESCE(rq.Review_Status,'Queued') = 'Approved' THEN 1
+                        ELSE 1
+                    END,
+                    rq.id DESC
+            """, params)
+        except sqlite3.OperationalError:
+            self.cur.execute(f"""
+                SELECT *
+                FROM {TABLE_NAME}
+                WHERE COALESCE(Review_Status,'Queued') IN (
+                    'Pending',
+                    'Metadata_Needs_Work',
+                    'FAIL_BLOCKED'
+                )
+                {approved_clause_plain}
+                ORDER BY
+                    CASE
+                        WHEN COALESCE(Review_Status,'Queued') IN ('Metadata_Needs_Work','FAIL_BLOCKED') THEN 0
+                        WHEN COALESCE(Review_Status,'Queued') = 'Approved' THEN 1
+                        ELSE 1
+                    END,
+                    id DESC
+            """, params)
         cols = [c[0] for c in self.cur.description]
         return [dict(zip(cols, row)) for row in self.cur.fetchall()]
 
@@ -1264,151 +1854,305 @@ class ReviewApp:
     def _on_qr_wheel_down(self, _event):
         self._set_qr(self._get_qr() - 0.01); return "break"
 
+    def _schedule_preview_refresh(self, _event=None):
+        old = getattr(self, "_preview_after_id", None)
+        if old:
+            try:
+                self.master.after_cancel(old)
+            except Exception:
+                pass
+        self._preview_after_id = self.master.after(80, self._refresh_preview_image)
 
+    def _refresh_preview_image(self):
+        self._preview_after_id = None
+        display_path = getattr(self, "_current_display_path", None)
 
+        if not display_path or not os.path.exists(display_path):
+            self.image_label.configure(image="", text="Image not found")
+            self.image_label.image = None
+            return
 
+        try:
+            self.master.update_idletasks()
+
+            frame_w = max(200, int(self.preview_frame.winfo_width()))
+            frame_h = max(200, int(self.preview_frame.winfo_height()))
+
+            max_w = max(200, frame_w - 20)
+            max_h = max(200, frame_h - 20)
+
+            with Image.open(display_path) as im:
+                im.thumbnail((max_w, max_h))
+                preview = im.copy()
+
+            tkimg = ImageTk.PhotoImage(preview)
+            self.image_label.configure(image=tkimg, text="")
+            self.image_label.image = tkimg
+        except Exception:
+            self.image_label.configure(image="", text="Image not found")
+            self.image_label.image = None
+
+    def _list_installed_ollama_models(self) -> list[str]:
+        try:
+            res = subprocess.run(
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if res.returncode != 0:
+                return []
+            lines = [x.strip() for x in (res.stdout or "").splitlines() if x.strip()]
+            out = []
+            for line in lines[1:]:
+                parts = line.split()
+                if parts:
+                    out.append(parts[0].strip())
+            return out
+        except Exception:
+            return []
+
+    def _ensure_ollama_running(self) -> bool:
+        if self._list_installed_ollama_models():
+            return True
+
+        try:
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+
+        for _ in range(20):
+            time.sleep(1)
+            if self._list_installed_ollama_models():
+                return True
+        return False
+
+    def _pick_best_caption_model(self) -> tuple[str, str]:
+        installed = self._list_installed_ollama_models()
+
+        configured_primary = str(CAPTION_MODEL or "qwen2.5vl:3b").strip()
+        configured_fallback = str(CAPTION_MODEL_FALLBACK or "").strip()
+        primary = configured_primary
+        fallback = ""
+
+        for candidate in (configured_primary, "qwen2.5vl:3b", "qwen2.5vl:7b"):
+            if candidate and candidate in installed:
+                primary = candidate
+                break
+
+        if configured_fallback and configured_fallback != primary and configured_fallback in installed:
+            fallback = configured_fallback
+
+        return primary, fallback
+
+    def _get_series_context(self, crl, folder: str, subject: str, file_name: str, img: dict | None = None) -> tuple[str, int, int, str]:
+        current_row = img or self.images[self.idx]
+
+        def _row_text(row: dict, key: str) -> str:
+            try:
+                return str(row.get(key) or "").strip()
+            except Exception:
+                return ""
+
+        def _row_int(row: dict, key: str, default: int = 0) -> int:
+            try:
+                value = row.get(key)
+                if value is None or str(value).strip() == "":
+                    return int(default)
+                return int(float(value))
+            except Exception:
+                return int(default)
+
+        try:
+            target_series_key, _ = crl._detect_series_key(folder, subject, file_name)
+        except Exception:
+            target_series_key = f"{folder}|{subject}|{file_name}"
+        target_series_key = _row_text(current_row, "series_key") or target_series_key
+
+        matches: list[dict] = []
+        current_id = int(current_row.get("id") or 0)
+
+        for row in self.images:
+            row_folder = str(row.get("Folder") or "").strip()
+            row_subject = str(row.get("Subject") or "").strip()
+            row_file_name = str(row.get("File_Name") or "").strip()
+
+            try:
+                row_series_key, _ = crl._detect_series_key(row_folder, row_subject, row_file_name)
+            except Exception:
+                row_series_key = f"{row_folder}|{row_subject}|{row_file_name}"
+            row_series_key = _row_text(row, "series_key") or row_series_key
+
+            if row_series_key == target_series_key:
+                matches.append(row)
+
+        matches.sort(key=lambda r: int(r.get("id") or 0))
+
+        sequence_no = _row_int(current_row, "series_position", 0)
+        for i, row in enumerate(matches, start=1):
+            if int(row.get("id") or 0) == current_id:
+                sequence_no = sequence_no or i
+                break
+
+        series_size = _row_int(current_row, "series_count", 0) or len(matches)
+        visual_variant = _row_text(current_row, "visual_variant")
+
+        return target_series_key, max(1, sequence_no), max(1, series_size), visual_variant
 
     def build_layout(self):
         try:
             self.master.grid_rowconfigure(0, weight=1)
-            # Keep preview area at its natural width and let the metadata pane
-            # absorb extra window width, so the main image area stays in place.
-            self.master.grid_columnconfigure(0, weight=0)
+            self.master.grid_columnconfigure(0, weight=1)
             self.master.grid_columnconfigure(1, weight=1)
         except Exception:
             pass
 
-        self.left_frame  = Frame(self.master)
+        self.left_frame = Frame(self.master)
         self.right_frame = Frame(self.master)
-        self.left_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nw")
+
+        self.left_frame.grid(row=0, column=0, padx=8, pady=8, sticky="nsew")
         self.right_frame.grid(row=0, column=1, padx=8, pady=8, sticky="nsew")
+
+        try:
+            self.right_frame.grid_columnconfigure(0, weight=0)
+            self.right_frame.grid_columnconfigure(1, weight=1)
+        except Exception:
+            pass
 
         self.image_progress_var = StringVar(value=f"Image 0/{max(1, len(self.images))}")
         self.image_progress_label = Label(
             self.left_frame,
             textvariable=self.image_progress_var,
             font=("Arial", 10, "bold"),
-            anchor="e",
-            justify="right",
+            anchor="center",
+            justify="center",
         )
+        self.image_progress_label.pack(fill="x", pady=(2, 4))
 
-        # image preview + QR guide
-        # Fixed-size preview area so the UI never shifts between landscape/portrait
-        self.preview_frame = Frame(self.left_frame, width=620, height=620)
-        self.preview_frame.pack_propagate(False)
-        self.preview_frame.pack()
+        self.preview_frame = Frame(self.left_frame)
+        self.preview_frame.pack(fill="both", expand=True)
+        self.preview_frame.bind("<Configure>", self._schedule_preview_refresh)
 
         self.image_label = Label(self.preview_frame)
         self.image_label.place(relx=0.5, rely=0.5, anchor="center")
 
-        # wheel over the image also tweaks QR
-        self.image_label.bind("<MouseWheel>", self._on_qr_wheel)   # Win/mac
-        self.image_label.bind("<Button-4>",  self._on_qr_wheel_up) # Linux up
-        self.image_label.bind("<Button-5>",  self._on_qr_wheel_down) # Linux down
+        self.image_label.bind("<MouseWheel>", self._on_qr_wheel)
+        self.image_label.bind("<Button-4>", self._on_qr_wheel_up)
+        self.image_label.bind("<Button-5>", self._on_qr_wheel_down)
 
-        qr = Text(self.left_frame, height=13, width=56, wrap='word', fg='#144', font=('Arial', 9))
-        qr.insert(END, QR_EXPLANATION)
-        qr.config(state=DISABLED)
-        qr.pack(pady=(10, 0))
-        # Place image counter near the lower-right of the left pane (per requested spot).
-        self.image_progress_label.pack(fill="x", pady=(6, 0), padx=(0, 6))
+        self.bottom_info_row = Frame(self.left_frame)
+        self.bottom_info_row.pack(fill="x", pady=(8, 0))
 
-        labels = [
-            'id', 'Folder', 'File_Name', 'Path', 'Thumb_Path', 'DateTime',
-            'Camera', 'Lens_model', 'Width', 'Height', 'Exposure', 'Aperture',
-            'ISO', 'Focal_length', 'Keywords', 'Caption', 'alt_text', 'Location',
-            'Subject', 'nima_score', 'blur_score', 'brightness_score', 'contrast_score',
-            'brisque_score', 'clip_aesthetic_score', 'QR', 'QC_Status',
-            'Review_Status', 'Original_File_Name'
+        self.qr_guide = Text(
+            self.bottom_info_row,
+            height=8,
+            width=42,
+            wrap="word",
+            fg="#144",
+            font=("Arial", 9),
+            bd=1,
+            relief="solid",
+        )
+        self.qr_guide.insert(END, QR_EXPLANATION)
+        self.qr_guide.config(state=DISABLED)
+        self.qr_guide.grid(row=0, column=0, sticky="nw")
+
+        self.score_frame = Frame(self.bottom_info_row)
+        self.score_frame.grid(row=0, column=1, sticky="nw", padx=(10, 0))
+
+        self.score_vars = {}
+        score_labels = [
+            ("nima_score", "nima_score"),
+            ("blur_score", "blur_score"),
+            ("brightness_score", "brightness_score"),
+            ("contrast_score", "contrast_score"),
+            ("brisque_score", "brisque_score"),
+            ("clip_aesthetic_score", "clip_aesthetic_score"),
+            ("QR", "QR"),
         ]
-        for i, label in enumerate(labels):
-            # Hide QC_Status: keep a variable but render no widgets
-            if label == "QC_Status":
-                v = StringVar()
-                self.field_vars[label] = v
-                continue
-            Label(self.right_frame, text=label).grid(row=i, column=0, sticky='e')
 
-            if label in ('Keywords', 'Caption', 'alt_text'):
-                # Wider than regular entries (so no scrolling for common edits),
-                # but still capped so the fields do not consume the full pane.
-                if label == 'Keywords':
-                    t_height = 3
-                    t_width = 64
-                else:
-                    t_height = 2
-                    t_width = 64
-                t = Text(self.right_frame, height=t_height, width=t_width, wrap='word')
-                # Keep a capped width; do not stretch across the whole right pane.
-                t.grid(row=i, column=1, sticky='w', pady=(1, 1))
-                try:
-                    t.tag_configure("spell_miss", underline=1, foreground="#b00020")
-                except Exception:
-                    pass
-                t.bind("<KeyRelease>", lambda e, k=label: self._schedule_text_spellcheck(k), add="+")
-                t.bind("<<Paste>>", lambda e, k=label: self._schedule_text_spellcheck(k), add="+")
-                t.bind("<Button-3>", lambda e, k=label: self._text_spell_context_menu(e, k), add="+")
-                self.text_widgets[label] = t
-            else:
-                v = StringVar()
-                e = Entry(self.right_frame, textvariable=v, width=60)
-                e.grid(row=i, column=1, sticky='w')
-                self.field_vars[label] = v
-                locked = {
-                    'id', 'Path', 'Thumb_Path', 'Original_File_Name',
-                    'DateTime', 'Camera', 'Lens_model',
-                    'Width', 'Height', 'Exposure', 'Aperture', 'ISO', 'Focal_length',
-                    'nima_score', 'blur_score', 'brightness_score', 'contrast_score',
-                    'brisque_score', 'clip_aesthetic_score'
-                }
-                if label in locked:
-                    e.config(state='readonly')
+        for i, (field_name, label_text) in enumerate(score_labels):
+            Label(
+                self.score_frame,
+                text=label_text,
+                anchor="e",
+                justify="right",
+                width=18,
+            ).grid(row=i, column=0, sticky="e", padx=(0, 6), pady=(0, 2))
 
+            v = StringVar()
+            self.field_vars[field_name] = v
+            self.score_vars[field_name] = v
 
-                if label == 'QR':
-                    self.qr_entry = e
-                    # Windows / macOS
-                    self.qr_entry.bind("<MouseWheel>", self._on_qr_wheel)
-                    # Linux
-                    self.qr_entry.bind("<Button-4>",  self._on_qr_wheel_up)
-                    self.qr_entry.bind("<Button-5>",  self._on_qr_wheel_down)
-                            # Place a horizontal slider right under the QR entry
-                    self.qr_row = i  # remember where QR lives to place slider on next row
+            e = Entry(self.score_frame, textvariable=v, width=12)
+            e.grid(row=i, column=1, sticky="w", pady=(0, 2))
 
-        # Let the action row use real pane width; fields stay capped because their widgets
-        # use a fixed width and do not stretch east-west.
-        self.right_frame.grid_columnconfigure(1, weight=0)
-        self.right_frame.grid_columnconfigure(0, weight=0)
+            if field_name in {
+                "nima_score",
+                "blur_score",
+                "brightness_score",
+                "contrast_score",
+                "brisque_score",
+                "clip_aesthetic_score",
+            }:
+                e.config(state="readonly")
 
-        # Primary actions (Generate / Approve) aligned to the metadata region,
-        # with a stable, visible spacing.
-        self.primary_action_bar = Frame(self.right_frame)
-        self.primary_action_bar.grid(row=99, column=1, sticky="w", pady=(10, 8))
-        self.btn_generate = Button(
-            self.primary_action_bar,
-            text="Generate",
-            width=14,
-            height=2,
-            command=lambda: self._run_ui_action("generate", self.regenerate_current),
+            if field_name == "QR":
+                self.qr_entry = e
+                self.qr_entry.bind("<MouseWheel>", self._on_qr_wheel)
+                self.qr_entry.bind("<Button-4>", self._on_qr_wheel_up)
+                self.qr_entry.bind("<Button-5>", self._on_qr_wheel_down)
+
+        self.qr_scale = ttk.Scale(
+            self.score_frame,
+            from_=1.0,
+            to=10.0,
+            orient="horizontal",
+            length=180,
+            command=lambda v: None if self._qr_updating else self._set_qr(float(v)),
         )
-        self.btn_generate.grid(row=0, column=0, sticky="w")
-        Frame(self.primary_action_bar, width=160).grid(row=0, column=1)
-        self.btn_approve = Button(
-            self.primary_action_bar,
-            text="Approve",
-            width=14,
-            height=2,
-            command=lambda: self._run_ui_action("approve", self.approve),
-        )
-        self.btn_approve.grid(row=0, column=2, sticky="w")
+        self.qr_scale.grid(row=len(score_labels), column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        # Secondary actions stay together below.
-        self.button_bar = Frame(self.right_frame)
-        self.button_bar.grid(row=100, column=1, sticky="w", pady=(0, 2))
-        self._review_action_buttons = [self.btn_generate, self.btn_approve]
+        self.left_actions_frame = Frame(self.left_frame)
+        self.left_actions_frame.pack(fill="x", pady=(8, 0))
+
+        self.button_bar = Frame(self.left_actions_frame)
+        self.button_bar.pack(anchor="w", pady=(0, 4))
+
+        self.publish_control_bar = Frame(self.left_actions_frame)
+        self.publish_control_bar.pack(anchor="w", pady=(0, 4))
+
+        self.publish_status_label = Label(
+            self.left_actions_frame,
+            textvariable=self.publish_status_var,
+            anchor="w",
+            justify="left",
+            fg="#245",
+        )
+        self.publish_status_label.pack(fill="x", pady=(0, 0))
+
+        self.metadata_warning_label = Label(
+            self.left_actions_frame,
+            textvariable=self.metadata_warning_var,
+            anchor="w",
+            justify="left",
+            fg="#b00020",
+            font=("Arial", 9, "bold"),
+            wraplength=620,
+        )
+        self.metadata_warning_label.pack(fill="x", pady=(4, 0))
+
+        self._review_action_buttons = []
+
         for i, (key, txt, cmd, action_name) in enumerate([
             ("back", "Back", self.back, "back"),
-            ("reject", "Reject", self.reject, "reject"),
             ("pending", "Pending", self.pending, "pending"),
             ("publish", "Publish", self.publish, "publish"),
         ]):
@@ -1421,112 +2165,242 @@ class ReviewApp:
             self._review_action_buttons.append(b)
             b.grid(row=0, column=i, padx=(0, 6))
 
-        self.publish_control_bar = Frame(self.right_frame)
-        self.publish_control_bar.grid(row=101, column=1, sticky="w", pady=(2, 4))
         Button(
             self.publish_control_bar,
             text="Resume Publish",
             command=lambda: self._run_ui_action("resume_publish", self._start_publish_worker),
         ).grid(row=0, column=0, padx=(0, 6))
+
         Button(
             self.publish_control_bar,
             text="Recover Actual",
             command=lambda: self._run_ui_action("recover_actual", self._run_recovery_from_revamp),
         ).grid(row=0, column=1, padx=(0, 6))
 
-        Label(
-            self.right_frame,
-            textvariable=self.publish_status_var,
-            anchor="w",
-            justify="left",
-            fg="#245",
-        ).grid(row=102, column=1, sticky="w", pady=(2, 4))
+        main_labels = [
+            'id', 'Folder', 'File_Name', 'Path', 'Thumb_Path', 'DateTime',
+            'Camera', 'Lens_model', 'Width', 'Height', 'Exposure', 'Aperture',
+            'ISO', 'Focal_length', 'Keywords', 'Caption', 'alt_text', 'Location',
+            'Subject', 'Review_Status', 'Original_File_Name'
+        ]
 
-        # ---- QR slider under the QR row (recursion-safe) ----
-        try:
-            r = getattr(self, "qr_row", None)
-            if r is not None:
-                def _on_qr_scale(v: str):
-                    # ignore callbacks triggered by our own programmatic .set()
-                    if self._qr_updating:
-                        return
-                    self._set_qr(float(v))
+        entry_width = 36
+        text_width = 46
 
-                self.qr_scale = ttk.Scale(
+        for i, label in enumerate(main_labels):
+            Label(
+                self.right_frame,
+                text=label,
+            ).grid(row=i, column=0, sticky="e", padx=(0, 6), pady=(0, 2))
+
+            if label == "File_Name":
+                w = Label(
                     self.right_frame,
-                    from_=1.0, to=10.0, orient='horizontal', length=380,
-                    command=_on_qr_scale
+                    text="",
+                    anchor="w",
+                    justify="left",
+                    bg="white",
+                    relief="sunken",
+                    bd=1,
+                    wraplength=520,
                 )
-                # initial value (matches the entry; two decimals supported)
-                self._qr_updating = True
-                try:
-                    init = float(self.field_vars.get('QR', StringVar(value="6.50")).get() or 6.50)
-                    self.qr_scale.set(init)
-                finally:
-                    self._qr_updating = False
+                w.grid(row=i, column=1, sticky="ew", pady=(0, 2))
+                self.display_labels[label] = w
 
-                # put it right under the QR entry
-                self.qr_scale.grid(row=r+1, column=1, sticky='w', pady=(2, 10))
+            elif label in ("Keywords", "Caption", "alt_text"):
+                t_height = self._fixed_metadata_text_height(label)
+
+                t = Text(
+                    self.right_frame,
+                    height=t_height,
+                    width=text_width,
+                    wrap="word",
+                    bd=1,
+                    relief="solid",
+                )
+                t.grid(row=i, column=1, sticky="w", pady=(0, 2))
+
+                try:
+                    t.tag_configure("spell_miss", underline=1, foreground="#b00020")
+                except Exception:
+                    pass
+
+                t.bind("<KeyRelease>", lambda e, k=label: self._schedule_text_spellcheck(k), add="+")
+                t.bind("<<Paste>>", lambda e, k=label: self._schedule_text_spellcheck(k), add="+")
+                t.bind("<Button-3>", lambda e, k=label: self._text_spell_context_menu(e, k), add="+")
+
+                self.text_widgets[label] = t
+
+            else:
+                v = StringVar()
+                self.field_vars[label] = v
+
+                e = Entry(self.right_frame, textvariable=v, width=entry_width)
+                e.grid(row=i, column=1, sticky="w", pady=(0, 2))
+                self.entry_widgets[label] = e
+
+                locked = {
+                    'id', 'Path', 'Thumb_Path', 'Original_File_Name',
+                    'DateTime', 'Camera', 'Lens_model',
+                    'Width', 'Height', 'Exposure', 'Aperture', 'ISO', 'Focal_length',
+                }
+                if label in locked:
+                    e.config(state="readonly")
+
+        self.primary_action_bar = Frame(self.right_frame)
+        self.primary_action_bar.grid(row=99, column=1, sticky="w", pady=(10, 8))
+
+        self.btn_generate = Button(
+            self.primary_action_bar,
+            text="Generate",
+            width=14,
+            height=2,
+            command=lambda: self._run_ui_action("generate", self.regenerate_current),
+        )
+        self.btn_generate.grid(row=0, column=0, padx=(0, 8))
+
+        self.btn_approve = Button(
+            self.primary_action_bar,
+            text="Approve",
+            width=14,
+            height=2,
+            command=lambda: self._run_ui_action("approve", self.approve),
+        )
+        self.btn_approve.grid(row=0, column=1, padx=(0, 8))
+
+        self.btn_reject = Button(
+            self.primary_action_bar,
+            text="Reject",
+            width=14,
+            height=2,
+            command=lambda: self._run_ui_action("reject", self.reject),
+        )
+        self.btn_reject.grid(row=0, column=2)
+
+        self._review_action_buttons.extend([
+            self.btn_generate,
+            self.btn_approve,
+            self.btn_reject,
+        ])
+
+    def _metadata_warning_text(self, img: dict) -> str:
+        review_status = str(img.get("Review_Status") or "").strip()
+        quality_status = str(img.get("_metadata_quality_status") or "").strip()
+        issues = str(img.get("_metadata_quality_issues") or "").strip()
+
+        if review_status == "Approved":
+            try:
+                row_id = int(img.get("id") or 0)
+            except Exception:
+                row_id = 0
+            if row_id in self._pending_publish_row_ids():
+                return "Publish warning: this row is approved but not uploaded yet. Reject is still available before Resume Publish."
+
+        warning_statuses = {"Metadata_Needs_Work", "FAIL_BLOCKED"}
+        if review_status not in warning_statuses and quality_status not in warning_statuses:
+            return ""
+
+        parts = ["Metadata warning: this row needs manual review before approval."]
+        if quality_status:
+            parts.append(f"Quality: {quality_status}.")
+        if issues:
+            parts.append(f"Issue: {issues}")
+        return " ".join(parts)
+
+    def _refresh_metadata_warning(self, img: dict) -> None:
+        warning = self._metadata_warning_text(img)
+        self.metadata_warning_var.set(warning)
+
+        is_warning = bool(warning)
+        status_widget = self.entry_widgets.get("Review_Status")
+        if status_widget is not None:
+            try:
+                status_widget.configure(
+                    fg="#b00020" if is_warning else "black",
+                    background="#ffecec" if is_warning else "white",
+                )
+            except Exception:
+                pass
+
+        for key in ("Keywords", "Caption", "alt_text"):
+            widget = self.text_widgets.get(key)
+            if widget is not None:
+                try:
+                    widget.configure(background="#fff6f6" if is_warning else "white")
+                except Exception:
+                    pass
+
+        try:
+            self.image_progress_label.configure(fg="#b00020" if is_warning else "black")
         except Exception:
             pass
 
-
-
     def load_image(self):
         img = self.images[self.idx]
+
         try:
             self.image_progress_var.set(f"Image {self.idx + 1}/{max(1, len(self.images))}")
         except Exception:
             pass
 
-        # Fill widgets
         for k, v in img.items():
+            text_value = "" if v is None else str(v)
+
             if k in self.field_vars:
-                self.field_vars[k].set("" if v is None else str(v))
+                self.field_vars[k].set(text_value)
+
             if k in self.text_widgets:
                 self.text_widgets[k].delete("1.0", END)
-                if v: self.text_widgets[k].insert(END, str(v))
+                if text_value:
+                    self.text_widgets[k].insert(END, text_value)
                 self._fit_text_height(k)
 
-        # Try to display the image: prefer Path; fall back to LOCAL_BASE/year/folder/name
+            if k in self.display_labels:
+                try:
+                    self.display_labels[k].configure(text=text_value)
+                except Exception:
+                    pass
+
+        self._refresh_metadata_warning(img)
+
         display_path = None
         orig_path = img.get("Path")
+
         if orig_path and os.path.exists(orig_path):
             display_path = orig_path
         else:
-            year   = (img.get("DateTime") or "")[:4]
+            year = (img.get("DateTime") or "")[:4]
             folder = img.get("Folder") or ""
-            name   = img.get("File_Name") or ""
+            name = img.get("File_Name") or ""
             alt = os.path.join(LOCAL_BASE, year, folder, name)
+
             if os.path.exists(alt):
                 display_path = alt
             else:
-                # also try the incoming folder while still in review
-                inc_try = os.path.join(INCOMING_DIR, img.get("Original_File_Name") or img.get("File_Name") or "")
+                inc_try = os.path.join(
+                    INCOMING_DIR,
+                    img.get("Original_File_Name") or img.get("File_Name") or ""
+                )
                 if inc_try and os.path.exists(inc_try):
                     display_path = inc_try
 
+        self._current_display_path = display_path
 
         try:
-            if display_path and os.path.exists(display_path):
-                im = Image.open(display_path)
-                im.thumbnail((600, 600))
-                tkimg = ImageTk.PhotoImage(im)
-                self.image_label.configure(image=tkimg, text="")
-                self.image_label.image = tkimg
-            else:
-                self.image_label.configure(image=None, text="Image not found")
+            self.master.after(10, self._refresh_preview_image)
         except Exception:
-            self.image_label.configure(image=None, text="Image not found")
+            self.image_label.configure(image="", text="Image not found")
+            self.image_label.image = None
 
-        # Derive QC_Status from QR if blank
-        cur_qc = self.field_vars.get('QC_Status').get()
+        qc_var = self.field_vars.get("QC_Status")
+        if qc_var is None:
+            qc_var = StringVar(value="")
+            self.field_vars["QC_Status"] = qc_var
+
+        cur_qc = qc_var.get()
         if not cur_qc:
-            self.field_vars['QC_Status'].set(qc_status(self.field_vars.get('QR').get()))
+            qc_var.set(qc_status(self.field_vars.get("QR").get()))
 
-        # Spellcheck refresh can be expensive. Keep it disabled on image-load by
-        # default to avoid navigation crashes during rapid approve/reject runs.
-        # It still runs on text edits and context-menu checks.
         self._cancel_pending_spellchecks()
         if self._autoscan_spell_on_load:
             self._refresh_text_spellchecks(delay_ms=220)
@@ -1538,10 +2412,9 @@ class ReviewApp:
                 except Exception:
                     pass
 
-        # Keep the QR slider synced with the freshly loaded value (guard re-entrancy)
         try:
             if hasattr(self, "qr_scale"):
-                cur = self.field_vars.get('QR').get()
+                cur = self.field_vars.get("QR").get()
                 self._qr_updating = True
                 try:
                     self.qr_scale.set(float(cur) if cur not in ("", None) else 6.50)
@@ -1550,12 +2423,15 @@ class ReviewApp:
         except Exception:
             pass
 
-
-
     def get_field_values(self) -> dict:
         values = {k: v.get() for k, v in self.field_vars.items()}
+
         for k, txt in self.text_widgets.items():
             values[k] = txt.get("1.0", END).strip()
+
+        for k, lbl in self.display_labels.items():
+            values[k] = str(lbl.cget("text") or "").strip()
+
         return values
 
     # -------- Actions --------
@@ -1569,6 +2445,11 @@ class ReviewApp:
         args     = [values[k] for k in set_cols] + [status, img['id']]
         self.cur.execute(f"UPDATE {TABLE_NAME} SET {set_sql}, Review_Status=? WHERE id=?", args)
         self.conn.commit()
+
+        try:
+            _upsert_metadata_quality_manual(int(img["id"]), values, status)
+        except Exception as e:
+            print("metadata_quality manual upsert failed:", e)
 
                 # ---- ST ledger: upsert into review.db:st_items ----
         try:
@@ -1647,7 +2528,7 @@ class ReviewApp:
                 continue
 
             status = str(row.get("Review_Status") or "Pending").strip().lower()
-            if status != "pending":
+            if status not in {"pending", "metadata_needs_work", "fail_blocked"}:
                 continue
 
             caption = str(row.get("Caption") or "").strip()
@@ -1690,109 +2571,240 @@ class ReviewApp:
         return added
 
     def regenerate_current(self):
-        img = self.images[self.idx]
-        values = self.get_field_values()
-        image_path = (values.get("ollama_path") or img.get("ollama_path") or values.get("Path") or img.get("Path") or "").strip()
-        if not image_path:
-            messagebox.showerror("Generate", "No image path available for this row.")
+        if self._generate_running:
             return
 
         crl = self._load_caption_module()
         if crl is None:
             return
 
-        folder = str(values.get("Folder") or img.get("Folder") or "").strip()
-        subject = str(values.get("Subject") or img.get("Subject") or "").strip()
-        location = str(values.get("Location") or img.get("Location") or "").strip()
-        file_name = str(values.get("File_Name") or img.get("File_Name") or "").strip()
+        image_idx = int(self.idx)
+        img = dict(self.images[self.idx])
+        values = dict(self.get_field_values())
+
+        self._generate_running = True
+        self._set_review_actions_enabled(False)
 
         try:
-            series_key, sequence_no = crl._detect_series_key(folder, subject, file_name)
-        except Exception:
-            series_key, sequence_no = f"{folder}|{subject}|{file_name}", 1
-
-        ledger = crl.UniquenessLedger()
-        try:
-            self._prefill_generate_uniqueness_ledger(
-                crl,
-                ledger,
-                exclude_id=int(img.get("id") or 0),
-            )
+            self.btn_generate.configure(text="Generating...", state="disabled")
         except Exception:
             pass
 
-        ok, cap, kws, alt_or_err = crl.process_one(
-            ledger=ledger,
-            series_key=series_key,
-            file_name=file_name,
-            sequence_no=int(sequence_no or 1),
-            series_size=1,
-            folder=folder,
-            subject=subject,
-            location=location,
-            image_path=Path(image_path),
-            endpoint=CAPTION_ENDPOINT,
-            model=CAPTION_MODEL,
-            timeout=CAPTION_TIMEOUT_SEC,
-            options=CAPTION_OPTS,
-            img_max_side=1024,
-            img_quality=85,
-            keywords_n=CAPTION_KEYWORDS_N,
-            prefix_words=CAPTION_PREFIX_WORDS,
-            series_large_threshold=CAPTION_SERIES_LARGE_THRESHOLD,
-            max_tries=CAPTION_MAX_TRIES,
-            rewrite_weak=CAPTION_REWRITE_WEAK,
-            rewrite_max_passes=CAPTION_REWRITE_MAX_PASSES,
-            quality_min_score=CAPTION_QUALITY_MIN_SCORE,
+        worker = threading.Thread(
+            target=self._generate_worker,
+            args=(image_idx, img, values, crl),
+            daemon=True,
         )
+        worker.start()
 
-        if not ok and CAPTION_MODEL_FALLBACK:
-            ok, cap, kws, alt_or_err = crl.process_one(
-                ledger=ledger,
-                series_key=series_key,
-                file_name=file_name,
-                sequence_no=int(sequence_no or 1),
-                series_size=1,
-                folder=folder,
-                subject=subject,
-                location=location,
-                image_path=Path(image_path),
-                endpoint=CAPTION_ENDPOINT,
-                model=CAPTION_MODEL_FALLBACK,
-                timeout=CAPTION_TIMEOUT_SEC,
-                options=CAPTION_OPTS,
-                img_max_side=1024,
-                img_quality=85,
-                keywords_n=CAPTION_KEYWORDS_N,
-                prefix_words=CAPTION_PREFIX_WORDS,
-                series_large_threshold=CAPTION_SERIES_LARGE_THRESHOLD,
-                max_tries=max(2, CAPTION_MAX_TRIES),
-                rewrite_weak=CAPTION_REWRITE_WEAK,
-                rewrite_max_passes=CAPTION_REWRITE_MAX_PASSES,
-                quality_min_score=CAPTION_QUALITY_MIN_SCORE,
-            )
+    def _generate_worker(self, image_idx: int, img: dict, values: dict, crl):
+        result = {
+            "ok": False,
+            "caption": "",
+            "keywords": "",
+            "alt_text": "",
+            "error": "",
+        }
 
-        if not ok:
-            messagebox.showerror("Generate", f"Regenerate failed: {alt_or_err}")
+        try:
+            candidate_paths = _candidate_review_source_paths(img, values, include_ollama=False)
+            display_path = str(getattr(self, "_current_display_path", None) or "").strip()
+            if display_path:
+                candidate_paths.append(display_path)
+            candidate_paths.extend(_candidate_review_source_paths(img, values, include_ollama=True))
+
+            image_path = ""
+            checked_paths = []
+            for candidate in candidate_paths:
+                candidate = str(candidate or "").strip()
+                if not candidate or candidate in checked_paths:
+                    continue
+                checked_paths.append(candidate)
+                if os.path.exists(candidate):
+                    image_path = candidate
+                    break
+
+            if not image_path or not os.path.exists(image_path):
+                detail = "\n".join(checked_paths[:8]) or "[empty]"
+                result["error"] = f"No local image path available for this row.\n\nChecked paths:\n{detail}"
+            elif not self._ensure_ollama_running():
+                result["error"] = (
+                    "Ollama could not be started on http://127.0.0.1:11434.\n\n"
+                    "The editor tried to start it automatically, but it still did not come up."
+                )
+            else:
+                folder = str(values.get("Folder") or img.get("Folder") or "").strip()
+                subject = str(values.get("Subject") or img.get("Subject") or "").strip()
+                location = str(values.get("Location") or img.get("Location") or "").strip()
+                file_name = str(values.get("File_Name") or img.get("File_Name") or "").strip()
+
+                series_key, sequence_no, series_size, visual_variant = self._get_series_context(
+                    crl,
+                    folder,
+                    subject,
+                    file_name,
+                    img,
+                )
+
+                ledger = crl.UniquenessLedger()
+                try:
+                    self._prefill_generate_uniqueness_ledger(
+                        crl,
+                        ledger,
+                        exclude_id=int(img.get("id") or 0),
+                    )
+                except Exception:
+                    pass
+
+                primary_model, fallback_model = self._pick_best_caption_model()
+
+                ok, cap, kws, alt_or_err = crl.process_one(
+                    ledger=ledger,
+                    series_key=series_key,
+                    file_name=file_name,
+                    sequence_no=int(sequence_no or 1),
+                    series_size=int(series_size or 1),
+                    visual_variant=str(visual_variant or ""),
+                    folder=folder,
+                    subject=subject,
+                    location=location,
+                    image_path=Path(image_path),
+                    endpoint=CAPTION_ENDPOINT,
+                    model=primary_model,
+                    timeout=CAPTION_TIMEOUT_SEC,
+                    options=CAPTION_OPTS,
+                    img_max_side=768,
+                    img_quality=82,
+                    keywords_n=CAPTION_KEYWORDS_N,
+                    prefix_words=CAPTION_PREFIX_WORDS,
+                    series_large_threshold=CAPTION_SERIES_LARGE_THRESHOLD,
+                    max_tries=CAPTION_MAX_TRIES,
+                    rewrite_weak=CAPTION_REWRITE_WEAK,
+                    rewrite_max_passes=CAPTION_REWRITE_MAX_PASSES,
+                    quality_min_score=CAPTION_QUALITY_MIN_SCORE,
+                )
+
+                if not ok and fallback_model and fallback_model != primary_model:
+                    ok, cap, kws, alt_or_err = crl.process_one(
+                        ledger=ledger,
+                        series_key=series_key,
+                        file_name=file_name,
+                        sequence_no=int(sequence_no or 1),
+                        series_size=int(series_size or 1),
+                        visual_variant=str(visual_variant or ""),
+                        folder=folder,
+                        subject=subject,
+                        location=location,
+                        image_path=Path(image_path),
+                        endpoint=CAPTION_ENDPOINT,
+                        model=fallback_model,
+                        timeout=CAPTION_TIMEOUT_SEC,
+                        options=CAPTION_OPTS,
+                        img_max_side=768,
+                        img_quality=82,
+                        keywords_n=CAPTION_KEYWORDS_N,
+                        prefix_words=CAPTION_PREFIX_WORDS,
+                        series_large_threshold=CAPTION_SERIES_LARGE_THRESHOLD,
+                        max_tries=1,
+                        rewrite_weak=CAPTION_REWRITE_WEAK,
+                        rewrite_max_passes=CAPTION_REWRITE_MAX_PASSES,
+                        quality_min_score=CAPTION_QUALITY_MIN_SCORE,
+                    )
+
+                if not ok:
+                    result["needs_work"] = True
+                    # process_one now puts alt content (or empty) in the 4th
+                    # slot - never a reason string. Reason is in the buffer.
+                    fail_reason = crl.get_last_fail_reason(image_path) or "metadata needs work"
+                    if cap or alt_or_err or kws:
+                        result["caption"] = cap or ""
+                        result["keywords"] = kws or ""
+                        result["alt_text"] = alt_or_err or ""
+                        result["error"] = (
+                            "Metadata needs work for this row. "
+                            "Best-available text has been filled in - please review and edit, "
+                            "then click Approve, or click Generate again."
+                        )
+                    else:
+                        result["error"] = (
+                            f"Metadata needs work for this row.\n\n"
+                            f"Primary model: {primary_model}\n"
+                            f"Fallback model: {fallback_model or '[none]'}\n\n"
+                            f"Reason: {fail_reason}\n\n"
+                            "You can edit the fields manually or click Generate again."
+                        )
+                else:
+                    result["ok"] = True
+                    result["caption"] = cap
+                    result["keywords"] = kws
+                    result["alt_text"] = alt_or_err
+
+        except Exception:
+            result["error"] = traceback.format_exc()
+
+        try:
+            self.master.after(0, lambda: self._finish_generate_worker(image_idx, result))
+        except Exception:
+            pass
+
+    def _finish_generate_worker(self, image_idx: int, result: dict):
+        self._generate_running = False
+
+        try:
+            self.btn_generate.configure(text="Generate")
+        except Exception:
+            pass
+
+        self._set_review_actions_enabled(bool(self.images))
+
+        if not result.get("ok"):
+            # Soft "needs work" path: show info, not an error. Genuine
+            # exceptions (no needs_work flag) still surface as errors.
+            if result.get("needs_work"):
+                # Populate the UI with best-available content so the user
+                # has something to edit, then show the info dialog.
+                if image_idx == self.idx and (
+                    result.get("caption") or result.get("alt_text") or result.get("keywords")
+                ):
+                    try:
+                        self.text_widgets["Caption"].delete("1.0", END)
+                        self.text_widgets["Caption"].insert(END, result.get("caption", ""))
+                        self._fit_text_height("Caption")
+
+                        self.text_widgets["alt_text"].delete("1.0", END)
+                        self.text_widgets["alt_text"].insert(END, result.get("alt_text", ""))
+                        self._fit_text_height("alt_text")
+
+                        self.text_widgets["Keywords"].delete("1.0", END)
+                        self.text_widgets["Keywords"].insert(END, result.get("keywords", ""))
+                        self._fit_text_height("Keywords")
+                    except Exception:
+                        pass
+                messagebox.showinfo("Generate", result.get("error") or "Metadata needs work.")
+            else:
+                messagebox.showerror("Generate", result.get("error") or "Generate failed.")
             return
 
-        # Update UI fields but do not change status until the user approves.
+        if image_idx != self.idx:
+            return
+
         try:
             self.text_widgets["Caption"].delete("1.0", END)
-            self.text_widgets["Caption"].insert(END, cap)
+            self.text_widgets["Caption"].insert(END, result["caption"])
             self._fit_text_height("Caption")
+
             self.text_widgets["alt_text"].delete("1.0", END)
-            self.text_widgets["alt_text"].insert(END, alt_or_err)
+            self.text_widgets["alt_text"].insert(END, result["alt_text"])
             self._fit_text_height("alt_text")
+
             self.text_widgets["Keywords"].delete("1.0", END)
-            self.text_widgets["Keywords"].insert(END, kws)
+            self.text_widgets["Keywords"].insert(END, result["keywords"])
             self._fit_text_height("Keywords")
         except Exception:
             pass
 
-        # Persist to DB with current status to avoid losing the regenerate result.
         try:
-            status = str(img.get("Review_Status") or "Pending")
+            status = str(self.images[self.idx].get("Review_Status") or "Pending")
             self.save_current(status)
         except Exception:
             pass
@@ -1897,10 +2909,11 @@ class ReviewApp:
     def reject(self):
         img = self.images[self.idx]
         try:
-            # Move original file to rejected folder (best-effort)
-            if img.get("Path") and os.path.exists(img["Path"]):
-                os.makedirs(REJECTED_FOLDER, exist_ok=True)
-                shutil.move(img["Path"], os.path.join(REJECTED_FOLDER, os.path.basename(img["Path"])))
+            # Move the real source file to the rejected folder (best-effort).
+            source_path = _resolve_reject_source_path(img)
+            if source_path:
+                moved_to = _move_to_rejected(source_path)
+                img["Path"] = moved_to
         except Exception as e:
             print(f"[WARN] Could not move to rejected: {e}")
 
@@ -1927,6 +2940,19 @@ class ReviewApp:
 
         # Log & remove DB row
         self.log_action_wrapper('rejected')
+        try:
+            vals_rejected = self.get_field_values()
+            vals_rejected["File_Name"] = vals_rejected.get("File_Name") or img.get("File_Name")
+            vals_rejected["Original_File_Name"] = vals_rejected.get("Original_File_Name") or img.get("Original_File_Name")
+            _upsert_metadata_quality_manual(int(img["id"]), vals_rejected, "Rejected")
+        except Exception as e:
+            print(f"[WARN] Could not mark metadata_quality as rejected: {e}")
+        try:
+            removed = self._remove_publish_item_for_row(int(img["id"]))
+            if removed:
+                print(f"[PUBLISH QUEUE] Removed {removed} pending item(s) for rejected row {img['id']}.")
+        except Exception as e:
+            print(f"[WARN] Could not remove rejected row from publish_queue.json: {e}")
         self.cur.execute(f"DELETE FROM {TABLE_NAME} WHERE id=?", (img['id'],))
         self.conn.commit()
 
@@ -1937,14 +2963,15 @@ class ReviewApp:
     def pending(self):
         self.save_current('Pending')
         self.log_action_wrapper('pending')
+        try:
+            self._remove_publish_item_for_row(int(self.images[self.idx]["id"]))
+        except Exception as e:
+            print(f"[WARN] Could not remove pending row from publish_queue.json: {e}")
         self._wants_upload = False
         self.next_image()
 
     def publish(self):
-        self.save_current('Published')
-        self.log_action_wrapper('published')
-        self._wants_upload = True
-        self.next_image()
+        self.approve()
 
     def process_all_file_ops(self):
         # Legacy compatibility entrypoint: publishing is now always done by
@@ -2001,6 +3028,90 @@ class ReviewApp:
             messagebox.showinfo("Back", "This is the first image.")
 
 # ---------------- Entry ----------------
+# AMIR_REVIEW_PREVIEW_SAFE_CLEAR_V1_START
+# Prevent Tk crash after publishing/moving images.
+# Cause: stale PhotoImage name like pyimage4 no longer exists.
+# Fix: clear Label image using empty string and catch TclError safely.
+
+def _amir_review_preview_safe_clear_install():
+    import tkinter as tk
+
+    def safe_clear_preview(self, message="Image not found"):
+        label = getattr(self, "image_label", None)
+
+        for attr_name in [
+            "preview_photo",
+            "_preview_photo",
+            "photo",
+            "_photo",
+            "image_photo",
+            "_image_photo",
+            "tk_image",
+            "_tk_image",
+        ]:
+            try:
+                setattr(self, attr_name, None)
+            except Exception:
+                pass
+
+        if label is None:
+            return False
+
+        try:
+            label.image = None
+        except Exception:
+            pass
+
+        try:
+            label.configure(image="", text=message)
+            return True
+        except tk.TclError:
+            pass
+
+        try:
+            label.tk.call(label._w, "configure", "-image", "", "-text", message)
+            return True
+        except Exception:
+            pass
+
+        return False
+
+    for cls in list(globals().values()):
+        if not isinstance(cls, type):
+            continue
+
+        if not hasattr(cls, "_refresh_preview_image"):
+            continue
+
+        if getattr(cls, "_amir_preview_safe_clear_installed", False):
+            continue
+
+        original_refresh = getattr(cls, "_refresh_preview_image")
+
+        def patched_refresh(self, *args, __original_refresh=original_refresh, **kwargs):
+            try:
+                return __original_refresh(self, *args, **kwargs)
+            except tk.TclError as exc:
+                message = str(exc)
+
+                if "image" in message and "doesn't exist" in message:
+                    print(f"[WARN] Stale Tk preview image cleared safely: {message}")
+                    return safe_clear_preview(self, "Image not found")
+
+                raise
+
+        setattr(cls, "_refresh_preview_image", patched_refresh)
+        setattr(cls, "_amir_preview_safe_clear_installed", True)
+
+        print(f"[OK] Installed safe preview refresh on {cls.__name__}.")
+        return
+
+    print("[WARN] Could not find class with _refresh_preview_image to patch.")
+
+
+_amir_review_preview_safe_clear_install()
+# AMIR_REVIEW_PREVIEW_SAFE_CLEAR_V1_END
+
 if __name__ == "__main__":
     print(f"[EDITOR] Using DB: {DB_PATH}")
     _ensure_used_json()  # guarantee the main JSON exists

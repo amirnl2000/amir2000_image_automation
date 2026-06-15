@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
@@ -24,6 +24,7 @@ def main() -> None:
 
     review_sql = INIT / "review_queue.sql"
     revamp_sql = INIT / "photos_info_revamp.sql"
+    metadata_quality_sql = INIT / "metadata_quality.sql"
 
     if not review_sql.exists():
         raise SystemExit(f"Missing {review_sql}")
@@ -32,6 +33,9 @@ def main() -> None:
 
     apply_sql(REVIEW_DB, review_sql)
     apply_sql(REVAMP_DB, revamp_sql)
+
+    if metadata_quality_sql.exists():
+        apply_sql(REVIEW_DB, metadata_quality_sql)
 
     print("OK: created data/review.db and data/photos_info_revamp.db from init SQL")
 

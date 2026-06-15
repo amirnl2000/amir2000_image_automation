@@ -1,5 +1,35 @@
+# AMIR_FORCE_LOGS_DIR_IMPORT_START
+from pathlib import Path as _amir_force_logs_pathlib_path
+import sys as _amir_force_logs_sys
+
+_amir_force_logs_root = _amir_force_logs_pathlib_path(__file__).resolve().parent
+
+while not (_amir_force_logs_root / "utils").exists() and _amir_force_logs_root.parent != _amir_force_logs_root:
+    _amir_force_logs_root = _amir_force_logs_root.parent
+
+if str(_amir_force_logs_root) not in _amir_force_logs_sys.path:
+    _amir_force_logs_sys.path.insert(0, str(_amir_force_logs_root))
+
+from utils.force_logs_dir import install as _amir_force_logs_install
+_amir_force_logs_install()
+# AMIR_FORCE_LOGS_DIR_IMPORT_END
+
 # main_set.py — Multi-set launcher (keeps your pipeline intact)
 import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math, glob, queue
+# AMIR_FORCE_CAPTION_MODEL_CHAIN_START
+# Production caption chain:
+# primary = installed Qwen vision route that returns usable metadata facts here
+# fallback = smaller Qwen vision route only when the primary fails a row
+os.environ.setdefault("OLLAMA_MODEL_CAPTION", "qwen2.5vl:3b")
+os.environ.setdefault("CAPTION_MODEL", "qwen2.5vl:3b")
+os.environ["OLLAMA_MODEL_CAPTION_FALLBACK"] = "qwen2.5vl:3b"
+os.environ["CAPTION_MODEL_FALLBACK"] = "qwen2.5vl:3b"
+
+# Keep context stable. 16k is asking for drama.
+os.environ.setdefault("CAPTION_NUM_CTX", "4096")
+os.environ.setdefault("CAPTION_NUM_PREDICT", "180")
+os.environ.setdefault("CAPTION_TEMPERATURE", "0.1")
+# AMIR_FORCE_CAPTION_MODEL_CHAIN_END
 
 # Make console output robust on Windows (avoid UnicodeEncodeError on emoji etc.)
 try:
@@ -119,6 +149,24 @@ def _filename_tokens_from_path(path: str) -> set[str]:
     return {t.lower() for t in toks}
 
 
+def _filename_tokens_look_like_camera_ids(tokens: set[str]) -> bool:
+    if not tokens:
+        return True
+
+    useful = []
+    for token in tokens:
+        t = str(token or "").strip().lower()
+        if not t:
+            continue
+        if re.fullmatch(r"[a-z]{0,4}\d+[a-z0-9]*", t):
+            continue
+        if re.fullmatch(r"\d+", t):
+            continue
+        useful.append(t)
+
+    return not useful
+
+
 def _load_nature_subject_classifier():
     global _NATURE_SUBJECT_PIPE
     if _NATURE_SUBJECT_PIPE is not None:
@@ -137,7 +185,8 @@ def _nature_subject_from_classifier(image_path: str) -> str | None:
     if not os.path.isfile(image_path):
         return None
     toks = _filename_tokens_from_path(image_path)
-    if not (toks & {"bird", "birds", "buzzard", "wigeon", "pigeon", "pigeons", "duck", "goose", "heron", "cormorant", "gull", "seagull", "animal", "macro", "plant", "plants", "flower", "flowers", "tree", "trees", "reeds", "reed", "seed", "seedhead"}):
+    camera_id_name = _filename_tokens_look_like_camera_ids(toks)
+    if not camera_id_name and not (toks & {"bird", "birds", "buzzard", "wigeon", "pigeon", "pigeons", "duck", "goose", "heron", "cormorant", "gull", "seagull", "animal", "macro", "plant", "plants", "flower", "flowers", "tree", "trees", "reeds", "reed", "seed", "seedhead"}):
         return None
     pipe = _load_nature_subject_classifier()
     if pipe is None:
@@ -168,7 +217,7 @@ def _nature_subject_from_classifier(image_path: str) -> str | None:
         return None
     # Only allow non-generic labels if they align with filename tokens
     label_toks = set(label.split())
-    if label not in _NATURE_SUBJECT_GENERIC and not (label_toks & toks):
+    if label not in _NATURE_SUBJECT_GENERIC and not camera_id_name and not (label_toks & toks):
         return None
     return _title_case_words(label)
 
@@ -202,6 +251,23 @@ warnings.filterwarnings(
     message=r"Converting a tensor with requires_grad=True to a scalar",
     category=UserWarning,
 )
+
+try:
+    _main_cache_base = (
+        os.path.join(os.path.dirname(sys.executable), ".cache")
+        if getattr(sys, "frozen", False)
+        else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+    )
+    _main_hf_home = os.path.join(_main_cache_base, "huggingface")
+    _main_hf_hub = os.path.join(_main_hf_home, "hub")
+    os.makedirs(_main_hf_hub, exist_ok=True)
+    os.environ.setdefault("XDG_CACHE_HOME", _main_cache_base)
+    os.environ.setdefault("HF_HOME", _main_hf_home)
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", _main_hf_hub)
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+except Exception:
+    pass
 
 try:
     from transformers import pipeline as _hf_pipeline
@@ -250,10 +316,10 @@ LOCAL_SITE_IMAGES_BASE = PATHS.get(
 )
 
 BASE_PICK_DIR = PATHS.get(
-    "BASE_PICK_DIR", r"YOUR_PATH_HERE to be uploaded"
+    "BASE_PICK_DIR", r"YOUR_PATH_HERE"
 )
 STAGED_DIR = PATHS.get(
-    "STAGED_DIR", r"YOUR_PATH_HERE to be uploaded\staged"
+    "STAGED_DIR", r"YOUR_PATH_HERE"
 )
 
 # Keep relative “data/…” paths stable like main.py does
@@ -262,6 +328,20 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else os.path.dirname(os.path.abspath(__file__))
 )
+
+METADATA_QUALITY_SCRIPT = PATHS.get(
+    "METADATA_QUALITY_SCRIPT",
+    os.path.join(APP_DIR, "scripts", "metadata_quality_production.py"),
+)
+METADATA_QUALITY_ENABLED = os.getenv("METADATA_QUALITY_ENABLED", "1") == "1"
+METADATA_QUALITY_IDLE_TIMEOUT_SEC = int(os.getenv("METADATA_QUALITY_IDLE_TIMEOUT_SEC", "600"))
+METADATA_QUALITY_HARD_TIMEOUT_SEC = int(os.getenv("METADATA_QUALITY_HARD_TIMEOUT_SEC", "1800"))
+SERIES_VERSIONING_SCRIPT = PATHS.get(
+    "SERIES_VERSIONING_SCRIPT",
+    os.path.join(APP_DIR, "scripts", "series_versioning.py"),
+)
+SERIES_VERSIONING_ENABLED = os.getenv("SERIES_VERSIONING_ENABLED", "1") == "1"
+SERIES_VERSIONING_SPLIT_WITHIN_SET = os.getenv("SERIES_VERSIONING_SPLIT_WITHIN_SET", "0") == "1"
 
 
 LOCATION_FILE = os.path.join(DATA_DIR, "location_list.json")
@@ -282,7 +362,7 @@ STAGES = [
     "Insert/refresh review rows",
     "AI quality scoring",
     "Resize images for Ollama (temp)",
-    "Caption/Keywords prefill (Ollama)",
+    "Caption/Keywords prefill + metadata quality",
     "Open review editor",
 ]
 
@@ -292,13 +372,13 @@ OLLAMA_BIN = os.getenv("OLLAMA_BIN", "ollama")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", "11434"))
 OLLAMA_MODEL = os.getenv(
-    "OLLAMA_MODEL_SUBJECT", "llama3.2-vision:latest"
+    "OLLAMA_MODEL_SUBJECT", "qwen2.5vl:3b"
 )  # subject suggestions (vision)
 OLLAMA_MODEL_CAPTION = os.getenv(
-    "OLLAMA_MODEL_CAPTION", "llava:13b"
+    "OLLAMA_MODEL_CAPTION", "qwen2.5vl:7b"
 )  # caption/keywords/alt prefill primary
 OLLAMA_MODEL_CAPTION_FALLBACK = os.getenv(
-    "OLLAMA_MODEL_CAPTION_FALLBACK", ""
+    "OLLAMA_MODEL_CAPTION_FALLBACK", "qwen2.5vl:7b"
 ).strip()  # used only on failed rows
 try:
     OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "99"))
@@ -309,14 +389,15 @@ try:
 except Exception:
     OLLAMA_MAIN_GPU = 0
 OLLAMA_FORCE_GPU = os.getenv("OLLAMA_FORCE_GPU", "1") == "1"
-OLLAMA_RESTART_FOR_GPU = os.getenv("OLLAMA_RESTART_FOR_GPU", "1") == "1"
+OLLAMA_RESTART_FOR_GPU = os.getenv("OLLAMA_RESTART_FOR_GPU", "0") == "1"
 OLLAMA_LLM_LIBRARY = os.getenv("OLLAMA_LLM_LIBRARY", "cuda").strip() or "cuda"
-OLLAMA_START_METHOD = os.getenv("OLLAMA_START_METHOD", "serve").strip().lower()
+OLLAMA_START_METHOD = os.getenv("OLLAMA_START_METHOD", "app").strip().lower()
 _OLLAMA_GPU_BOOTSTRAPPED = False
 _OLLAMA_STARTED_BY_APP = False
-OLLAMA_CLOSE_ON_RUN_END = os.getenv("OLLAMA_CLOSE_ON_RUN_END", "1") == "1"
+OLLAMA_CLOSE_ON_RUN_END = os.getenv("OLLAMA_CLOSE_ON_RUN_END", "0") == "1"
 SUBJECT_MODEL_CANDIDATES_ENV = os.getenv(
-    "OLLAMA_MODEL_SUBJECT_CANDIDATES", f"{OLLAMA_MODEL_CAPTION},{OLLAMA_MODEL}"
+    "OLLAMA_MODEL_SUBJECT_CANDIDATES",
+    "llama3.2-vision:latest,llava:13b,llama3.2-vision:11b"
 )
 SUBJECT_MODEL_CANDIDATES = tuple(
     dict.fromkeys(
@@ -327,14 +408,14 @@ SUBJECT_MIN_CONFIDENCE = max(
     0, min(100, int(os.getenv("SUBJECT_MIN_CONFIDENCE", "68")))
 )
 SUBJECT_MAX_CHARS = max(30, int(os.getenv("SUBJECT_MAX_CHARS", "60")))
-SUBJECT_THUMB_MAX = max(640, int(os.getenv("SUBJECT_THUMB_MAX", "1344")))
+SUBJECT_THUMB_MAX = max(960, int(os.getenv("SUBJECT_THUMB_MAX", "1792")))
 SUBJECT_JPEG_QUALITY = max(
     70, min(95, int(os.getenv("SUBJECT_JPEG_QUALITY", "90")))
 )
 THUMB_MAX = 1024  # more detail for species and fine subjects (slower)
 # Caption stage opts only (34b on 8GB GPU benefits from smaller ctx)
 OLLAMA_OPTS = {
-    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "4096")),
+    "num_ctx": int(os.getenv("CAPTION_NUM_CTX", "16384")),
     "num_predict": int(os.getenv("CAPTION_NUM_PREDICT", "180")),
     "temperature": float(os.getenv("CAPTION_TEMPERATURE", "0.1")),
 }
@@ -348,39 +429,56 @@ OLLAMA_WARM_KEEP_ALIVE = os.getenv("OLLAMA_WARM_KEEP_ALIVE", "45m")
 OLLAMA_STARTUP_PROBE = os.getenv("OLLAMA_STARTUP_PROBE", "1") == "1"
 
 # caption_review_local.py tuning (used by Stage 6)
-CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "15"))
+CAPTION_KEYWORDS_N = int(os.getenv("CAPTION_KEYWORDS_N", "8"))
 CAPTION_REWRITE_WEAK = os.getenv("CAPTION_REWRITE_WEAK", "1") == "1"
 CAPTION_REWRITE_MAX_PASSES = int(os.getenv("CAPTION_REWRITE_MAX_PASSES", "3"))
 CAPTION_QUALITY_MIN_SCORE = int(os.getenv("CAPTION_QUALITY_MIN_SCORE", "90"))
 CAPTION_SERIES_LARGE_THRESHOLD = int(os.getenv("CAPTION_SERIES_LARGE_THRESHOLD", "8"))
-CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "5"))
-CAPTION_FALLBACK_MAX_TRIES = int(os.getenv("CAPTION_FALLBACK_MAX_TRIES", "2"))
+CAPTION_MAX_TRIES = int(os.getenv("CAPTION_MAX_TRIES", "1"))
+CAPTION_FALLBACK_MAX_TRIES = int(os.getenv("CAPTION_FALLBACK_MAX_TRIES", "1"))
 CAPTION_PREFIX_WORDS = int(os.getenv("CAPTION_PREFIX_WORDS", "8"))
 CAPTION_FAIL_ON_ROW_ERRORS = os.getenv("CAPTION_FAIL_ON_ROW_ERRORS", "0") == "1"
 RESIZE_FAIL_ON_ANY = os.getenv("RESIZE_FAIL_ON_ANY", "0") == "1"
+SCORE_FORCE_RUN = os.getenv("AMIR_SCORE_FORCE_RUN", "1") == "1"
 
 # optional precision keyword terms DB
 DEFAULT_TERMS_DB = os.getenv(
-    "CAPTION_TERMS_DB", r"YOUR_PATH_HERE"
+    "CAPTION_TERMS_DB",
+    PATHS.get("REVAMP_KNOWLEDGE_DB_PATH", os.path.join(DATA_DIR, "revamp_knowledge.db")),
 )
 CAPTION_TERMS_TABLE = os.getenv("CAPTION_TERMS_TABLE", "keyword_terms")
 CAPTION_TERMS_MIN_PRECISION = int(os.getenv("CAPTION_TERMS_MIN_PRECISION", "85"))
 
+# Production subject identifier router.
+# This runs after review_queue rows exist and before caption prefill.
+IDENTIFIER_ROUTER_ENABLED = os.getenv("IDENTIFIER_ROUTER_ENABLED", "1") == "1"
+IDENTIFIER_ROUTER_FAIL_HARD = os.getenv("IDENTIFIER_ROUTER_FAIL_HARD", "0") == "1"
+IDENTIFIER_ROUTER_MAX_SAMPLES = max(1, int(os.getenv("IDENTIFIER_ROUTER_MAX_SAMPLES", "6")))
+IDENTIFIER_ROUTER_MAX_CROPS = max(1, int(os.getenv("IDENTIFIER_ROUTER_MAX_CROPS", "10")))
+IDENTIFIER_ROUTER_MODEL = os.getenv("IDENTIFIER_ROUTER_MODEL", OLLAMA_MODEL_CAPTION).strip() or OLLAMA_MODEL_CAPTION
+IDENTIFIER_ROUTER_FAST_IMAGE_MAX_SIDE = max(512, int(os.getenv("IDENTIFIER_ROUTER_FAST_IMAGE_MAX_SIDE", "768")))
+IDENTIFIER_ROUTER_CLEAN_TMP = os.getenv("IDENTIFIER_ROUTER_CLEAN_TMP", "1") == "1"
+IDENTIFIER_ROUTER_TMP_DIR = os.getenv(
+    "IDENTIFIER_ROUTER_TMP_DIR",
+    os.path.join(DATA_DIR, "identifier_router_tmp"),
+)
+
 
 CAPTION_MAX_RETRIES = int(os.getenv("CAPTION_MAX_RETRIES", "1"))
 CAPTION_TIMEOUT_SEC = int(os.getenv("CAPTION_TIMEOUT_SEC", "420"))
-CAPTION_PREFILL_CHUNK_SIZE = int(os.getenv("CAPTION_PREFILL_CHUNK_SIZE", "24"))
+CAPTION_PREFILL_CHUNK_SIZE = int(os.getenv("CAPTION_PREFILL_CHUNK_SIZE", "6"))
 CAPTION_NATIVE_CRASH_RETRIES = int(
     os.getenv("CAPTION_NATIVE_CRASH_RETRIES", str(max(3, CAPTION_MAX_RETRIES + 1)))
 )
 CAPTION_PREFILL_IDLE_TIMEOUT_SEC = int(
-    os.getenv("CAPTION_PREFILL_IDLE_TIMEOUT_SEC", "120")
+    # First-run HF/model cache warmup can exceed 2 minutes without emitting lines.
+    os.getenv("CAPTION_PREFILL_IDLE_TIMEOUT_SEC", "300")
 )
 CAPTION_PREFILL_HARD_TIMEOUT_SEC = int(
     os.getenv("CAPTION_PREFILL_HARD_TIMEOUT_SEC", "900")
 )
 SESSION_SCOPE_ONLY = os.getenv("AMIR_SESSION_SCOPE_ONLY", "1") == "1"
-AUTO_AI_SUBJECT_ON_SELECT = os.getenv("AUTO_AI_SUBJECT_ON_SELECT", "1") == "1"
+AUTO_AI_SUBJECT_ON_SELECT = os.getenv("AUTO_AI_SUBJECT_ON_SELECT", "0") == "1"
 ADD_SET_EXIF_PREVIEW = os.getenv("ADD_SET_EXIF_PREVIEW", "0") == "1"
 
 # Stage-6 QC scan (duplicates + suspicious text) before review editor opens
@@ -398,8 +496,33 @@ NATURE_SUBJECT_MIN_SCORE_GENERIC = float(os.getenv("NATURE_SUBJECT_MIN_SCORE_GEN
 _NATURE_SUBJECT_PIPE = None
 
 _NATURE_SUBJECT_LABELS = [
+    "eurasian oystercatcher",
+    "northern lapwing",
+    "black-tailed godwit",
+    "bar-tailed godwit",
+    "common redshank",
+    "eurasian curlew",
+    "pied avocet",
     "common buzzard",
     "eurasian wigeon",
+    "mallard duck",
+    "tufted duck",
+    "common teal",
+    "greylag goose",
+    "canada goose",
+    "mute swan",
+    "eurasian coot",
+    "common moorhen",
+    "grey heron",
+    "great cormorant",
+    "black-headed gull",
+    "herring gull",
+    "common kestrel",
+    "european robin",
+    "great tit",
+    "house sparrow",
+    "eurasian magpie",
+    "carrion crow",
     "pigeons",
     "pigeon",
     "duck",
@@ -412,11 +535,42 @@ _NATURE_SUBJECT_LABELS = [
     "raptor",
     "waterfowl",
     "fox",
+    "red fox",
     "deer",
+    "roe deer",
     "rabbit",
     "hare",
     "squirrel",
     "animal",
+    "purple crocus",
+    "crocus flowers",
+    "tulip flowers",
+    "daffodil flowers",
+    "rose flowers",
+    "sunflower",
+    "orchid flowers",
+    "daisy flowers",
+    "poppy flowers",
+    "iris flowers",
+    "lavender flowers",
+    "hydrangea flowers",
+    "cherry blossom",
+    "white blossom",
+    "wildflowers",
+    "mushroom",
+    "fern fronds",
+    "red admiral butterfly",
+    "butterfly",
+    "moth",
+    "honey bee",
+    "bumblebee",
+    "hoverfly",
+    "dragonfly",
+    "damselfly",
+    "ladybird beetle",
+    "beetle",
+    "spider",
+    "wasp",
     "dry reeds",
     "reeds",
     "flower",
@@ -738,121 +892,142 @@ def _ollama_startup_probe() -> None:
         return
 
     if not _ensure_ollama_running():
-        print("[WARN] Ollama startup check: service not reachable.")
-        return
+        raise RuntimeError(f"Ollama service is not reachable on http://{OLLAMA_HOST}:{OLLAMA_PORT}.")
 
-    probe_model = (OLLAMA_MODEL_CAPTION or OLLAMA_MODEL or "minicpm-v:latest").strip()
+    probe_model = (OLLAMA_MODEL_CAPTION or OLLAMA_MODEL or "qwen2.5vl:3b").strip()
     names = _ollama_model_names(timeout=3.0)
     if names:
         resolved = _resolve_ollama_model_alias(probe_model, names)
         if resolved:
             probe_model = resolved
+        else:
+            raise RuntimeError(
+                f"Ollama model '{probe_model}' is not installed locally. Install it before starting the app."
+            )
 
     probe_ctx = max(1024, min(4096, int(OLLAMA_OPTS.get("num_ctx", 4096) or 4096)))
+    startup_timeout = max(60, int(OLLAMA_WARM_TIMEOUT_SEC or 45))
 
-    # Force a tiny load so /api/ps can report CPU/GPU immediately.
-    try:
-        payload = {
-            "model": probe_model,
-            "prompt": "ok",
-            "stream": False,
-            "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
-            "options": {
-                "num_predict": 1,
-                "temperature": 0.0,
-                "num_ctx": int(probe_ctx),
-                "num_gpu": int(OLLAMA_NUM_GPU),
-                "main_gpu": int(OLLAMA_MAIN_GPU),
-            },
-        }
-        req = request.Request(
-            f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with request.urlopen(req, timeout=30) as resp:
-            _ = resp.read()
-    except Exception as e:
-        print(
-            f"[WARN] Ollama startup check: probe generate failed for '{probe_model}': {type(e).__name__}: {e}"
-        )
-
-    try:
-        with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=5) as resp:
+    def _ps_loaded_model(timeout: float = 5.0) -> dict | None:
+        with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=timeout) as resp:
             ps = json.loads(resp.read().decode("utf-8"))
         models = list((ps or {}).get("models", []))
-        chosen = None
         for m in models:
             if str(m.get("name", "")).strip() == probe_model:
-                chosen = m
-                break
-        if not chosen and models:
-            chosen = models[0]
-        if not chosen:
-            print("[INFO] Ollama startup check: no model loaded yet.")
-            return
-        vram = int(chosen.get("size_vram") or 0)
-        proc = "GPU" if vram > 0 else "CPU"
-        ctx = int(chosen.get("context_length") or 0)
-        name = str(chosen.get("name") or probe_model)
-        print(
-            f"[INFO] Ollama startup check: model={name} processor={proc} context={ctx} vram={_format_gib(vram)}"
-        )
+                return m
+        if models:
+            return models[0]
+        return None
 
-        # If startup landed on CPU, try once more with explicit GPU-friendly options.
-        if OLLAMA_FORCE_GPU and vram <= 0:
-            try:
-                payload2 = {
-                    "model": probe_model,
-                    "prompt": "gpu warmup",
-                    "stream": False,
-                    "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
-                    "options": {
-                        "num_predict": 8,
-                        "temperature": 0.0,
-                        "num_ctx": int(probe_ctx),
-                        "num_gpu": int(OLLAMA_NUM_GPU),
-                        "main_gpu": int(OLLAMA_MAIN_GPU),
-                    },
-                }
-                req2 = request.Request(
-                    f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
-                    data=json.dumps(payload2).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                with request.urlopen(req2, timeout=45) as resp2:
-                    _ = resp2.read()
-
-                with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=5) as resp3:
-                    ps2 = json.loads(resp3.read().decode("utf-8"))
-                models2 = list((ps2 or {}).get("models", []))
-                chosen2 = None
-                for m2 in models2:
-                    if str(m2.get("name", "")).strip() == probe_model:
-                        chosen2 = m2
-                        break
-                if not chosen2 and models2:
-                    chosen2 = models2[0]
-                if chosen2:
-                    vram2 = int(chosen2.get("size_vram") or 0)
-                    ctx2 = int(chosen2.get("context_length") or 0)
-                    proc2 = "GPU" if vram2 > 0 else "CPU"
-                    name2 = str(chosen2.get("name") or probe_model)
-                    print(
-                        f"[INFO] Ollama startup recheck: model={name2} processor={proc2} "
-                        f"context={ctx2} vram={_format_gib(vram2)}"
-                    )
-                    if vram2 <= 0:
-                        print(
-                            "[WARN] Ollama is still on CPU after GPU recheck. "
-                            "You can lower CAPTION_NUM_CTX and restart."
-                        )
-            except Exception as e2:
-                print(f"[WARN] Ollama GPU recheck failed: {type(e2).__name__}: {e2}")
+    # Force a tiny load so /api/ps can report CPU/GPU immediately.
+    payload = {
+        "model": probe_model,
+        "prompt": "ok",
+        "stream": False,
+        "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
+        "options": {
+            "num_predict": 1,
+            "temperature": 0.0,
+            "num_ctx": int(probe_ctx),
+            "num_gpu": int(OLLAMA_NUM_GPU),
+            "main_gpu": int(OLLAMA_MAIN_GPU),
+        },
+    }
+    req = request.Request(
+        f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=startup_timeout) as resp:
+            _ = resp.read()
     except Exception as e:
-        print(f"[WARN] Ollama startup check failed: {type(e).__name__}: {e}")
+        raise RuntimeError(
+            f"Ollama model '{probe_model}' failed to start within {startup_timeout}s "
+            f"({type(e).__name__}: {e})."
+        ) from e
+
+    deadline = time.time() + 15.0
+    chosen = None
+    last_ps_error = None
+    while time.time() < deadline:
+        try:
+            chosen = _ps_loaded_model(timeout=5)
+            if chosen:
+                break
+            last_ps_error = None
+        except Exception as e:
+            last_ps_error = e
+        time.sleep(0.5)
+
+    if not chosen:
+        if last_ps_error is not None:
+            raise RuntimeError(
+                f"Ollama model '{probe_model}' did not report as loaded after warmup "
+                f"({type(last_ps_error).__name__}: {last_ps_error})."
+            ) from last_ps_error
+        raise RuntimeError(f"Ollama model '{probe_model}' did not report as loaded after warmup.")
+
+    vram = int(chosen.get("size_vram") or 0)
+    proc = "GPU" if vram > 0 else "CPU"
+    ctx = int(chosen.get("context_length") or 0)
+    name = str(chosen.get("name") or probe_model)
+    print(
+        f"[INFO] Ollama startup check: model={name} processor={proc} context={ctx} vram={_format_gib(vram)}"
+    )
+
+    # If startup landed on CPU, try once more with explicit GPU-friendly options.
+    if OLLAMA_FORCE_GPU and vram <= 0:
+        try:
+            payload2 = {
+                "model": probe_model,
+                "prompt": "gpu warmup",
+                "stream": False,
+                "keep_alive": OLLAMA_WARM_KEEP_ALIVE,
+                "options": {
+                    "num_predict": 8,
+                    "temperature": 0.0,
+                    "num_ctx": int(probe_ctx),
+                    "num_gpu": int(OLLAMA_NUM_GPU),
+                    "main_gpu": int(OLLAMA_MAIN_GPU),
+                },
+            }
+            req2 = request.Request(
+                f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/generate",
+                data=json.dumps(payload2).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with request.urlopen(req2, timeout=45) as resp2:
+                _ = resp2.read()
+
+            with request.urlopen(f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/ps", timeout=5) as resp3:
+                ps2 = json.loads(resp3.read().decode("utf-8"))
+            models2 = list((ps2 or {}).get("models", []))
+            chosen2 = None
+            for m2 in models2:
+                if str(m2.get("name", "")).strip() == probe_model:
+                    chosen2 = m2
+                    break
+            if not chosen2 and models2:
+                chosen2 = models2[0]
+            if chosen2:
+                vram2 = int(chosen2.get("size_vram") or 0)
+                ctx2 = int(chosen2.get("context_length") or 0)
+                proc2 = "GPU" if vram2 > 0 else "CPU"
+                name2 = str(chosen2.get("name") or probe_model)
+                print(
+                    f"[INFO] Ollama startup recheck: model={name2} processor={proc2} "
+                    f"context={ctx2} vram={_format_gib(vram2)}"
+                )
+                if vram2 <= 0:
+                    print(
+                        "[WARN] Ollama is still on CPU after GPU recheck. "
+                        "You can lower CAPTION_NUM_CTX and restart."
+                    )
+        except Exception as e2:
+            print(f"[WARN] Ollama GPU recheck failed: {type(e2).__name__}: {e2}")
 
 
 def _shutdown_ollama_on_run_end() -> None:
@@ -903,6 +1078,8 @@ _QC_NATURE_CUES = (
 _QC_URBAN_CUES = (
     "city",
     "urban",
+    "building",
+    "buildings",
     "downtown",
     "street",
     "highway",
@@ -923,15 +1100,35 @@ _QC_STRONG_URBAN_WORDS = (
     "street light",
     "streetlights",
     "city buildings",
+    "distant buildings",
+    "house",
+    "houses",
 )
 _QC_GENERIC_PHRASES = (
-    "open sky",
+    "a scene featuring",
+    "blue sky color",
     "clear daylight conditions",
+    "close texture and color fill",
+    "flight wings",
+    "grass and field texture fill",
+    "image road with",
+    "in the frame",
+    "land wings",
+    "markings texture",
+    "lines surfaces and structure fill",
     "natural backdrop",
+    "open space fill",
     "outdoor setting",
     "scene appears",
     "scene stands",
     "scene sits",
+    "shape texture and color contrast fill",
+    "sky color and open space",
+    "sky alongside",
+    "pattern texture",
+    "texture markings",
+    "water texture and reflections fill",
+    "with its reflection clearly",
     "within an outdoor setting",
 )
 
@@ -1061,7 +1258,7 @@ def _run_prefill_qc_scan(
             reasons.add("caption_too_short")
         if len(alt_n.split()) < 6:
             reasons.add("alt_too_short")
-        if len(kw_terms) < 10:
+        if len(kw_terms) < 6:
             reasons.add("too_few_keywords")
 
         text_blob = f"{cap_n} {alt_n} {' '.join(kw_terms)}"
@@ -1201,19 +1398,29 @@ _LAST_OLLAMA_ERROR = ""
 
 # Domain-aware subject prompt for single or group selections (ONE line output).
 _SUBJECT_ROLE_PROMPT = (
-    "You are a precise subject line titler with domain awareness across: "
-    "botany and entomology; birds and mammals; buildings and architecture; "
-    "cars, trucks, aircraft, and boats; city and travel scenes; landscapes, weather, and night sky.\n"
-    "From the selected photo or photos, output ONE concise SEO subject line. "
-    "If the selection shows the same main subject in the same setting, write one line that fits the group.\n"
-    "Rules: English, ASCII only. Ideal length 35 to 55 characters, max 60. "
-    "Subject first, then one concrete detail. No hype. Title Case.\n"
-    "If the main subject is a bird, use the specific common species name ONLY if clearly identifiable. "
-    "If not certain, use a broader accurate group like Gull, Heron, Raptor, Duck, Goose, Songbird.\n"
-    "Do NOT guess. Do NOT invent species.\n"
+    "You are a precise SEO subject line writer with domain awareness across "
+    "botany, macro, flowers, insects, birds, mammals, buildings, architecture, city scenes, "
+    "travel scenes, landscapes, weather, night sky, and aviation.\n"
+    "From the selected image or images, output ONE concise subject line.\n"
+    "Use only what is visible in the image. Ignore filename, folder name, and EXIF.\n"
+    "Rules: English, ASCII only. Ideal length 45 to 65 characters. Maximum 75.\n"
+    "Put the subject first, then one concrete detail.\n"
+    "No hype. No fluff. No punctuation in the final line.\n"
     "Do not use these words: macro, photography, photo, image, picture, shot, alt, hdr.\n"
-    "Avoid locations unless readable signage is visible.\n"
-    "Return ONE line only, no quotes, no punctuation, no extra text."
+    "For flowers and plants, prefer the safest common name or a precise plant part description.\n"
+    "For insects and animals, prefer the safest specific common name you can support.\n"
+    "For birds, prefer the safest common species or a useful visible group name supported by bill, wing, leg, plumage, flock, or habitat evidence.\n"
+    "Do not return bare group labels like Birds, Animals, Flowers, Plants, Insects, Wildlife, or Waterfowl when a more useful visible name is possible.\n"
+    "For buildings and city scenes, use a concrete visual descriptor when exact identity is uncertain.\n"
+    "For aircraft, prefer airline plus aircraft family plus visible registration plus flight state when readable from the aircraft itself.\n"
+    "Registration may appear on the wing or fuselage.\n"
+    "Do not invent airline, subtype, or registration.\n"
+    "Do not start the result with generic words like Aircraft, Bird, Flower, Building, Vehicle, or Landscape unless that is truly the most specific visible identification.\n"
+    "Examples of good aircraft wording: "
+    "Suparna Airlines Boeing 747 B2437 Landing Gear Down, "
+    "Suparna Airlines Boeing 747 Landing Gear Down, "
+    "Airbus A320 Final Approach.\n"
+    "Return ONE line only, no quotes, no extra text."
 )
 
 _BANNED_SUBJECT_WORDS = {
@@ -1285,19 +1492,24 @@ _SUBJECT_CATEGORY_ALIASES = {
     "humans": "people",
 }
 _SUBJECT_ANALYZE_PROMPT_BASE = (
-    "Classify the main visual subject in the provided image data.\n"
+    "Identify the main visible subject in the provided image data.\n"
     "Return ONLY strict one-line JSON with this exact schema:\n"
-    '{"primary_subject":"","category":"","detail":"","confidence":0}\n'
+    '{"primary_subject":"","category":"","detail":"","airline":"","aircraft_family":"","variant":"","registration":"","state":"","visible_text":"","confidence":0}\n'
     "Rules:\n"
     "1) category must be one of: "
     "bird, mammal, plant, flower, tree, insect, reptile, fish, "
     "car, truck, motorcycle, vehicle, aircraft, boat, building, architecture, "
     "landscape, cityscape, industrial, people, food, object, other.\n"
-    "2) Use common names only.\n"
-    "3) Use specific species/brand/model only if clearly visible.\n"
-    "4) If uncertain, keep primary_subject broad and confidence <= 60.\n"
-    "5) detail should be 2 to 5 words of visible context.\n"
-    "6) No markdown, no commentary, no extra keys."
+    "2) Use only what is visible in the image. Ignore filename, folder name, and EXIF.\n"
+    "3) primary_subject must be the safest specific identification you can support.\n"
+    "4) For aircraft, fill airline, aircraft_family, variant, registration, and state only when supported by visible markings, livery text, registration text, airframe shape, or landing gear state.\n"
+    "5) Registration may be visible on wing or fuselage.\n"
+    "6) For flowers, insects, birds, mammals, buildings, city scenes, and landscapes, be as specific as the image supports without guessing.\n"
+    "6b) For birds, flowers, insects, plants, and animals, use visible traits to choose the safest common species or common group name; avoid bare group labels when a better visible name is possible.\n"
+    "7) If uncertain, keep primary_subject broader and confidence <= 60.\n"
+    "8) detail should be 2 to 7 words of concrete visible context.\n"
+    "9) visible_text should contain only text you can actually read from the image.\n"
+    "10) No markdown, no commentary, no extra keys."
 )
 _SUBJECT_ANALYZE_PROMPT_SINGLE = (
     _SUBJECT_ANALYZE_PROMPT_BASE + "\nThis is one photo. Return JSON only."
@@ -1307,6 +1519,13 @@ _SUBJECT_ANALYZE_PROMPT_MULTI = (
     + "\nThese photos are one set. Find the common main subject across the set. Return JSON only."
 )
 
+_SUBJECT_ANALYZE_PROMPT_RETRY = (
+    _SUBJECT_ANALYZE_PROMPT_BASE
+    + "\nBe conservative. Read visible text exactly from the image."
+    + "\nFor aircraft, prefer readable airline text, Boeing or Airbus family, readable registration, and landing gear state."
+    + "\nIf text is not actually readable, leave the field blank."
+    + "\nReturn JSON only."
+)
 
 def _smart_title_case(words: list[str]) -> str:
     out: list[str] = []
@@ -1360,6 +1579,277 @@ def _normalize_subject_line(
     return line
 
 
+def _subject_line_is_too_generic(line: str) -> bool:
+    s = re.sub(r"\s+", " ", str(line or "").strip().lower())
+    if not s:
+        return True
+
+    strict_identifier = os.getenv("AMIR_SUBJECT_IDENTIFY_MODE", "").strip() == "1"
+    living_generic_exact = {
+        "bird in natural habitat",
+        "birds in natural habitat",
+        "bird in flight",
+        "birds in flight",
+        "bird formation",
+        "birds formation",
+        "birds formation flying",
+        "flock of birds",
+        "bird flock",
+        "birds flock",
+        "waterfowl",
+        "shorebirds",
+        "wading birds",
+        "wild animal in habitat",
+    }
+    generic_exact = {
+        "aircraft in flight",
+        "aircraft large commercial jet",
+        "large commercial jet",
+        "commercial jet",
+        "bird in natural habitat",
+        "birds in natural habitat",
+        "bird in flight",
+        "birds in flight",
+        "bird formation",
+        "birds formation",
+        "birds formation flying",
+        "flock of birds",
+        "bird flock",
+        "birds flock",
+        "waterfowl",
+        "shorebirds",
+        "wading birds",
+        "wild animal in habitat",
+        "building exterior view",
+        "urban city scene",
+        "natural landscape scene",
+        "outdoor scene detail",
+        "vehicle on road",
+        "boat on water",
+    }
+    if s in generic_exact:
+        if strict_identifier or s not in living_generic_exact:
+            return True
+
+    if s.startswith("aircraft "):
+        return True
+
+    toks = s.split()
+    weak_taxon_roots = {
+        "animal",
+        "animals",
+        "bird",
+        "birds",
+        "goose",
+        "geese",
+        "duck",
+        "ducks",
+        "gull",
+        "gulls",
+        "pigeon",
+        "pigeons",
+        "heron",
+        "herons",
+        "cormorant",
+        "cormorants",
+        "swan",
+        "swans",
+        "coot",
+        "coots",
+        "moorhen",
+        "moorhens",
+        "raptor",
+        "raptors",
+        "deer",
+        "fox",
+        "foxes",
+        "rabbit",
+        "rabbits",
+        "hare",
+        "hares",
+        "squirrel",
+        "squirrels",
+        "horse",
+        "horses",
+        "cow",
+        "cows",
+        "sheep",
+        "dog",
+        "dogs",
+        "cat",
+        "cats",
+        "flower",
+        "flowers",
+        "plant",
+        "plants",
+        "tree",
+        "trees",
+        "insect",
+        "insects",
+        "butterfly",
+        "butterflies",
+        "moth",
+        "moths",
+        "bee",
+        "bees",
+        "beetle",
+        "beetles",
+        "dragonfly",
+        "dragonflies",
+        "damselfly",
+        "damselflies",
+        "fly",
+        "flies",
+        "wasp",
+        "wasps",
+        "spider",
+        "spiders",
+        "waterfowl",
+        "shorebird",
+        "shorebirds",
+        "wader",
+        "waders",
+    }
+    weak_taxon_context = {
+        "in",
+        "on",
+        "at",
+        "of",
+        "the",
+        "with",
+        "calm",
+        "over",
+        "above",
+        "open",
+        "black",
+        "white",
+        "brown",
+        "grey",
+        "gray",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "blue",
+        "purple",
+        "pink",
+        "dark",
+        "light",
+        "pale",
+        "cream",
+        "tan",
+        "beige",
+        "golden",
+        "silver",
+        "chestnut",
+        "rufous",
+        "russet",
+        "water",
+        "waters",
+        "pond",
+        "ponds",
+        "lake",
+        "lakes",
+        "river",
+        "rivers",
+        "canal",
+        "canals",
+        "stream",
+        "streams",
+        "sea",
+        "shore",
+        "bank",
+        "banks",
+        "reed",
+        "reeds",
+        "field",
+        "fields",
+        "grass",
+        "pasture",
+        "meadow",
+        "sky",
+        "flight",
+        "flying",
+        "swimming",
+        "floating",
+        "grazing",
+        "standing",
+        "walking",
+        "resting",
+        "habitat",
+        "scene",
+        "view",
+        "sequence",
+        "sequences",
+        "close",
+        "closeup",
+        "closeups",
+        "up",
+        "macro",
+        "detail",
+        "leaf",
+        "leaves",
+        "head",
+        "headed",
+        "neck",
+        "body",
+        "back",
+        "breast",
+        "belly",
+        "side",
+        "sides",
+        "bill",
+        "bills",
+        "beak",
+        "beaks",
+        "wing",
+        "wings",
+        "tail",
+        "leg",
+        "legs",
+        "feet",
+        "foot",
+        "fur",
+        "plumage",
+        "marking",
+        "markings",
+        "petal",
+        "petals",
+        "stem",
+        "stems",
+        "branch",
+        "branches",
+        "group",
+        "flock",
+    }
+    if strict_identifier and any(tok in weak_taxon_roots for tok in toks):
+        useful = [
+            tok
+            for tok in toks
+            if tok not in weak_taxon_roots
+            and tok not in weak_taxon_context
+        ]
+        if not useful:
+            return True
+
+    living_prefixes = {"bird", "birds", "animal"}
+    broad_prefixes = {
+        "aircraft",
+        "building",
+        "vehicle",
+        "boat",
+        "landscape",
+        "cityscape",
+        "object",
+    }
+    if len(toks) <= 3 and (
+        toks[0] in broad_prefixes or (strict_identifier and toks[0] in living_prefixes)
+    ):
+        return True
+
+    return False
+
+
 def _subject_to_int(v, default: int = 0) -> int:
     try:
         n = int(float(v))
@@ -1367,6 +1857,209 @@ def _subject_to_int(v, default: int = 0) -> int:
         n = default
     return max(0, min(100, n))
 
+def _extract_json_object(raw: str) -> dict | None:
+    s = str(raw or "").strip()
+    if not s:
+        return None
+
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    m = re.search(r"\{[\s\S]*\}", s)
+    if not m:
+        return None
+
+    try:
+        obj = json.loads(m.group(0))
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        return None
+
+    return None
+
+def _extract_aircraft_visible_fields(visible_text: str) -> tuple[str, str]:
+    vt = re.sub(r"\s+", " ", str(visible_text or "").strip())
+    if not vt:
+        return "", ""
+
+    airline = ""
+    registration = ""
+
+    m_air = re.search(
+        r"\b([A-Za-z][A-Za-z0-9]+(?:\s+[A-Za-z][A-Za-z0-9]+){0,2}\s+(?:Airlines?|Cargo))\b",
+        vt,
+        flags=re.IGNORECASE,
+    )
+    if m_air:
+        airline = (
+            _normalize_subject_line(
+                m_air.group(1),
+                max_chars=50,
+                max_words=4,
+                min_words=1,
+            )
+            or ""
+        )
+
+    vt_u = vt.upper()
+    m_reg = re.search(r"\b([A-Z]-?\d{3,5}|[A-Z]{1,2}\d{3,5})\b", vt_u)
+    if m_reg:
+        registration = m_reg.group(1).replace("-", "")
+
+    return airline, registration
+
+def _line_has_registration(line: str) -> bool:
+    s = str(line or "").upper()
+    return bool(re.search(r"\b[A-Z]?\d{3,5}\b", s))
+
+
+def _b64_aircraft_reg_crop(path: str) -> str | None:
+    from io import BytesIO
+
+    try:
+        with warnings.catch_warnings():
+            try:
+                warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            except Exception:
+                pass
+
+            with Image.open(path) as im:
+                im = im.convert("RGB")
+                w, h = im.size
+
+                x1 = max(0, int(w * 0.28))
+                y1 = max(0, int(h * 0.12))
+                x2 = min(w, int(w * 0.90))
+                y2 = min(h, int(h * 0.82))
+
+                crop = im.crop((x1, y1, x2, y2))
+                crop.thumbnail((1792, 1792))
+
+                buf = BytesIO()
+                crop.save(buf, format="JPEG", quality=max(90, SUBJECT_JPEG_QUALITY))
+                return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
+def _pick_aircraft_verify_model() -> str:
+    preferred = "qwen2.5vl:7b"
+    names = _ollama_model_names(timeout=3)
+    if names:
+        resolved = _resolve_ollama_model_alias(preferred, names)
+        if resolved:
+            return resolved
+    return preferred
+
+def _b64_zoom_crops_for_text(path: str) -> list[str]:
+    from io import BytesIO
+
+    out: list[str] = []
+
+    with warnings.catch_warnings():
+        try:
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+        except Exception:
+            pass
+
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            w, h = im.size
+
+            crops = [
+                (0.20, 0.15, 0.88, 0.78),  # aircraft body
+                (0.34, 0.08, 0.78, 0.48),  # upper wing and wing text
+                (0.40, 0.28, 0.94, 0.82),  # rear fuselage and tail
+            ]
+
+            for x1r, y1r, x2r, y2r in crops:
+                x1 = max(0, min(w - 1, int(w * x1r)))
+                y1 = max(0, min(h - 1, int(h * y1r)))
+                x2 = max(x1 + 1, min(w, int(w * x2r)))
+                y2 = max(y1 + 1, min(h, int(h * y2r)))
+
+                crop = im.crop((x1, y1, x2, y2))
+                crop.thumbnail((1792, 1792))
+
+                buf = BytesIO()
+                crop.save(buf, format="JPEG", quality=max(90, SUBJECT_JPEG_QUALITY))
+                out.append(base64.b64encode(buf.getvalue()).decode("ascii"))
+
+    return out
+
+
+def _aircraft_registration_from_analysis(raw: str) -> str:
+    data = _extract_json_object(raw)
+    if not data:
+        return ""
+
+    visible_text = str(data.get("visible_text") or "")
+    _, visible_registration = _extract_aircraft_visible_fields(visible_text)
+    if visible_registration:
+        return visible_registration
+
+    reg_raw = str(data.get("registration") or "").strip().upper()
+    reg_raw = re.sub(r"[^A-Z0-9]+", "", reg_raw)
+    if reg_raw and len(reg_raw) >= 4 and any(ch.isdigit() for ch in reg_raw):
+        return reg_raw
+
+    return ""
+
+
+def _merge_aircraft_registration(line: str, registration: str) -> str:
+    base = _normalize_subject_line(
+        line,
+        max_chars=SUBJECT_MAX_CHARS,
+        max_words=None,
+        min_words=3,
+    )
+    reg = re.sub(r"[^A-Z0-9]+", "", str(registration or "").upper())
+
+    if not base or not reg:
+        return base or ""
+    if reg.lower() in base.lower():
+        return base
+
+    state_phrases = [
+        " Landing Gear Down",
+        " Final Approach",
+        " On Approach",
+        " Approach",
+        " Takeoff",
+        " Ascending",
+        " Descending",
+        " Taxiing",
+        " In Flight",
+    ]
+
+    for phrase in state_phrases:
+        if base.endswith(phrase):
+            merged = base[: -len(phrase)].rstrip() + f" {reg}" + phrase
+            return (
+                _normalize_subject_line(
+                    merged,
+                    max_chars=SUBJECT_MAX_CHARS,
+                    max_words=None,
+                    min_words=3,
+                )
+                or base
+            )
+
+    merged = f"{base} {reg}"
+    return (
+        _normalize_subject_line(
+            merged,
+            max_chars=SUBJECT_MAX_CHARS,
+            max_words=None,
+            min_words=3,
+        )
+        or base
+    )
 
 def _normalize_subject_category(raw: str) -> str:
     s = re.sub(r"[^a-z]+", "", str(raw or "").lower())
@@ -1399,24 +2092,8 @@ def _normalize_subject_category(raw: str) -> str:
     return "other"
 
 
-def _extract_json_object(raw: str) -> dict | None:
-    s = (raw or "").strip()
-    if not s:
-        return None
-    try:
-        obj = json.loads(s)
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        pass
-
-    m = re.search(r"\{[\s\S]*\}", s)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-        return obj if isinstance(obj, dict) else None
-    except Exception:
-        return None
+def _subject_filename_context(paths: list[str]) -> str:
+    return ""
 
 
 def _subject_generate(
@@ -1443,9 +2120,6 @@ def _subject_generate(
             "repeat_penalty": 1.1,
             "repeat_last_n": 64,
             "seed": 42,
-            "num_gpu": int(OLLAMA_NUM_GPU),
-            "main_gpu": int(OLLAMA_MAIN_GPU),
-            "stop": ["\n"],
         },
     }
 
@@ -1457,9 +2131,20 @@ def _subject_generate(
             method="POST",
         )
         with request.urlopen(req, timeout=max(20, int(timeout_sec))) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body)
+    except request.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            err_body = ""
+        _LAST_OLLAMA_ERROR = (
+            f"Ollama request failed: HTTP {e.code}"
+            + (f"\n\n{err_body}" if err_body else f" {e.reason}")
+        )
+        return None
     except Exception as e:
-        _LAST_OLLAMA_ERROR = f"Ollama request failed: {e}"
+        _LAST_OLLAMA_ERROR = f"Ollama request failed: {type(e).__name__}: {e}"
         return None
 
     if isinstance(data, dict) and data.get("error"):
@@ -1472,7 +2157,6 @@ def _subject_generate(
         return None
     return raw
 
-
 def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
     data = _extract_json_object(raw)
     if not data:
@@ -1480,6 +2164,96 @@ def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
 
     category = _normalize_subject_category(str(data.get("category") or ""))
     confidence = _subject_to_int(data.get("confidence"), default=0)
+
+    if category == "aircraft":
+        visible_text = str(data.get("visible_text") or "")
+        visible_airline, visible_registration = _extract_aircraft_visible_fields(visible_text)
+
+        airline_model = _normalize_subject_line(
+            str(data.get("airline") or ""),
+            max_chars=max_chars,
+            max_words=4,
+            min_words=1,
+        )
+        family = _normalize_subject_line(
+            str(data.get("aircraft_family") or data.get("primary_subject") or ""),
+            max_chars=max_chars,
+            max_words=5,
+            min_words=1,
+        )
+        state = _normalize_subject_line(
+            str(data.get("state") or data.get("detail") or ""),
+            max_chars=max_chars,
+            max_words=4,
+            min_words=1,
+        )
+
+        airline = ""
+        if visible_airline:
+            airline = visible_airline
+        elif airline_model and airline_model.lower() in visible_text.lower():
+            airline = airline_model
+
+        if family:
+            family_l = family.lower()
+            if family_l.startswith("aircraft"):
+                family = ""
+            elif not re.search(
+                r"\b(boeing|airbus|embraer|bombardier|atr|cessna|antonov|747|737|757|767|777|787|a220|a300|a310|a318|a319|a320|a321|a330|a340|a350|a380)\b",
+                family_l,
+            ):
+                family = ""
+
+        registration = visible_registration
+        if not registration:
+            reg_raw = str(data.get("registration") or "").strip().upper()
+            reg_raw = re.sub(r"[^A-Z0-9]+", "", reg_raw)
+            vis_u = re.sub(r"[^A-Z0-9]+", "", visible_text.upper())
+            if reg_raw and len(reg_raw) >= 4 and reg_raw in vis_u and any(ch.isdigit() for ch in reg_raw):
+                registration = reg_raw
+
+        if state:
+            state_l = state.lower()
+            allowed_state = (
+                "landing gear down",
+                "final approach",
+                "on approach",
+                "approach",
+                "takeoff",
+                "ascending",
+                "descending",
+                "taxiing",
+            )
+            if not any(x in state_l for x in allowed_state):
+                state = ""
+
+        parts: list[str] = []
+
+        if airline:
+            parts.append(airline)
+
+        if family:
+            parts.append(family)
+
+        if registration:
+            joined = " ".join(parts).lower()
+            if registration.lower() not in joined:
+                parts.append(registration)
+
+        if state:
+            joined = " ".join(parts).lower()
+            if state.lower() not in joined:
+                parts.append(state)
+
+        line = _normalize_subject_line(
+            " ".join(parts),
+            max_chars=max_chars,
+            max_words=None,
+            min_words=3,
+        )
+        if line and not _subject_line_is_too_generic(line):
+            return line
+
     primary = _normalize_subject_line(
         str(data.get("primary_subject") or ""),
         max_chars=max_chars,
@@ -1495,9 +2269,11 @@ def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
 
     if confidence < SUBJECT_MIN_CONFIDENCE:
         primary = None
+
     if not primary:
         primary = _SUBJECT_CATEGORY_FALLBACK.get(
-            category, _SUBJECT_CATEGORY_FALLBACK["other"]
+            category,
+            _SUBJECT_CATEGORY_FALLBACK["other"],
         )
 
     if detail:
@@ -1506,35 +2282,63 @@ def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
         detail = " ".join(dw).strip()
 
     line_raw = f"{primary} {detail}".strip() if detail else primary
-    out = _normalize_subject_line(line_raw, max_chars=max_chars, max_words=None, min_words=3)
-    if out:
+    out = _normalize_subject_line(
+        line_raw,
+        max_chars=max_chars,
+        max_words=None,
+        min_words=3,
+    )
+    if out and not _subject_line_is_too_generic(out):
         return out
-    return _normalize_subject_line(primary, max_chars=max_chars, max_words=None, min_words=1)
 
+    return None
 
 def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
     """Return one subject line for a single image or a group selection."""
     global _LAST_OLLAMA_ERROR
     _LAST_OLLAMA_ERROR = ""
 
+    def _consensus(lines: list[str]) -> str | None:
+        counts: dict[str, int] = {}
+        keep: dict[str, str] = {}
+
+        for line in lines:
+            clean = _normalize_subject_line(
+                line,
+                max_chars=SUBJECT_MAX_CHARS,
+                max_words=None,
+                min_words=1,
+            )
+            if not clean:
+                continue
+            key = clean.lower()
+            counts[key] = counts.get(key, 0) + 1
+            if key not in keep:
+                keep[key] = clean
+
+        if not counts:
+            return None
+
+        best_key = sorted(
+            counts.keys(),
+            key=lambda k: (
+                -counts[k],
+                -sum(ch.isdigit() for ch in k),
+                -len(k.split()),
+                -len(k),
+                k,
+            ),
+        )[0]
+        return keep[best_key]
+
     paths = [p for p in (image_paths or []) if p and os.path.isfile(p)]
     if not paths:
         _LAST_OLLAMA_ERROR = "No valid image files were selected."
         return None
 
-    if not _ensure_ollama_running():
-        _LAST_OLLAMA_ERROR = f"Ollama is not responding on {OLLAMA_HOST}:{OLLAMA_PORT}."
-        return None
+    if len(paths) == 1:
+        return ai_suggest_subject(paths[0])
 
-    subject_model = _pick_subject_model()
-    if not _ensure_ollama_model(subject_model):
-        wanted = ", ".join(SUBJECT_MODEL_CANDIDATES or (OLLAMA_MODEL,))
-        _LAST_OLLAMA_ERROR = (
-            f"No usable subject model found. Install one of: {wanted}"
-        )
-        return None
-
-    # up to 4 images is usually enough to describe a set
     try:
         take = min(4, len(paths))
         idxs = (
@@ -1543,66 +2347,47 @@ def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
             else [0]
         )
         pick = [paths[i] for i in idxs]
-        imgs = [_b64_image_for_ollama(p) for p in pick]
-
     except Exception as e:
-        _LAST_OLLAMA_ERROR = f"Failed to read image: {e}"
+        _LAST_OLLAMA_ERROR = f"Failed to prepare image selection: {e}"
         return None
 
-    timeout_sec = int(os.getenv("SUBJECT_TIMEOUT_SEC", "120"))
+    candidate_lines: list[str] = []
+    last_error = ""
 
-    # First pass: strict JSON classification for reliable category grounding.
-    analysis_prompt = (
-        _SUBJECT_ANALYZE_PROMPT_MULTI if len(imgs) > 1 else _SUBJECT_ANALYZE_PROMPT_SINGLE
-    )
-    analysis_raw = _subject_generate(
-        model=subject_model,
-        prompt=analysis_prompt,
-        images=imgs,
-        temperature=0.0,
-        num_predict=180,
-        timeout_sec=timeout_sec,
-    )
-    line = _subject_line_from_analysis(analysis_raw or "", max_chars=SUBJECT_MAX_CHARS)
-    if line:
-        return line
+    for path in pick:
+        guess = ai_suggest_subject(path)
+        if guess:
+            candidate_lines.append(guess)
+            continue
+        if _LAST_OLLAMA_ERROR:
+            last_error = _LAST_OLLAMA_ERROR
 
-    # Fallback: free-form one-line subject prompt.
-    raw = _subject_generate(
-        model=subject_model,
-        prompt=_SUBJECT_ROLE_PROMPT,
-        images=imgs,
-        temperature=0.1,
-        num_predict=48,
-        timeout_sec=timeout_sec,
-    )
-    if not raw:
-        return None
-    line = _normalize_subject_line(
-        raw, max_chars=SUBJECT_MAX_CHARS, max_words=None, min_words=3
-    )
-    if not line:
-        _LAST_OLLAMA_ERROR = "Model output was not usable after sanitizing."
-        return None
+    final_line = _consensus(candidate_lines)
+    if final_line:
+        return final_line
 
-    return line
-
+    _LAST_OLLAMA_ERROR = last_error or "Model could not produce a usable subject suggestion."
+    return None
 
 def ai_suggest_subject(image_path: str) -> str | None:
     """Return a short subject suggestion via Ollama (vision model)."""
     global _LAST_OLLAMA_ERROR
+    _LAST_OLLAMA_ERROR = ""
 
     if not os.path.isfile(image_path):
         return None
-    # Fast path: local nature classifier (bird/animal/plant) when filename hints support it.
+
     try:
         quick = _nature_subject_from_classifier(image_path)
         if quick:
             return quick
     except Exception:
         pass
+
     if not _ensure_ollama_running():
+        _LAST_OLLAMA_ERROR = f"Ollama is not responding on {OLLAMA_HOST}:{OLLAMA_PORT}."
         return None
+
     subject_model = _pick_subject_model()
     if not _ensure_ollama_model(subject_model):
         wanted = ", ".join(SUBJECT_MODEL_CANDIDATES or (OLLAMA_MODEL,))
@@ -1619,28 +2404,89 @@ def ai_suggest_subject(image_path: str) -> str | None:
         prompt=_SUBJECT_ANALYZE_PROMPT_SINGLE,
         images=imgs,
         temperature=0.0,
-        num_predict=160,
+        num_predict=180,
         timeout_sec=timeout_sec,
     )
-    line = _subject_line_from_analysis(analysis_raw or "", max_chars=SUBJECT_MAX_CHARS)
-    if line:
-        return line
+
+    best_line = _subject_line_from_analysis(
+        analysis_raw or "",
+        max_chars=SUBJECT_MAX_CHARS,
+    )
+
+    data = _extract_json_object(analysis_raw or "") or {}
+    is_aircraft = _normalize_subject_category(str(data.get("category") or "")) == "aircraft"
+
+    if best_line and not _subject_line_is_too_generic(best_line) and not is_aircraft:
+        return best_line
+
+    if best_line and not _subject_line_is_too_generic(best_line) and is_aircraft and _line_has_registration(best_line):
+        return best_line
+
+    if is_aircraft:
+        reg_crop = _b64_aircraft_reg_crop(image_path)
+        if reg_crop:
+            verify_model = _pick_aircraft_verify_model()
+
+            analysis_crop = _subject_generate(
+                model=verify_model,
+                prompt=_SUBJECT_ANALYZE_PROMPT_RETRY,
+                images=[reg_crop],
+                temperature=0.0,
+                num_predict=220,
+                timeout_sec=timeout_sec,
+            )
+
+            crop_line = _subject_line_from_analysis(
+                analysis_crop or "",
+                max_chars=SUBJECT_MAX_CHARS,
+            )
+
+            reg = _aircraft_registration_from_analysis(analysis_crop or "")
+            if not reg:
+                reg = _aircraft_registration_from_analysis(analysis_raw or "")
+
+            if crop_line and not _subject_line_is_too_generic(crop_line):
+                if reg and not _line_has_registration(crop_line):
+                    crop_line = _merge_aircraft_registration(crop_line, reg)
+                return crop_line
+
+            if best_line and not _subject_line_is_too_generic(best_line):
+                if reg and not _line_has_registration(best_line):
+                    best_line = _merge_aircraft_registration(best_line, reg)
+                return best_line
+
+        if best_line and not _subject_line_is_too_generic(best_line):
+            return best_line
+
+        _LAST_OLLAMA_ERROR = "Aircraft subject was found, but readable registration was not verified."
+        return None
 
     raw = _subject_generate(
         model=subject_model,
         prompt=_SUBJECT_ROLE_PROMPT,
         images=imgs,
         temperature=0.1,
-        num_predict=40,
+        num_predict=60,
         timeout_sec=timeout_sec,
     )
     if not raw:
         return None
-    return _normalize_subject_line(
-        raw, max_chars=SUBJECT_MAX_CHARS, max_words=6, min_words=3
+
+    line = _normalize_subject_line(
+        raw,
+        max_chars=SUBJECT_MAX_CHARS,
+        max_words=None,
+        min_words=3,
     )
+    if not line:
+        _LAST_OLLAMA_ERROR = "Model output was not usable after sanitizing."
+        return None
 
+    if _subject_line_is_too_generic(line):
+        _LAST_OLLAMA_ERROR = f"Model output stayed too generic: {line}"
+        return None
 
+    return line
 # ---------- Utilities you already have ----------
 from utils.file_namer import (
     get_exif_data,
@@ -1693,7 +2539,9 @@ def _prepare_external_script(rel_script: str) -> str:
             rt_root = os.path.join(DATA_DIR, "_runtime_scripts")
             os.makedirs(rt_root, exist_ok=True)
 
-            dst_script = os.path.join(rt_root, os.path.basename(rel_script))
+            rel_norm = rel_script.replace("/", os.sep).replace("\\", os.sep)
+            dst_script = os.path.join(rt_root, rel_norm)
+            os.makedirs(os.path.dirname(dst_script), exist_ok=True)
             _copy_if_changed(src, dst_script)
 
             # Keep config available for helper scripts that probe beside __file__.
@@ -1716,12 +2564,65 @@ def _prepare_external_script(rel_script: str) -> str:
                             _copy_if_changed(cs, os.path.join(data_dst, fn))
                             break
 
+                for extra in ("metadata_evidence_pipeline.py",):
+                    ex_src = resource_path(extra)
+                    if ex_src and os.path.exists(ex_src):
+                        _copy_if_changed(ex_src, os.path.join(rt_root, os.path.basename(extra)))
+
             if base_name == "batch_image_quality_score.py":
                 # Optional extras to keep CLIP aesthetic path working.
                 for extra in ("simple_inference.py", "sac+logos+ava1-l14-linearMSE.pth"):
                     ex_src = resource_path(extra)
                     if ex_src and os.path.exists(ex_src):
                         _copy_if_changed(ex_src, os.path.join(rt_root, os.path.basename(extra)))
+
+                # The scorer imports this at startup. In onefile EXE mode the
+                # script runs from data/_runtime_scripts, so copy the tiny helper
+                # package beside it instead of letting scoring die before it starts.
+                utils_dst = os.path.join(rt_root, "utils")
+                os.makedirs(utils_dst, exist_ok=True)
+                force_logs_src = resource_path(os.path.join("utils", "force_logs_dir.py"))
+                if force_logs_src and os.path.exists(force_logs_src):
+                    _copy_if_changed(force_logs_src, os.path.join(utils_dst, "force_logs_dir.py"))
+                init_dst = os.path.join(utils_dst, "__init__.py")
+                if not os.path.exists(init_dst):
+                    with open(init_dst, "w", encoding="utf-8") as _f:
+                        _f.write("# runtime utils package\n")
+
+            if base_name in {
+                "caption_review_local.py",
+                "batch_image_quality_score.py",
+                "metadata_quality_production.py",
+            }:
+                utils_dst = os.path.join(rt_root, "utils")
+                os.makedirs(utils_dst, exist_ok=True)
+                force_logs_src = resource_path(os.path.join("utils", "force_logs_dir.py"))
+                if force_logs_src and os.path.exists(force_logs_src):
+                    _copy_if_changed(force_logs_src, os.path.join(utils_dst, "force_logs_dir.py"))
+                init_dst = os.path.join(utils_dst, "__init__.py")
+                if not os.path.exists(init_dst):
+                    with open(init_dst, "w", encoding="utf-8") as _f:
+                        _f.write("# runtime utils package\n")
+
+            if base_name.startswith("identifier_") or base_name in {
+                "identifier_router.py",
+                "apply_identifier_router_result_to_db.py",
+                "subject_identifier_engine.py",
+                "subject_identifier_production.py",
+                "identifier_biology_runner.py",
+            }:
+                # Router helpers call modules as python -m scripts.<name>.
+                # In onefile mode, copy the scripts package beside the runtime script.
+                scripts_src = resource_path("scripts")
+                scripts_dst = os.path.join(rt_root, "scripts")
+                if scripts_src and os.path.isdir(scripts_src):
+                    os.makedirs(scripts_dst, exist_ok=True)
+                    for py_file in glob.glob(os.path.join(scripts_src, "*.py")):
+                        _copy_if_changed(py_file, os.path.join(scripts_dst, os.path.basename(py_file)))
+                    init_dst = os.path.join(scripts_dst, "__init__.py")
+                    if not os.path.exists(init_dst):
+                        with open(init_dst, "w", encoding="utf-8") as _f:
+                            _f.write("# runtime scripts package\n")
 
             return dst_script
     except Exception as e:
@@ -1776,28 +2677,69 @@ def _ensure_db_table(conn: sqlite3.Connection):
         "Original_File_Name",
         "brisque_score",
         "clip_aesthetic_score",
+        "identifier_route",
+        "identifier_category",
+        "identifier_subject",
+        "identifier_confidence",
+        "subject_seed",
+        "subject_seed_mode",
+        "subject_seed_confidence",
+        "subject_seed_reason",
+        "identifier_raw_json",
+        "ai_suggested_subject",
+        "final_subject",
+        "batch_set_index",
+        "batch_set_total",
+        "series_key",
+        "series_cluster_index",
+        "series_position",
+        "series_count",
+        "series_similarity_score",
+        "series_reason",
+        "visual_hash",
+        "visual_variant",
+        "metadata_version",
     ]
+
+    create_review_queue_sql = f"""
+        CREATE TABLE {TABLE_NAME}(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            Folder TEXT, File_Name TEXT, Path TEXT, ollama_path TEXT, Thumb_Path TEXT,
+            DateTime TEXT, Camera TEXT, Lens_model TEXT,
+            Width INTEGER, Height INTEGER, Exposure TEXT, Aperture TEXT,
+            ISO INTEGER, Focal_length INTEGER,
+            Keywords TEXT, Caption TEXT, alt_text TEXT, Location TEXT, Subject TEXT,
+            nima_score REAL, blur_score REAL, brightness_score REAL,
+            contrast_score REAL, QR REAL, QC_Status TEXT, Review_Status TEXT,
+            Original_File_Name TEXT, brisque_score REAL, clip_aesthetic_score REAL,
+            identifier_route TEXT, identifier_category TEXT, identifier_subject TEXT,
+            identifier_confidence INTEGER, subject_seed TEXT, subject_seed_mode TEXT,
+            subject_seed_confidence INTEGER, subject_seed_reason TEXT, identifier_raw_json TEXT,
+            ai_suggested_subject TEXT, final_subject TEXT,
+            batch_set_index INTEGER, batch_set_total INTEGER,
+            series_key TEXT, series_cluster_index INTEGER,
+            series_position INTEGER, series_count INTEGER,
+            series_similarity_score REAL, series_reason TEXT,
+            visual_hash TEXT, visual_variant TEXT,
+            metadata_version INTEGER DEFAULT 1
+        )
+    """
+
+    if not order:
+        cur.execute(create_review_queue_sql)
+        conn.commit()
+        cur.execute(f"PRAGMA table_info({TABLE_NAME})")
+        _rows = cur.fetchall()
+        have = {r[1] for r in _rows}
+        order = [r[1] for r in _rows]
+
     if order != target:
         print(
             "[WARN] review_queue column order differs; rebuilding table to match main.py …"
         )
         # Rebuild table with correct column order
         cur.execute(f"ALTER TABLE {TABLE_NAME} RENAME TO {TABLE_NAME}_old")
-        cur.execute(
-            f"""
-            CREATE TABLE {TABLE_NAME}(
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                Folder TEXT, File_Name TEXT, Path TEXT, ollama_path TEXT, Thumb_Path TEXT,
-                DateTime TEXT, Camera TEXT, Lens_model TEXT,
-                Width INTEGER, Height INTEGER, Exposure TEXT, Aperture TEXT,
-                ISO INTEGER, Focal_length INTEGER,
-                Keywords TEXT, Caption TEXT, alt_text TEXT, Location TEXT, Subject TEXT,
-                nima_score REAL, blur_score REAL, brightness_score REAL,
-                contrast_score REAL, QR REAL, QC_Status TEXT, Review_Status TEXT,
-                Original_File_Name TEXT, brisque_score REAL, clip_aesthetic_score REAL
-            )
-        """
-        )
+        cur.execute(create_review_queue_sql)
         cols_in_old = ", ".join([c for c in target if c in order])
         cur.execute(
             f"INSERT INTO {TABLE_NAME} ({cols_in_old}) SELECT {cols_in_old} FROM {TABLE_NAME}_old"
@@ -1825,6 +2767,28 @@ def _ensure_db_table(conn: sqlite3.Connection):
         ("Original_File_Name", "TEXT"),
         ("brisque_score", "REAL"),
         ("clip_aesthetic_score", "REAL"),
+        ("identifier_route", "TEXT"),
+        ("identifier_category", "TEXT"),
+        ("identifier_subject", "TEXT"),
+        ("identifier_confidence", "INTEGER"),
+        ("subject_seed", "TEXT"),
+        ("subject_seed_mode", "TEXT"),
+        ("subject_seed_confidence", "INTEGER"),
+        ("subject_seed_reason", "TEXT"),
+        ("identifier_raw_json", "TEXT"),
+        ("ai_suggested_subject", "TEXT"),
+        ("final_subject", "TEXT"),
+        ("batch_set_index", "INTEGER"),
+        ("batch_set_total", "INTEGER"),
+        ("series_key", "TEXT"),
+        ("series_cluster_index", "INTEGER"),
+        ("series_position", "INTEGER"),
+        ("series_count", "INTEGER"),
+        ("series_similarity_score", "REAL"),
+        ("series_reason", "TEXT"),
+        ("visual_hash", "TEXT"),
+        ("visual_variant", "TEXT"),
+        ("metadata_version", "INTEGER DEFAULT 1"),
     ]:
         add(col, typ)
 
@@ -1839,6 +2803,645 @@ def upsert_review_row(cur: sqlite3.Cursor, row: dict):
         f"INSERT INTO {TABLE_NAME} ({','.join(cols)}) VALUES ({placeholders})", vals
     )
     return cur.lastrowid
+
+
+def cleanup_metadata_quality_rows_for_file_names(file_names) -> int:
+    """
+    Rollback helper.
+
+    Removes local metadata_quality rows for files from a failed batch.
+    Uses a fresh DB connection so rollback still works even if the previous
+    review_queue connection was already closed.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    names = [
+        str(name).strip()
+        for name in file_names
+        if str(name or "").strip()
+    ]
+
+    if not names:
+        return 0
+
+    db_path = Path(__file__).resolve().parent / "data" / "review.db"
+    placeholders = ",".join("?" for _ in names)
+
+    with sqlite3.connect(db_path) as cleanup_conn:
+        cur = cleanup_conn.execute(
+            f"""
+            DELETE FROM metadata_quality
+            WHERE uploaded_to_mysql = 0
+              AND revamp_id IS NULL
+              AND revamp_File_Name IN ({placeholders})
+            """,
+            names,
+        )
+        cleanup_conn.commit()
+        return int(cur.rowcount or 0)
+
+def upsert_metadata_quality_seed_from_review_row(cur: sqlite3.Cursor, review_row_id: int, row: dict) -> None:
+    """
+    Create/update the local metadata_quality row when an image enters review_queue.
+
+    Identity rule:
+    - metadata_quality.id = internal quality table id
+    - metadata_quality.revamp_id = photos_info_revamp.id after upload
+    - review_queue.id = temporary workflow row id and is never stored as revamp_id
+
+    Subject rule:
+    - ai_suggested_subject = raw AI suggestion or identifier subject
+    - final_subject = accepted UI workflow subject
+    - subject_seed = final_subject for metadata bookkeeping
+    """
+    file_name = str(row.get("File_Name") or "").strip()
+
+    if not file_name:
+        return
+
+    subject = str(row.get("Subject") or "").strip()
+    ai_suggested_subject = str(row.get("ai_suggested_subject") or row.get("identifier_subject") or "").strip()
+    final_subject = str(row.get("final_subject") or subject or "").strip()
+    subject_seed_for_mq = final_subject
+
+    caption = str(row.get("Caption") or "").strip()
+    alt_text = str(row.get("alt_text") or "").strip()
+    keywords = str(row.get("Keywords") or "").strip()
+    review_status = str(row.get("Review_Status") or "Queued").strip()
+
+    part_of_serie = 1 if re.search(r"_(\d{3})\.", file_name, flags=re.IGNORECASE) else 0
+
+    cur.execute("""
+        INSERT INTO metadata_quality (
+            revamp_id,
+            revamp_File_Name,
+            revamp_Original_File_Name,
+            revamp_Location,
+            revamp_Folder,
+            current_caption,
+            current_alt_text,
+            current_keywords,
+            upload_caption,
+            upload_alt_text,
+            upload_keywords,
+            overall_quality_status,
+            overall_quality_score,
+            overall_quality_issues,
+            generation_mode,
+            repair_attempts,
+            fallback_used,
+            fallback_reason,
+            accepted_for_upload,
+            caption_accepted_for_upload,
+            alt_text_accepted_for_upload,
+            keywords_accepted_for_upload,
+            part_of_serie,
+            unique_name,
+            ai_suggested_subject,
+            final_subject,
+            subject_seed,
+            subject_seed_mode,
+            subject_seed_confidence,
+            subject_seed_reason,
+            manual_decision,
+            uploaded_to_mysql,
+            mysql_synced_at,
+            upload_public_path,
+            upload_status,
+            source_review_status,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            NULL,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            'WORKFLOW_QUEUED',
+            0,
+            'created_from_review_queue',
+            'workflow_seed',
+            0,
+            0,
+            'workflow_seed',
+            0,
+            0,
+            0,
+            0,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            'ui_subject',
+            NULL,
+            'created from main_set review_queue insert',
+            'SET_CREATED',
+            0,
+            NULL,
+            NULL,
+            NULL,
+            ?,
+            CURRENT_TIMESTAMP,
+            CURRENT_TIMESTAMP
+        )
+        ON CONFLICT(revamp_File_Name) DO UPDATE SET
+            revamp_Original_File_Name=excluded.revamp_Original_File_Name,
+            revamp_Location=excluded.revamp_Location,
+            revamp_Folder=excluded.revamp_Folder,
+            current_caption=excluded.current_caption,
+            current_alt_text=excluded.current_alt_text,
+            current_keywords=excluded.current_keywords,
+            upload_caption=excluded.upload_caption,
+            upload_alt_text=excluded.upload_alt_text,
+            upload_keywords=excluded.upload_keywords,
+            overall_quality_status=excluded.overall_quality_status,
+            overall_quality_score=excluded.overall_quality_score,
+            overall_quality_issues=excluded.overall_quality_issues,
+            generation_mode=excluded.generation_mode,
+            repair_attempts=excluded.repair_attempts,
+            fallback_used=excluded.fallback_used,
+            fallback_reason=excluded.fallback_reason,
+            accepted_for_upload=excluded.accepted_for_upload,
+            caption_accepted_for_upload=excluded.caption_accepted_for_upload,
+            alt_text_accepted_for_upload=excluded.alt_text_accepted_for_upload,
+            keywords_accepted_for_upload=excluded.keywords_accepted_for_upload,
+            part_of_serie=excluded.part_of_serie,
+            unique_name=excluded.unique_name,
+            ai_suggested_subject=excluded.ai_suggested_subject,
+            final_subject=excluded.final_subject,
+            subject_seed=excluded.subject_seed,
+            subject_seed_mode=excluded.subject_seed_mode,
+            subject_seed_confidence=excluded.subject_seed_confidence,
+            subject_seed_reason=excluded.subject_seed_reason,
+            manual_decision=excluded.manual_decision,
+            source_review_status=excluded.source_review_status,
+            updated_at=CURRENT_TIMESTAMP
+    """, (
+        file_name,
+        row.get("Original_File_Name"),
+        row.get("Location"),
+        row.get("Folder"),
+        caption,
+        alt_text,
+        keywords,
+        caption,
+        alt_text,
+        keywords,
+        part_of_serie,
+        file_name,
+        ai_suggested_subject,
+        final_subject,
+        subject_seed_for_mq,
+        review_status,
+    ))
+
+def _safe_router_slug(value: str) -> str:
+    value = str(value or "").strip().replace(" ", "_")
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_.-")
+    return value or "set"
+
+
+def _router_clean_text(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "").replace("\u00a0", " ")).strip()
+
+
+def _router_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _router_copy_file(src: str, dst: str) -> None:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    try:
+        if os.path.exists(dst):
+            os.remove(dst)
+    except Exception:
+        pass
+    try:
+        os.link(src, dst)
+    except Exception:
+        shutil.copy2(src, dst)
+
+
+def _apply_identifier_router_json_to_db(
+    *,
+    db_path: str,
+    table: str,
+    json_path: str,
+    allowed_ids: list[int],
+) -> tuple[int, int]:
+    allowed = {int(x) for x in allowed_ids if int(x) > 0}
+    if not allowed:
+        return 0, 0
+
+    with open(json_path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    rows = payload.get("results") if isinstance(payload, dict) else []
+    if not isinstance(rows, list):
+        raise RuntimeError("Identifier router JSON does not contain a results list.")
+
+    updated = 0
+    missed = 0
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        _ensure_db_table(conn)
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            image_name = _router_clean_text(row.get("image_name"))
+            if not image_name:
+                missed += 1
+                continue
+
+            marks = ",".join(["?"] * len(allowed))
+            found = cur.execute(
+                f"""
+                SELECT id
+                FROM {table}
+                WHERE id IN ({marks})
+                  AND (File_Name = ? OR Original_File_Name = ?)
+                LIMIT 1
+                """,
+                [*sorted(allowed), image_name, image_name],
+            ).fetchone()
+
+            if not found:
+                missed += 1
+                print(f"[IDENTIFIER-MISS] {image_name}")
+                continue
+
+            rid = int(found["id"] if isinstance(found, sqlite3.Row) else found[0])
+            route = _router_clean_text(row.get("route"))
+            category = _router_clean_text(row.get("category"))
+            subject = _router_clean_text(row.get("subject"))
+            confidence = _router_int(row.get("confidence"), 0)
+            subject_seed = _router_clean_text(row.get("subject_seed"))
+            subject_seed_mode = _router_clean_text(row.get("subject_seed_mode"))
+            subject_seed_confidence = _router_int(row.get("subject_seed_confidence"), confidence)
+            subject_seed_reason = _router_clean_text(row.get("subject_seed_reason"))
+            raw_json = json.dumps(row, ensure_ascii=False)
+
+            cur.execute(
+                f"""
+                UPDATE {table}
+                SET
+                    identifier_route = ?,
+                    identifier_category = ?,
+                    identifier_subject = ?,
+                    identifier_confidence = ?,
+                    subject_seed = ?,
+                    subject_seed_mode = ?,
+                    subject_seed_confidence = ?,
+                    subject_seed_reason = ?,
+                    identifier_raw_json = ?
+                WHERE id = ?
+                """,
+                (
+                    route,
+                    category,
+                    subject,
+                    confidence,
+                    subject_seed,
+                    subject_seed_mode,
+                    subject_seed_confidence,
+                    subject_seed_reason,
+                    raw_json,
+                    rid,
+                ),
+            )
+            updated += 1
+            print(
+                f"[IDENTIFIER-DB] id={rid} route={route or '-'} "
+                f"seed={subject_seed or '-'} mode={subject_seed_mode or '-'} "
+                f"confidence={subject_seed_confidence}"
+            )
+
+        conn.commit()
+
+    return updated, missed
+
+
+def _identifier_router_cleanup_tmp(tmp_dir: str) -> None:
+    if not IDENTIFIER_ROUTER_CLEAN_TMP:
+        return
+
+    try:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _identifier_router_manual_subject_fallback_to_db(
+    *,
+    db_path: str,
+    table: str,
+    row_ids: list[int],
+    subject_hint: str,
+    location_hint: str = "",
+    folder_hint: str = "",
+    set_index: int = 0,
+    reason: str = "",
+    only_missing: bool = True,
+) -> int:
+    ids = sorted({int(x) for x in row_ids if int(x) > 0})
+    subject = _router_clean_text(subject_hint)
+
+    if not ids or not subject:
+        return 0
+
+    route = "manual_subject_fallback"
+    category = _router_clean_text(folder_hint) or "manual_subject"
+    confidence = 72
+    subject_seed_reason = _router_clean_text(reason) or "Identifier router unavailable; kept user subject."
+    raw_json = json.dumps(
+        {
+            "route": route,
+            "category": category,
+            "subject": subject,
+            "confidence": confidence,
+            "subject_seed": subject,
+            "subject_seed_mode": "user_subject_override",
+            "subject_seed_confidence": confidence,
+            "subject_seed_reason": subject_seed_reason,
+            "location_hint": _router_clean_text(location_hint),
+            "folder_hint": _router_clean_text(folder_hint),
+            "set_index": int(set_index or 0),
+        },
+        ensure_ascii=False,
+    )
+
+    marks = ",".join(["?"] * len(ids))
+    missing_clause = ""
+
+    if only_missing:
+        missing_clause = """
+          AND (
+                subject_seed IS NULL OR TRIM(subject_seed) = ''
+             OR identifier_subject IS NULL OR TRIM(identifier_subject) = ''
+          )
+        """
+
+    with sqlite3.connect(db_path) as conn:
+        _ensure_db_table(conn)
+        cur = conn.cursor()
+        cur.execute(
+            f"""
+            UPDATE {table}
+            SET
+                identifier_route = ?,
+                identifier_category = ?,
+                identifier_subject = ?,
+                identifier_confidence = ?,
+                subject_seed = ?,
+                subject_seed_mode = ?,
+                subject_seed_confidence = ?,
+                subject_seed_reason = ?,
+                identifier_raw_json = ?
+            WHERE id IN ({marks})
+            {missing_clause}
+            """,
+            (
+                route,
+                category,
+                subject,
+                confidence,
+                subject,
+                "user_subject_override",
+                confidence,
+                subject_seed_reason,
+                raw_json,
+                *ids,
+            ),
+        )
+        updated = int(cur.rowcount or 0)
+        conn.commit()
+
+    if updated:
+        print(
+            f"[IDENTIFIER-FALLBACK] set={set_index} rows={updated} "
+            f"kept user subject='{subject}' reason={subject_seed_reason}"
+        )
+
+    return updated
+
+
+def _run_identifier_router_for_review_rows(
+    *,
+    db_path: str,
+    table: str,
+    row_ids: list[int],
+    subject_hint: str,
+    location_hint: str,
+    folder_hint: str,
+    set_index: int,
+    python_path: str,
+) -> tuple[int, int]:
+    ids = sorted({int(x) for x in row_ids if int(x) > 0})
+    if not IDENTIFIER_ROUTER_ENABLED or not ids:
+        return 0, 0
+
+    router_script = _prepare_external_script(os.path.join("scripts", "identifier_router.py"))
+    if not router_script or not os.path.exists(router_script):
+        msg = f"Identifier router script not found: {router_script}"
+        if IDENTIFIER_ROUTER_FAIL_HARD:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
+        updated = _identifier_router_manual_subject_fallback_to_db(
+            db_path=db_path,
+            table=table,
+            row_ids=ids,
+            subject_hint=subject_hint,
+            location_hint=location_hint,
+            folder_hint=folder_hint,
+            set_index=set_index,
+            reason=msg,
+            only_missing=True,
+        )
+        return updated, max(0, len(ids) - updated)
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    safe_folder = _safe_router_slug(folder_hint)
+    tmp_dir = os.path.join(IDENTIFIER_ROUTER_TMP_DIR, f"{safe_folder}_set_{set_index}_{stamp}")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    copied = 0
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        marks = ",".join(["?"] * len(ids))
+        rows = conn.execute(
+            f"""
+            SELECT id, Path, File_Name, Original_File_Name
+            FROM {table}
+            WHERE id IN ({marks})
+            ORDER BY id
+            """,
+            ids,
+        ).fetchall()
+
+    for row in rows:
+        src = str(row["Path"] or "").strip()
+        if not src or not os.path.exists(src):
+            print(f"[IDENTIFIER-WARN] id={row['id']} source missing: {src or '(empty)'}")
+            continue
+
+        original_name = str(row["Original_File_Name"] or "").strip()
+        image_name = original_name or os.path.basename(src) or str(row["File_Name"] or "").strip()
+        if not image_name:
+            print(f"[IDENTIFIER-WARN] id={row['id']} no usable filename")
+            continue
+
+        dst = os.path.join(tmp_dir, os.path.basename(image_name))
+        try:
+            _router_copy_file(src, dst)
+            copied += 1
+        except Exception as ex:
+            print(f"[IDENTIFIER-WARN] id={row['id']} copy failed: {type(ex).__name__}: {ex}")
+
+    if copied <= 0:
+        msg = "Identifier router had no readable input images."
+        if IDENTIFIER_ROUTER_FAIL_HARD:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
+        _identifier_router_cleanup_tmp(tmp_dir)
+        updated = _identifier_router_manual_subject_fallback_to_db(
+            db_path=db_path,
+            table=table,
+            row_ids=ids,
+            subject_hint=subject_hint,
+            location_hint=location_hint,
+            folder_hint=folder_hint,
+            set_index=set_index,
+            reason=msg,
+            only_missing=True,
+        )
+        return updated, max(0, len(ids) - updated)
+
+    json_out = os.path.join(DATA_DIR, f"identifier_router_last_set_{int(set_index)}.json")
+    cmd = [
+        python_path or sys.executable,
+        "-u",
+        router_script,
+        "--folder",
+        tmp_dir,
+        "--subject-hint",
+        str(subject_hint or ""),
+        "--location",
+        str(location_hint or ""),
+        "--max-samples",
+        str(IDENTIFIER_ROUTER_MAX_SAMPLES),
+        "--max-crops",
+        str(IDENTIFIER_ROUTER_MAX_CROPS),
+        "--ollama-model",
+        IDENTIFIER_ROUTER_MODEL,
+        "--fast-image-max-side",
+        str(IDENTIFIER_ROUTER_FAST_IMAGE_MAX_SIDE),
+        "--json-out",
+        json_out,
+    ]
+
+    print(
+        f"[IDENTIFIER] set={set_index} rows={len(ids)} copied={copied} "
+        f"folder={folder_hint} subject_hint={subject_hint}"
+    )
+    res = subprocess.run(
+        cmd,
+        cwd=_child_cwd_for_identifier_script(router_script),
+        text=True,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+    if res.returncode != 0:
+        msg = f"Identifier router failed for set {set_index} with rc={res.returncode}"
+        if IDENTIFIER_ROUTER_FAIL_HARD:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
+        _identifier_router_cleanup_tmp(tmp_dir)
+        updated = _identifier_router_manual_subject_fallback_to_db(
+            db_path=db_path,
+            table=table,
+            row_ids=ids,
+            subject_hint=subject_hint,
+            location_hint=location_hint,
+            folder_hint=folder_hint,
+            set_index=set_index,
+            reason=msg,
+            only_missing=True,
+        )
+        return updated, max(0, len(ids) - updated)
+
+    if not os.path.exists(json_out):
+        msg = f"Identifier router did not create JSON: {json_out}"
+        if IDENTIFIER_ROUTER_FAIL_HARD:
+            raise RuntimeError(msg)
+        print(f"[WARN] {msg}")
+        _identifier_router_cleanup_tmp(tmp_dir)
+        updated = _identifier_router_manual_subject_fallback_to_db(
+            db_path=db_path,
+            table=table,
+            row_ids=ids,
+            subject_hint=subject_hint,
+            location_hint=location_hint,
+            folder_hint=folder_hint,
+            set_index=set_index,
+            reason=msg,
+            only_missing=True,
+        )
+        return updated, max(0, len(ids) - updated)
+
+    updated, missed = _apply_identifier_router_json_to_db(
+        db_path=db_path,
+        table=table,
+        json_path=json_out,
+        allowed_ids=ids,
+    )
+    print(f"[IDENTIFIER] DB updated={updated} missed={missed} json={json_out}")
+
+    if missed or updated < len(ids):
+        fallback_updated = _identifier_router_manual_subject_fallback_to_db(
+            db_path=db_path,
+            table=table,
+            row_ids=ids,
+            subject_hint=subject_hint,
+            location_hint=location_hint,
+            folder_hint=folder_hint,
+            set_index=set_index,
+            reason="Identifier router missed one or more rows; kept user subject for missing rows.",
+            only_missing=True,
+        )
+        if fallback_updated:
+            updated += fallback_updated
+            missed = max(0, len(ids) - updated)
+
+    _identifier_router_cleanup_tmp(tmp_dir)
+
+    return updated, missed
+
+
+def _child_cwd_for_identifier_script(script_path: str) -> str:
+    # Router imports helper modules through the scripts package.
+    # Source mode: cwd can be project root. Runtime copy: cwd is runtime root.
+    parent = os.path.dirname(os.path.abspath(script_path))
+    if os.path.basename(parent).lower() == "scripts":
+        return os.path.dirname(parent)
+    return APP_DIR
 
 
 # ---------- EXIF helpers ----------
@@ -2003,11 +3606,175 @@ def _append_runtime_crash(kind: str, exc_type, exc_value, exc_tb):
         pass
 
 
+# BEGIN AMIR2000 PRODUCTION SUBJECT IDENTIFIER
+# Production identifier bridge.
+# It sends selected image paths plus UI hints: subject text, location, folder/category.
+try:
+    from scripts.subject_identifier_production import suggest_subject_multi as _amir2000_subject_identifier
+except Exception as _amir2000_identifier_import_error:
+    _amir2000_subject_identifier = None
+    _amir2000_identifier_import_message = str(_amir2000_identifier_import_error)
+else:
+    _amir2000_identifier_import_message = ""
+
+
+def _amir2000_get_hint_from_gui_stack(kind: str) -> str:
+    """Best-effort Tk hint reader without binding to one widget name."""
+    import inspect
+
+    method_names = {
+        "subject": ["_subject_get", "get_subject"],
+        "location": ["_location_get", "get_location"],
+        "folder": ["_folder_get", "get_folder"],
+    }.get(kind, [])
+
+    attr_names = {
+        "subject": ["subject_var", "var_subject", "subject_value", "subject_entry", "subject"],
+        "location": ["location_var", "var_location", "location_value", "location_entry", "location_combo", "location"],
+        "folder": ["folder_var", "folder_combo", "folder_value", "category_var", "category_combo", "folder"],
+    }.get(kind, [])
+
+    frame = inspect.currentframe()
+
+    try:
+        while frame is not None:
+            obj = frame.f_locals.get("self")
+
+            if obj is not None:
+                for name in method_names:
+                    method = getattr(obj, name, None)
+
+                    if callable(method):
+                        try:
+                            value = str(method() or "").strip()
+
+                            if value:
+                                return value
+                        except Exception:
+                            pass
+
+                for name in attr_names:
+                    attr = getattr(obj, name, None)
+
+                    if attr is None:
+                        continue
+
+                    try:
+                        if hasattr(attr, "get"):
+                            value = str(attr.get() or "").strip()
+                        else:
+                            value = str(attr or "").strip()
+
+                        if value:
+                            return value
+                    except Exception:
+                        pass
+
+            frame = frame.f_back
+    finally:
+        del frame
+
+    return ""
+
+
+if _amir2000_subject_identifier is not None:
+    _legacy_ai_suggest_subject_multi = ai_suggest_subject_multi
+
+    def ai_suggest_subject_multi(image_paths: list[str]) -> str | None:
+        """Production subject identifier wrapper with UI context hints."""
+        global _LAST_OLLAMA_ERROR
+
+        subject_hint = _amir2000_get_hint_from_gui_stack("subject")
+        location_hint = _amir2000_get_hint_from_gui_stack("location")
+        folder_hint = _amir2000_get_hint_from_gui_stack("folder")
+
+        if os.getenv("AMIR_SUBJECT_IGNORE_SUBJECT_HINT", "").strip() == "1":
+            subject_hint = ""
+
+        try:
+            result = _amir2000_subject_identifier(
+                image_paths or [],
+                location_hint=location_hint,
+                folder_hint=folder_hint,
+                subject_hint=subject_hint,
+            )
+        except Exception as e:
+            # Do not fall back to the old subject suggester.
+            # The old path can still fill generic poison like Bird, Waterfowl,
+            # Natural Landscape, or Latin-only guesses.
+            _LAST_OLLAMA_ERROR = f"Production subject identifier failed: {type(e).__name__}: {e}"
+            return None
+
+        _LAST_OLLAMA_ERROR = (getattr(result, "error", "") or "").strip()
+        subject = (getattr(result, "subject", "") or "").strip()
+
+        if subject:
+            return subject
+
+        return None
+# END AMIR2000 PRODUCTION SUBJECT IDENTIFIER
+
+# AMIR_SUBJECT_TEMP_RESIZE_REUSE_START
+# Prepare Ollama resized temp images before AI subject identification.
+# The same files are reused later through review_queue.ollama_path.
+# Scoring still uses the original Path.
+
+def _amir_norm_temp_source_path(value: object) -> str:
+    try:
+        return os.path.normcase(os.path.abspath(str(value or "")))
+    except Exception:
+        return str(value or "").strip().lower()
+
+
+def _amir_prepare_ollama_temp_images_for_subject(image_paths: list[str], label: str = "subject") -> dict[str, str]:
+    from PIL import ImageOps
+
+    out: dict[str, str] = {}
+
+    if not image_paths:
+        return out
+
+    max_side = int(os.getenv("AMIR_SUBJECT_TEMP_MAX_SIDE", "1280"))
+    jpeg_quality = int(os.getenv("AMIR_SUBJECT_TEMP_JPEG_QUALITY", "88"))
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    safe_label = re.sub(r"[^A-Za-z0-9_]+", "_", str(label or "subject")).strip("_") or "subject"
+    temp_root = os.path.join(DATA_DIR, "ollama_tmp", f"run_{safe_label}_{ts}")
+    os.makedirs(temp_root, exist_ok=True)
+
+    for index, src in enumerate(image_paths, start=1):
+        src = str(src or "").strip()
+
+        if not src or not os.path.exists(src):
+            print(f"[SUBJECT PREP] missing source: {src or '(empty)'}")
+            continue
+
+        try:
+            base = os.path.basename(src)
+            stem, _ext = os.path.splitext(base)
+            safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("_") or f"image_{index:03d}"
+            dst = os.path.join(temp_root, f"{index:03d}_{safe_stem}.jpg")
+
+            with Image.open(src) as raw_img:
+                img = ImageOps.exif_transpose(raw_img).convert("RGB")
+
+            img.thumbnail((max_side, max_side), Image.LANCZOS)
+            img.save(dst, format="JPEG", quality=jpeg_quality, optimize=False)
+
+            out[_amir_norm_temp_source_path(src)] = dst
+            print(f"[SUBJECT PREP] resized {base} -> {dst}")
+
+        except Exception as exc:
+            print(f"[SUBJECT PREP] failed {os.path.basename(src)}: {type(exc).__name__}: {exc}")
+
+    return out
+# AMIR_SUBJECT_TEMP_RESIZE_REUSE_END
+
 # ---------- UI ----------
 class MultiSetApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Amir2000 Image Automation — Multi-Set")
+        self.root.title("Amir2000 Image Automation V.1.0 — Multi-Set")
         try:
             sw = int(self.root.winfo_screenwidth() or 0)
             sh = int(self.root.winfo_screenheight() or 0)
@@ -2032,6 +3799,8 @@ class MultiSetApp:
         self._ui_disabled = False
         self._ai_subject_busy = False
         self._ai_subject_paths_sig: set[str] = set()
+        self._last_ai_suggested_subject = ""
+        self._last_ai_subject_paths_sig: set[str] = set()
         self._subject_internal_edit = False
         self._subject_spell_after_id = None
         self._location_spell_after_id = None
@@ -2167,9 +3936,23 @@ class MultiSetApp:
         self.ai_subject_btn = ttk.Button(
             btns,
             text="AI suggest subject",
-            command=self._ai_suggest_subject_for_current,
+            command=lambda: self._ai_suggest_subject_for_current(regenerate=False),
         )
         self.ai_subject_btn.pack(side="left")
+        # AMIR_REGENERATE_SUBJECT_BUTTON_START
+        self.ai_subject_regen_btn = ttk.Button(
+            btns,
+            text="Regenerate subject",
+            command=lambda: self._ai_suggest_subject_for_current(regenerate=True),
+        )
+        self.ai_subject_regen_btn.pack(side="left", padx=(8, 0))
+        # AMIR_REGENERATE_SUBJECT_BUTTON_END
+        self.ai_subject_identify_btn = ttk.Button(
+            btns,
+            text="Identify",
+            command=lambda: self._ai_suggest_subject_for_current(identify=True),
+        )
+        self.ai_subject_identify_btn.pack(side="left", padx=(8, 0))
         ttk.Button(btns, text="Add set", command=self._add_current_set).pack(
             side="left", padx=(28, 0)
         )
@@ -2994,7 +4777,7 @@ class MultiSetApp:
             except Exception:
                 pass
 
-    def _ai_suggest_subject_for_current(self):
+    def _ai_suggest_subject_for_current(self, regenerate: bool = False, identify: bool = False):
         if not self._pending_files:
             messagebox.showinfo("No images selected", "Select images first.")
             return
@@ -3005,11 +4788,20 @@ class MultiSetApp:
 
         paths = list(self._pending_files)
         paths_sig = {self._norm_path(p) for p in paths if p}
+        effective_regenerate = bool(
+            regenerate or os.environ.get("AMIR_SUBJECT_REGENERATE", "").strip() == "1"
+        )
+        effective_identify = bool(identify)
+        try:
+            manual_subject_before = self._subject_get()
+        except Exception:
+            manual_subject_before = ""
         self._ai_subject_busy = True
         self._ai_subject_paths_sig = paths_sig
 
         # Never block the Tk main thread (prevents "Not Responding")
         _ai_btn_prev_text = None
+        _identify_btn_prev_text = None
         try:
             if hasattr(self, "ai_subject_btn"):
                 try:
@@ -3018,23 +4810,106 @@ class MultiSetApp:
                     _ai_btn_prev_text = "AI suggest subject"
                 self.ai_subject_btn.configure(
                     state="disabled",
-                    text=f"AI suggesting... ({len(paths)})",
+                    text=f"{'Identifying' if effective_identify else 'Regenerating' if effective_regenerate else 'AI suggesting'}... ({len(paths)})",
+                )
+            if hasattr(self, "ai_subject_identify_btn"):
+                try:
+                    _identify_btn_prev_text = str(self.ai_subject_identify_btn.cget("text"))
+                except Exception:
+                    _identify_btn_prev_text = "Identify"
+                self.ai_subject_identify_btn.configure(
+                    state="disabled",
+                    text=f"Identifying... ({len(paths)})" if effective_identify else "Identify",
                 )
         except Exception:
             pass
 
         try:
-            self.status_var.set(f"AI subject: working on {len(paths)} image(s)...")
+            if effective_identify:
+                mode_label = "identifying with strict living/macro mode"
+            elif effective_regenerate:
+                mode_label = "regenerating with alternate model"
+            else:
+                mode_label = "working"
+            self.status_var.set(f"AI subject: {mode_label} on {len(paths)} image(s). ETA is printed in PowerShell...")
             self.root.update_idletasks()
         except Exception:
             try:
-                self.stage_lbl["text"] = f"AI subject: working on {len(paths)} image(s)..."
+                self.stage_lbl["text"] = f"AI subject: {mode_label} on {len(paths)} image(s). ETA is printed in PowerShell..."
             except Exception:
                 pass
 
         def _worker():
+            temp_map: dict[str, str] = {}
+
             try:
-                guess = ai_suggest_subject_multi(paths)
+                temp_map = _amir_prepare_ollama_temp_images_for_subject(paths, label="subject")
+                model_paths = [
+                    temp_map.get(_amir_norm_temp_source_path(path), path)
+                    for path in paths
+                ]
+
+                _regen_old_mode = os.environ.get("AMIR_SUBJECT_MODEL_MODE")
+                _regen_old_ignore = os.environ.get("AMIR_SUBJECT_IGNORE_SUBJECT_HINT")
+                _old_identify_mode = os.environ.get("AMIR_SUBJECT_IDENTIFY_MODE")
+                _old_force_model = os.environ.get("AMIR_SUBJECT_FORCE_MODEL")
+                _regen_context_active = os.environ.get("AMIR_SUBJECT_REGENERATE", "").strip() == "1"
+
+                try:
+                    if effective_identify:
+                        os.environ["AMIR_SUBJECT_IDENTIFY_MODE"] = "1"
+                        os.environ["AMIR_SUBJECT_MODEL_MODE"] = "identify"
+                        os.environ["AMIR_SUBJECT_IGNORE_SUBJECT_HINT"] = "1"
+                        os.environ.pop("AMIR_SUBJECT_FORCE_MODEL", None)
+                    elif regenerate or _regen_context_active:
+                        os.environ.pop("AMIR_SUBJECT_IDENTIFY_MODE", None)
+                        os.environ["AMIR_SUBJECT_MODEL_MODE"] = "regenerate_alt"
+                        os.environ["AMIR_SUBJECT_IGNORE_SUBJECT_HINT"] = "1"
+                    else:
+                        os.environ.pop("AMIR_SUBJECT_IDENTIFY_MODE", None)
+                        os.environ.pop("AMIR_SUBJECT_MODEL_MODE", None)
+                        os.environ.pop("AMIR_SUBJECT_IGNORE_SUBJECT_HINT", None)
+                        os.environ.pop("AMIR_SUBJECT_FORCE_MODEL", None)
+
+                    guess = ai_suggest_subject_multi(model_paths)
+                finally:
+                    if _regen_old_mode is None:
+                        os.environ.pop("AMIR_SUBJECT_MODEL_MODE", None)
+                    else:
+                        os.environ["AMIR_SUBJECT_MODEL_MODE"] = _regen_old_mode
+
+                    if _regen_old_ignore is None:
+                        os.environ.pop("AMIR_SUBJECT_IGNORE_SUBJECT_HINT", None)
+                    else:
+                        os.environ["AMIR_SUBJECT_IGNORE_SUBJECT_HINT"] = _regen_old_ignore
+
+                    if _old_identify_mode is None:
+                        os.environ.pop("AMIR_SUBJECT_IDENTIFY_MODE", None)
+                    else:
+                        os.environ["AMIR_SUBJECT_IDENTIFY_MODE"] = _old_identify_mode
+
+                    if _old_force_model is None:
+                        os.environ.pop("AMIR_SUBJECT_FORCE_MODEL", None)
+                    else:
+                        os.environ["AMIR_SUBJECT_FORCE_MODEL"] = _old_force_model
+
+                    if _regen_context_active:
+                        try:
+                            _context_writer = globals().get("_amir_subject_v2_write_context")
+                            if callable(_context_writer):
+                                _context_writer(active=False, hints="", current_subject="")
+                        except Exception as cleanup_exc:
+                            print(f"[WARN] Could not clear subject regenerate context: {cleanup_exc}")
+
+                        for _regen_key in (
+                            "AMIR_SUBJECT_REGENERATE",
+                            "AMIR_SUBJECT_FORCE_MODEL",
+                            "AMIR_SUBJECT_MODEL_MODE",
+                            "AMIR_SUBJECT_IGNORE_SUBJECT_HINT",
+                            "AMIR_SUBJECT_IDENTIFY_MODE",
+                        ):
+                            os.environ.pop(_regen_key, None)
+
                 err = (_LAST_OLLAMA_ERROR or "").strip()
             except Exception as e:
                 guess = None
@@ -3047,24 +4922,42 @@ class MultiSetApp:
                             state="normal",
                             text=_ai_btn_prev_text or "AI suggest subject",
                         )
+                    if hasattr(self, "ai_subject_identify_btn"):
+                        self.ai_subject_identify_btn.configure(
+                            state="normal",
+                            text=_identify_btn_prev_text or "Identify",
+                        )
                 except Exception:
                     pass
                 finally:
                     self._ai_subject_busy = False
                     self._ai_subject_paths_sig = set()
 
+                current_sig = {self._norm_path(p) for p in (self._pending_files or []) if p}
+                if current_sig != paths_sig:
+                    # Selection changed while background suggestion was running.
+                    self._update_ready_status()
+                    return
+
+                try:
+                    manual_subject_now = self._subject_get() or manual_subject_before
+                except Exception:
+                    manual_subject_now = manual_subject_before
+
                 g = (guess or "").strip()
                 if not g:
+                    if effective_regenerate and manual_subject_now:
+                        print(
+                            "[SUBJECT AI] Regenerate kept user subject after model "
+                            f"conflict/failure: {manual_subject_now}"
+                        )
+                        self._update_ready_status()
+                        return
+
                     if err:
                         messagebox.showinfo(
                             "AI suggestion", err or "Could not suggest a subject."
                         )
-                    self._update_ready_status()
-                    return
-
-                current_sig = {self._norm_path(p) for p in (self._pending_files or []) if p}
-                if current_sig != paths_sig:
-                    # Selection changed while background suggestion was running.
                     self._update_ready_status()
                     return
 
@@ -3080,7 +4973,38 @@ class MultiSetApp:
                     )
                 g2 = g2n or ""
 
+                weak_subject_words = {
+                    "white", "black", "red", "yellow", "blue", "green", "brown",
+                    "grey", "gray", "pink", "purple", "orange", "dark", "light",
+                    "bright", "pale", "color", "colour", "colors", "colours",
+                    "close", "detail", "details", "scene", "view", "photo",
+                    "image", "picture", "photography", "subject", "object",
+                    "animal", "animals", "bird", "birds", "waterfowl",
+                    "wildlife", "natural landscape", "landscape", "nature",
+                    "scene", "scenery", "anser anser",
+                }
+                g2_key = re.sub(r"[^a-z0-9]+", " ", g2.lower()).strip()
+
+                if g2_key in weak_subject_words:
+                    if effective_regenerate and manual_subject_now:
+                        print(
+                            "[SUBJECT AI] Regenerate rejected weak model subject "
+                            f"'{g2}' and kept user subject: {manual_subject_now}"
+                        )
+                        self._update_ready_status()
+                        return
+
+                    messagebox.showinfo(
+                        "AI suggestion rejected",
+                        f"Rejected weak subject suggestion: {g2}\n\n"
+                        "Select a tighter same-subject set, or type the subject manually."
+                    )
+                    self._update_ready_status()
+                    return
                 if g2:
+                    self._last_ai_suggested_subject = g2
+                    self._last_ai_subject_paths_sig = set(current_sig)
+                    self._last_ai_subject_temp_by_original = dict(temp_map or {})
                     self._subject_set(g2)
                 else:
                     messagebox.showinfo("AI suggestion", "Could not suggest a subject.")
@@ -3282,7 +5206,28 @@ class MultiSetApp:
             return False
 
         if not subject:
-            subject = clean_token(ai_suggest_subject(files[0]) or "")
+            files_for_subject = [p for p in (files or []) if p]
+
+            try:
+                temp_map_auto = _amir_prepare_ollama_temp_images_for_subject(
+                    files_for_subject,
+                    label="subject_auto",
+                )
+                model_paths = [
+                    temp_map_auto.get(_amir_norm_temp_source_path(path), path)
+                    for path in files_for_subject
+                ]
+                subject = clean_token(ai_suggest_subject_multi(model_paths) or "")
+                if subject:
+                    self._last_ai_suggested_subject = subject
+                    self._last_ai_subject_paths_sig = {self._norm_path(p) for p in files_for_subject if p}
+                    self._last_ai_subject_temp_by_original = dict(temp_map_auto or {})
+            except Exception:
+                subject = ""
+
+            if not subject and len(files_for_subject) == 1:
+                subject = clean_token(ai_suggest_subject(files_for_subject[0]) or "")
+
             if not subject:
                 messagebox.showwarning(
                     "Subject", "Please enter a Subject or click ‘AI suggest subject’."
@@ -3320,13 +5265,23 @@ class MultiSetApp:
             messagebox.showwarning("No files", "No valid files were staged.")
             return False
 
+        current_sig = {self._norm_path(p) for p in (files or []) if p}
+        ai_suggested_subject = ""
+        ai_ollama_temp_by_original: dict[str, str] = {}
+
+        if getattr(self, "_last_ai_subject_paths_sig", set()) == current_sig:
+            ai_suggested_subject = str(getattr(self, "_last_ai_suggested_subject", "") or "").strip()
+            ai_ollama_temp_by_original = dict(getattr(self, "_last_ai_subject_temp_by_original", {}) or {})
+
         self.batches.append(
             {
                 "subject": subject,
+                "ai_suggested_subject": ai_suggested_subject,
                 "location": location,
                 "folder": folder,
                 "folder_h": folder_h,
                 "files": staged_files,
+                "ai_ollama_temp_by_original": ai_ollama_temp_by_original,
             }
         )
         self._refresh_tree()
@@ -3529,9 +5484,26 @@ class MultiSetApp:
                 _hf_home = os.path.join(_cache_base, "huggingface")
                 _hf_hub = os.path.join(_hf_home, "hub")
                 os.makedirs(_hf_hub, exist_ok=True)
+                _torch_home = os.path.join(_cache_base, "torch")
+                os.makedirs(_torch_home, exist_ok=True)
+
                 env["XDG_CACHE_HOME"] = _cache_base
                 env["HF_HOME"] = _hf_home
                 env["HUGGINGFACE_HUB_CACHE"] = _hf_hub
+                env["HF_HUB_CACHE"] = _hf_hub
+                env["TORCH_HOME"] = _torch_home
+                env["AMIR_TIMM_INCEPTION_RESNET_V2_WEIGHTS"] = os.path.join(
+                    _hf_hub,
+                    "models--timm--inception_resnet_v2.tf_in1k",
+                    "snapshots",
+                    "548a334e1afd3b398b4be37c89972dfb24d707aa",
+                    "pytorch_model.bin",
+                )
+
+                # Strict production rule:
+                # scoring must run, but it must not download during a batch.
+                env["HF_HUB_OFFLINE"] = "1"
+
                 env.pop("TRANSFORMERS_CACHE", None)
                 env.setdefault("HF_HUB_DISABLE_XET", "1")
                 env.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -3683,6 +5655,45 @@ class MultiSetApp:
                         _bump_ui()
                         continue
 
+                    if line.startswith("[OUT] id="):
+                        ok_count += 1
+                        done_count += 1
+
+                        rest = re.sub(r"^\[OUT\]\s+", "", line)
+                        if overall_total > 0:
+                            g_done = min(overall_total, overall_done_before + done_count)
+                            g_ok = min(overall_total, overall_ok_before + ok_count)
+                            g_fail = min(overall_total, overall_fail_before + fail_count)
+                            print(
+                                f"[OK] img={g_done}/{overall_total} ok={g_ok}/{overall_total} fail={g_fail}/{overall_total} "
+                                f"| batch={done_count}/{total} ok={ok_count}/{total} fail={fail_count}/{total} {rest}"
+                            )
+                        else:
+                            print(
+                                f"[OK] batch={done_count}/{total} ok={ok_count}/{total} fail={fail_count}/{total} {rest}"
+                            )
+                        _bump_ui()
+                        continue
+
+                    if line.startswith("[NEEDS-GATE] id="):
+                        done_count += 1
+
+                        rest = re.sub(r"^\[NEEDS-GATE\]\s+", "", line)
+                        if overall_total > 0:
+                            g_done = min(overall_total, overall_done_before + done_count)
+                            g_ok = min(overall_total, overall_ok_before + ok_count)
+                            g_fail = min(overall_total, overall_fail_before + fail_count)
+                            print(
+                                f"[PREFILL] img={g_done}/{overall_total} ok={g_ok}/{overall_total} fail={g_fail}/{overall_total} "
+                                f"| batch={done_count}/{total} ok={ok_count}/{total} fail={fail_count}/{total} {rest}"
+                            )
+                        else:
+                            print(
+                                f"[PREFILL] batch={done_count}/{total} ok={ok_count}/{total} fail={fail_count}/{total} {rest}"
+                            )
+                        _bump_ui()
+                        continue
+
                     if line.startswith("[FAIL]") and ("id=" in line):
                         fail_count += 1
                         done_count += 1
@@ -3766,11 +5777,13 @@ class MultiSetApp:
 
             inserted = 0
             total_sets = len(self.batches)
+            router_batches: list[dict] = []
 
             for si, s in enumerate(self.batches, start=1):
                 badge = f"[Set {si}/{total_sets}]"
                 subject, location, folder = s["subject"], s["location"], s["folder"]
                 files = s["files"]
+                set_inserted_ids: list[int] = []
 
                 self._set_stage(1, STAGES[1], badge)
                 for src in files:
@@ -3847,11 +5860,38 @@ class MultiSetApp:
                         "alt_text": "",
                         "Location": location,
                         "Subject": subject,
+                        "ai_suggested_subject": str(s.get("ai_suggested_subject") or "").strip(),
+                        "final_subject": subject,
                         "QR": None,
                         "QC_Status": "NA",
                         "Review_Status": "Queued",
                         "Original_File_Name": base,
+                        "ollama_path": "",
+                        "batch_set_index": si,
+                        "batch_set_total": total_sets,
+                        "metadata_version": 1,
                     }
+
+                    try:
+                        temp_map = dict(s.get("ai_ollama_temp_by_original") or {})
+                        original_before_staging = self._stage_origin.get(self._norm_path(src)) or orig_paths.get(dst) or src
+
+                        lookup_keys = [
+                            _amir_norm_temp_source_path(original_before_staging),
+                            _amir_norm_temp_source_path(src),
+                            _amir_norm_temp_source_path(dst),
+                        ]
+
+                        for lookup_key in lookup_keys:
+                            temp_path = str(temp_map.get(lookup_key) or "").strip()
+
+                            if temp_path and os.path.exists(temp_path):
+                                vals["ollama_path"] = temp_path
+                                print(f"[SUBJECT PREP] reusing temp resize for id insert source={os.path.basename(src)}")
+                                break
+
+                    except Exception as exc:
+                        print(f"[WARN] Could not attach subject temp resize to row: {type(exc).__name__}: {exc}")
 
                     # EXIF is best-effort; filename generation is strict (must not silently fallback).
                     exif = {}
@@ -3982,8 +6022,10 @@ class MultiSetApp:
 
                     try:
                         row_id = upsert_review_row(cur, vals)
-                        inserted += 1
                         inserted_ids.append(row_id)
+                        upsert_metadata_quality_seed_from_review_row(cur, row_id, vals)
+                        inserted += 1
+                        set_inserted_ids.append(row_id)
                     except Exception as ex:
                         print(f"[WARN] insert failed for {vals.get('Path')}: {ex}")
                         # If DB insert failed, release reserved filename immediately.
@@ -4008,6 +6050,18 @@ class MultiSetApp:
                                 ]
                         except Exception:
                             pass
+
+                if set_inserted_ids:
+                    router_batches.append(
+                        {
+                            "row_ids": list(set_inserted_ids),
+                            "subject": str(s.get("ai_suggested_subject") or subject or "").strip(),
+                            "location": location,
+                            "folder": folder,
+                            "set_index": si,
+                            "total_sets": total_sets,
+                        }
+                    )
 
             self._set_stage(3, STAGES[3])
             conn.commit()
@@ -4053,12 +6107,15 @@ class MultiSetApp:
                     if SESSION_SCOPE_ONLY and not session_scope_ids:
                         score_total = 0
                     else:
-                        where = (
-                            "WHERE COALESCE(Review_Status,'')='Queued' "
-                            "AND (nima_score IS NULL OR blur_score IS NULL OR brightness_score IS NULL "
-                            "OR contrast_score IS NULL OR brisque_score IS NULL OR clip_aesthetic_score IS NULL "
-                            "OR QR IS NULL OR COALESCE(QC_Status,'') IN ('', 'NA'))"
-                        )
+                        if SCORE_FORCE_RUN and SESSION_SCOPE_ONLY and session_scope_ids:
+                            where = "WHERE COALESCE(Review_Status,'')='Queued'"
+                        else:
+                            where = (
+                                "WHERE COALESCE(Review_Status,'')='Queued' "
+                                "AND (nima_score IS NULL OR blur_score IS NULL OR brightness_score IS NULL "
+                                "OR contrast_score IS NULL OR brisque_score IS NULL OR clip_aesthetic_score IS NULL "
+                                "OR QR IS NULL OR COALESCE(QC_Status,'') IN ('', 'NA'))"
+                            )
                         params: list[object] = []
                         if SESSION_SCOPE_ONLY and session_scope_ids:
                             where += f" AND id IN ({','.join(['?'] * len(session_scope_ids))})"
@@ -4125,6 +6182,51 @@ class MultiSetApp:
                     return existing[0]
                 return sys.executable
 
+            if IDENTIFIER_ROUTER_ENABLED and router_batches:
+                self._set_stage(3, STAGES[3], badge="[identifier]")
+                py_for_router = _pick_python()
+                for rb in router_batches:
+                    rb_badge = f"[Set {int(rb.get('set_index') or 0)}/{int(rb.get('total_sets') or total_sets)} identifier]"
+                    self._set_stage(3, STAGES[3], badge=rb_badge)
+                    rb_row_ids = [int(x) for x in rb.get("row_ids", [])]
+                    rb_subject = str(rb.get("subject") or "")
+                    rb_location = str(rb.get("location") or "")
+                    rb_folder = str(rb.get("folder") or "")
+                    rb_set_index = int(rb.get("set_index") or 0)
+
+                    try:
+                        _run_identifier_router_for_review_rows(
+                            db_path=DB_PATH,
+                            table=TABLE_NAME,
+                            row_ids=rb_row_ids,
+                            subject_hint=rb_subject,
+                            location_hint=rb_location,
+                            folder_hint=rb_folder,
+                            set_index=rb_set_index,
+                            python_path=py_for_router,
+                        )
+                    except Exception as ex:
+                        if IDENTIFIER_ROUTER_FAIL_HARD:
+                            raise
+                        msg = (
+                            f"Identifier router exception ignored for set {rb_set_index}: "
+                            f"{type(ex).__name__}: {ex}"
+                        )
+                        print(f"[WARN] {msg}")
+                        _identifier_router_manual_subject_fallback_to_db(
+                            db_path=DB_PATH,
+                            table=TABLE_NAME,
+                            row_ids=rb_row_ids,
+                            subject_hint=rb_subject,
+                            location_hint=rb_location,
+                            folder_hint=rb_folder,
+                            set_index=rb_set_index,
+                            reason=msg,
+                            only_missing=True,
+                        )
+            elif not IDENTIFIER_ROUTER_ENABLED:
+                print("[SKIP] Identifier router disabled by IDENTIFIER_ROUTER_ENABLED=0.")
+
             def _child_cwd_for_script(script_path: str) -> str:
                 if not getattr(sys, "frozen", False):
                     return os.path.dirname(script_path)
@@ -4174,6 +6276,7 @@ class MultiSetApp:
                 # Strict scoring is mandatory: no safe fallback / no pyiqa skip.
                 os.environ["AMIR_SCORE_SAFE_MODE"] = "0"
                 os.environ["AMIR_SCORE_REQUIRE_PYIQA"] = "1"
+                os.environ["AMIR_SCORE_FORCE_RUN"] = "1" if SCORE_FORCE_RUN else "0"
                 script_score = _prepare_external_script("batch_image_quality_score.py")
 
                 def _mark_scoring_failed(reason: str):
@@ -4286,7 +6389,7 @@ class MultiSetApp:
                     raise RuntimeError(f"Scoring failed: {last_reason}")
             else:
                 self._set_stage(4, STAGES[4], badge="[SKIP]")
-                print("[SKIP] Scoring skipped (QC already present).")
+                print("[SKIP] Scoring skipped (no queued session rows to score).")
 
             
             # Stage: Resize images for Ollama (temp)
@@ -4404,6 +6507,51 @@ class MultiSetApp:
 
             except Exception as ex:
                 print(f"[WARN] Resize step failed: {type(ex).__name__}: {ex}")
+
+
+            if SERIES_VERSIONING_ENABLED:
+                try:
+                    series_script = SERIES_VERSIONING_SCRIPT
+                    if not os.path.exists(series_script):
+                        series_script = _prepare_external_script(os.path.join("scripts", "series_versioning.py"))
+
+                    if not os.path.exists(series_script):
+                        print(f"[WARN] Generic series analyzer missing: {series_script}")
+                    else:
+                        series_scope_ids: list[int] = []
+                        if SESSION_SCOPE_ONLY:
+                            series_scope_ids = [int(x) for x in prefill_scope_ids if int(x) > 0]
+                            if not series_scope_ids:
+                                print("[SERIES] Skipped generic versioning: no session rows.")
+                        if (not SESSION_SCOPE_ONLY) or series_scope_ids:
+                            series_args = [
+                                "--db", DB_PATH,
+                                "--table", TABLE_NAME,
+                                "--status", "Queued",
+                            ]
+                            if series_scope_ids:
+                                series_args += ["--id-list", ",".join(str(x) for x in series_scope_ids)]
+                            if SERIES_VERSIONING_SPLIT_WITHIN_SET:
+                                series_args.append("--split-within-set")
+
+                            py = _pick_python()
+                            print("[SERIES] Running generic series/versioning analyzer before metadata generation...")
+                            rc_series, _ok_series, _fail_series, tail_series = _stream_cmd_with_ok_counter(
+                                [py, "-u", series_script] + series_args,
+                                cwd=_child_cwd_for_script(series_script),
+                                total=1,
+                                stage_num_for_ui=5,
+                                badge_prefix="series",
+                                idle_timeout_sec=90,
+                                hard_timeout_sec=900,
+                            )
+                            if rc_series != 0:
+                                print(
+                                    f"[WARN] Generic series analyzer returned {rc_series}; "
+                                    f"metadata will continue without fresh series fields. tail={tail_series[-800:]}"
+                                )
+                except Exception as ex:
+                    print(f"[WARN] Generic series analyzer failed: {type(ex).__name__}: {ex}")
 
 
             # Stage: Caption/Keywords prefill (Ollama)
@@ -4630,7 +6778,12 @@ class MultiSetApp:
                                 overall_done_before=done_before,
                                 overall_ok_before=ok_total,
                                 overall_fail_before=fail_total,
-                                idle_timeout_sec=CAPTION_PREFILL_IDLE_TIMEOUT_SEC,
+                                # Give first-run model/cache warmup more room before treating it
+                                # like a crashed subprocess.
+                                idle_timeout_sec=max(
+                                    CAPTION_PREFILL_IDLE_TIMEOUT_SEC,
+                                    300 if (done_before == 0 and chunk_idx == 1) else 0,
+                                ),
                                 hard_timeout_sec=CAPTION_PREFILL_HARD_TIMEOUT_SEC,
                             )
 
@@ -4672,7 +6825,7 @@ class MultiSetApp:
                             chunk_completed_with_row_failures = (
                                 rc == 1
                                 and (ok_n + fail_n) > 0
-                                and "[OK] Completed. Updated rows:" in (tail or "")
+                                and ("[DONE]" in (tail or "") or fail_n > 0)
                             )
                             if chunk_completed_with_row_failures:
                                 stalled_crashes = 0
@@ -4733,9 +6886,12 @@ class MultiSetApp:
                                     last_chunk_first_id = -1
                                     continue
 
-                            raise RuntimeError(
-                                f"Prefill script returned non-zero ({rc}) tail={err or '(empty)'}"
-                            )
+                            if _amir_repair_prefill_rows() <= 0:
+                                raise RuntimeError(
+                                    f"Prefill script returned non-zero ({rc}) tail={err or '(empty)'}"
+                                )
+                            rc = 0
+                            err = ""
 
                         print(
                             f"[INFO] Prefill summary: queued={queued_count} ok={ok_total} "
@@ -4813,6 +6969,66 @@ class MultiSetApp:
                         raise RuntimeError(f"Prefill failed: {_e}")
 
 
+            if METADATA_QUALITY_ENABLED:
+                try:
+                    metadata_script = METADATA_QUALITY_SCRIPT
+                    if not os.path.exists(metadata_script):
+                        # Source/PyInstaller fallback.
+                        metadata_script = _prepare_external_script(os.path.join("scripts", "metadata_quality_production.py"))
+
+                    if not os.path.exists(metadata_script):
+                        raise RuntimeError(f"Missing metadata quality script: {metadata_script}")
+
+                    py = _pick_python()
+                    _amir_repair_prefill_rows()
+                    # AMIR_EVIDENCE_PIPELINE_METADATA_HOOK_START
+                    try:
+                        from metadata_evidence_pipeline import clean_pending_review_metadata as _amir_clean_pending_review_metadata
+                        _amir_clean_pending_review_metadata(DB_PATH)
+                    except Exception as _amir_evidence_metadata_error:
+                        print(f"[WARN] Evidence metadata cleanup failed: {_amir_evidence_metadata_error}")
+                    # AMIR_EVIDENCE_PIPELINE_METADATA_HOOK_END
+                    _amir_run_metadata_auto_repair_loop(db_path=DB_PATH, py=py)
+                    print("[INFO] Post-prefill metadata repair checked rows.")
+                    print("[INFO] Running metadata quality production repair/gate...")
+                    rc_mq, _ok_mq, _fail_mq, tail_mq = _stream_cmd_with_ok_counter(
+                        [py, "-u", metadata_script, "--db", DB_PATH],
+                        cwd=_child_cwd_for_script(metadata_script),
+                        total=1,
+                        stage_num_for_ui=6,
+                        badge_prefix="metadata_quality",
+                        idle_timeout_sec=METADATA_QUALITY_IDLE_TIMEOUT_SEC,
+                        hard_timeout_sec=METADATA_QUALITY_HARD_TIMEOUT_SEC,
+                    )
+
+                    if rc_mq != 0:
+                        raise RuntimeError(
+                            "Metadata quality production run failed "
+                            f"(rc={rc_mq}) tail={(tail_mq or '').strip()[-1500:] or '(empty)'}"
+                        )
+
+                    with sqlite3.connect(DB_PATH) as _mq_conn:
+                        _mq_cur = _mq_conn.cursor()
+                        _mq_cur.execute(
+                            """
+                            SELECT
+                                COUNT(*) AS total_rows,
+                                SUM(CASE WHEN COALESCE(accepted_for_upload, 0) = 1 THEN 1 ELSE 0 END) AS accepted_rows,
+                                SUM(CASE WHEN COALESCE(overall_quality_status, '') = 'FAIL_BLOCKED' THEN 1 ELSE 0 END) AS blocked_rows
+                            FROM metadata_quality
+                            """
+                        )
+                        _mq_total, _mq_accepted, _mq_blocked = _mq_cur.fetchone()
+                        print(
+                            "[MQ] metadata_quality updated: "
+                            f"rows={int(_mq_total or 0)} "
+                            f"accepted={int(_mq_accepted or 0)} "
+                            f"blocked={int(_mq_blocked or 0)}"
+                        )
+                except Exception as _mq_e:
+                    raise RuntimeError(f"Metadata quality stage failed: {_mq_e}")
+
+
         except Exception as ex:
             traceback.print_exc()
             msg = f"{type(ex).__name__}: {ex}"
@@ -4821,26 +7037,64 @@ class MultiSetApp:
             success = False
 
         finally:
+            try:
+                cleanup_runtime_artifacts(str(locals().get("ollama_run_dir", "") or ""))
+            except Exception as _cleanup_e:
+                print(f"[WARN] Runtime cleanup failed: {_cleanup_e}")
 
             def _rollback_session(reason: str):
                 print(f"[WARN] {reason}. Rolling back this session.")
 
-                # remove inserted DB rows
+                # remove inserted DB rows and matching metadata_quality rows for THIS failed session only
                 try:
+                    removed_review = 0
+                    removed_mq = 0
+
+                    if inserted_ids or reserved_names:
+                        with sqlite3.connect(DB_PATH) as conn2:
+                            cur2 = conn2.cursor()
+
+                            if inserted_ids:
+                                placeholders = ",".join("?" for _ in inserted_ids)
+                                cur2.execute(
+                                    f"DELETE FROM {TABLE_NAME} WHERE id IN ({placeholders})",
+                                    inserted_ids,
+                                )
+                                removed_review = int(cur2.rowcount or 0)
+
+                            mq_names = [
+                                str(name).strip()
+                                for name in reserved_names
+                                if str(name or "").strip()
+                            ]
+
+                            if mq_names:
+                                placeholders = ",".join("?" for _ in mq_names)
+                                cur2.execute(
+                                    f"""
+                                    DELETE FROM metadata_quality
+                                    WHERE COALESCE(uploaded_to_mysql, 0) = 0
+                                      AND revamp_id IS NULL
+                                      AND revamp_File_Name IN ({placeholders})
+                                    """,
+                                    mq_names,
+                                )
+                                removed_mq = int(cur2.rowcount or 0)
+
+                            conn2.commit()
+
                     if inserted_ids:
-                        conn2 = sqlite3.connect(DB_PATH)
-                        cur2 = conn2.cursor()
-                        cur2.execute(
-                            f"DELETE FROM {TABLE_NAME} WHERE id IN ({','.join('?' * len(inserted_ids))})",
-                            inserted_ids,
-                        )
-                        conn2.commit()
-                        conn2.close()
                         print(
-                            f"[WARN] Removed {len(inserted_ids)} inserted rows from {TABLE_NAME}."
+                            f"[WARN] Removed {removed_review} inserted rows from {TABLE_NAME}."
                         )
+
+                    if reserved_names:
+                        print(
+                            f"[WARN] Removed {removed_mq} failed-session rows from metadata_quality."
+                        )
+
                 except Exception as _e:
-                    print(f"[WARN] Could not remove inserted rows: {_e}")
+                    print(f"[WARN] Could not remove failed-session DB rows: {_e}")
 
                 # restore moved files back to original folders
                 try:
@@ -4917,6 +7171,7 @@ class MultiSetApp:
 
             if not success:
                 _rollback_session("Pipeline failed")
+                cleanup_runtime_artifacts()
                 self._save_session_state()
             else:
                 # success: open editor on UI thread
@@ -4968,6 +7223,7 @@ class MultiSetApp:
                         if getattr(sys, "frozen", False):
                             import runpy
                             runpy.run_path(_script3, run_name="__main__")
+                            cleanup_runtime_artifacts()
                             self._clear_session_state()
                             print("[INFO] Review/editor closed.")
                             _shutdown_ollama_on_run_end()
@@ -4986,6 +7242,7 @@ class MultiSetApp:
                         if res.returncode != 0:
                             raise RuntimeError(f"review_editor failed with returncode={res.returncode}")
 
+                        cleanup_runtime_artifacts()
                         self._clear_session_state()
                         print("[INFO] Review/editor closed.")
                         _shutdown_ollama_on_run_end()
@@ -5709,6 +7966,3112 @@ class MultiSetApp:
 
 
 # ---------- entry ----------
+# AMIR_SAFE_PREFILL_REPAIR_START
+# Generic cleanup and deterministic metadata repair.
+# No topic patching. No subject patching.
+
+def cleanup_runtime_artifacts(*_args, **_kwargs) -> None:
+    import glob
+    import os
+    import shutil
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    used_names = globals().get("USED_NAMES", os.path.join(data_dir, "used_filenames.json"))
+
+    def prune(pattern: str, keep: int = 5) -> None:
+        try:
+            files = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+            for old in files[int(keep):]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        ollama_root = os.path.join(data_dir, "ollama_tmp")
+
+        if os.path.isdir(ollama_root):
+            for run_dir in glob.glob(os.path.join(ollama_root, "run_*")):
+                if os.path.isdir(run_dir):
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    print(f"[CLEANUP] Removed Ollama temp folder: {run_dir}")
+    except Exception as exc:
+        print(f"[WARN] Could not clean ollama_tmp: {exc}")
+
+    try:
+        identifier_tmp = os.path.join(data_dir, "identifier_detail_tmp")
+
+        if os.path.isdir(identifier_tmp):
+            shutil.rmtree(identifier_tmp, ignore_errors=True)
+            print(f"[CLEANUP] Removed identifier detail temp folder: {identifier_tmp}")
+    except Exception as exc:
+        print(f"[WARN] Could not clean identifier detail temp: {exc}")
+
+    prune(f"{used_names}.bak_*", keep=5)
+    prune(os.path.join(data_dir, "multiset_session.backup_*.json"), keep=5)
+    prune(os.path.join(data_dir, "_metadata_quality_backups", "review_before_metadata_quality_*.db"), keep=5)
+    prune(os.path.join(data_dir, "identifier_router_last_set_*.json"), keep=10)
+
+
+def _amir_review_db_path() -> str:
+    import os
+
+    for name in ["DB_PATH", "REVIEW_DB", "REVIEW_DB_PATH"]:
+        value = globals().get(name)
+
+        if value:
+            return str(value)
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    return os.path.join(str(data_dir), "review.db")
+
+
+def _amir_clean_generation_text(value: object) -> str:
+    import re
+
+    text = str(value or "").strip()
+    text = text.replace("_", " ").replace("-", " ")
+
+    remove_words = [
+        "canon",
+        "eos",
+        "r5",
+        "mark",
+        "ii",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "shot",
+        "macro",
+    ]
+
+    for word in remove_words:
+        text = re.sub(rf"\b{re.escape(word)}\b", " ", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\s+", " ", text).strip(" ,.;:-")
+
+    for _ in range(4):
+        cleaned = re.sub(
+            r"\b(?:with|in|on|at|by|near|of|and|the)\s*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" ,.;:-")
+
+        if cleaned == text:
+            break
+
+        text = cleaned
+
+    return text
+
+
+def _amir_text_is_sluggy(value: object) -> bool:
+    text = str(value or "")
+
+    if "_" in text:
+        return True
+
+    lower = text.lower()
+
+    bad_bits = [
+        "canon eos",
+        "r5 mark",
+        "flower photography nature photography",
+        "nature photography canon",
+        "photography canon",
+    ]
+
+    return any(bit in lower for bit in bad_bits)
+
+
+def _amir_keywords_from_text(subject: str, location: str, folder: str, caption: str, alt_text: str) -> str:
+    import re
+
+    banned = {
+        "a",
+        "an",
+        "and",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+        "visible",
+        "showing",
+        "surrounding",
+        "context",
+        "clear",
+        "detail",
+        "details",
+        "photographed",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "canon",
+        "eos",
+        "mark",
+        "r5",
+        "ii",
+    }
+
+    values = [subject, location, folder, caption, alt_text]
+    raw = " ".join(values).replace("_", " ").replace("-", " ")
+
+    tokens = [
+        token
+        for token in re.findall(r"[A-Za-z0-9]+", raw.lower())
+        if len(token) > 2 and token not in banned
+    ]
+
+    items = []
+
+    def add(value: str) -> None:
+        value = re.sub(r"\s+", " ", value).strip(" ,.;:-").lower()
+
+        if value and value not in items:
+            items.append(value)
+
+    add(subject.lower())
+
+    if location:
+        add(location.lower())
+
+    for source in [subject, location, caption, alt_text, folder]:
+        source_tokens = [
+            token
+            for token in re.findall(r"[A-Za-z0-9]+", source.lower())
+            if len(token) > 2 and token not in banned
+        ]
+
+        for index in range(0, max(0, len(source_tokens) - 1)):
+            add(" ".join(source_tokens[index:index + 2]))
+
+        for token in source_tokens:
+            add(token)
+
+    for index in range(0, max(0, len(tokens) - 1)):
+        add(" ".join(tokens[index:index + 2]))
+
+    for token in tokens:
+        add(token)
+
+    return ", ".join(items[:15])
+
+
+def _amir_repair_prefill_rows() -> int:
+    import sqlite3
+
+    db_path = _amir_review_db_path()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_queue)").fetchall()
+        }
+
+        required = {"id", "Subject", "Location", "Folder", "Caption", "alt_text", "Keywords"}
+
+        if not required.issubset(cols):
+            return 0
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM review_queue
+            WHERE COALESCE(Review_Status, '') IN ('', 'Queued', 'Pending')
+            ORDER BY id
+            """
+        ).fetchall()
+
+        repaired = 0
+
+        for row in rows:
+            subject = (
+                _amir_clean_generation_text(row["final_subject"] if "final_subject" in cols else "")
+                or _amir_clean_generation_text(row["Subject"])
+                or _amir_clean_generation_text(row["ai_suggested_subject"] if "ai_suggested_subject" in cols else "")
+            )
+            location = _amir_clean_generation_text(row["Location"])
+            folder = _amir_clean_generation_text(row["Folder"])
+
+            if not subject:
+                continue
+
+            if location:
+                caption = f"{subject} photographed in {location}, showing natural detail and outdoor context."
+                alt_text = f"{subject} in {location}, showing natural detail and outdoor context."
+            else:
+                caption = f"{subject} photographed with natural detail and outdoor context."
+                alt_text = f"{subject} showing natural detail and outdoor context."
+
+            keywords = _amir_keywords_from_text(
+                subject=subject,
+                location=location,
+                folder=folder,
+                caption=caption,
+                alt_text=alt_text,
+            )
+
+            current_caption = row["Caption"]
+            current_alt = row["alt_text"]
+            current_keywords = row["Keywords"]
+            keyword_count = len([k for k in str(current_keywords or "").split(",") if k.strip()])
+
+            needs_repair = (
+                _amir_text_is_sluggy(current_caption)
+                or _amir_text_is_sluggy(current_alt)
+                or not current_caption
+                or not current_alt
+                or len(str(current_alt).split()) < 8
+                or keyword_count < 10
+            )
+
+            if not needs_repair:
+                continue
+
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET Caption = ?,
+                    alt_text = ?,
+                    Keywords = ?,
+                    Review_Status = 'Pending'
+                WHERE id = ?
+                """,
+                (caption, alt_text, keywords, row["id"]),
+            )
+            repaired += 1
+
+        conn.commit()
+
+        if repaired:
+            print(f"[WARN] Deterministic prefill repair created reviewable metadata for {repaired} row(s).")
+
+        return repaired
+    finally:
+        conn.close()
+# AMIR_SAFE_PREFILL_REPAIR_END
+
+# AMIR_BETTER_METADATA_REPAIR_START
+# Better deterministic metadata repair.
+# Generic only. No per topic and no per subject patching.
+
+def cleanup_runtime_artifacts(*_args, **_kwargs) -> None:
+    import glob
+    import os
+    import shutil
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    used_names = globals().get("USED_NAMES", os.path.join(data_dir, "used_filenames.json"))
+
+    def prune(pattern: str, keep: int = 5) -> None:
+        try:
+            files = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+            for old in files[int(keep):]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        ollama_root = os.path.join(data_dir, "ollama_tmp")
+
+        if os.path.isdir(ollama_root):
+            for run_dir in glob.glob(os.path.join(ollama_root, "run_*")):
+                if os.path.isdir(run_dir):
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    print(f"[CLEANUP] Removed Ollama temp folder: {run_dir}")
+    except Exception as exc:
+        print(f"[WARN] Could not clean ollama_tmp: {exc}")
+
+    try:
+        identifier_tmp = os.path.join(data_dir, "identifier_detail_tmp")
+
+        if os.path.isdir(identifier_tmp):
+            shutil.rmtree(identifier_tmp, ignore_errors=True)
+            print(f"[CLEANUP] Removed identifier detail temp folder: {identifier_tmp}")
+    except Exception as exc:
+        print(f"[WARN] Could not clean identifier detail temp: {exc}")
+
+    prune(f"{used_names}.bak_*", keep=5)
+    prune(os.path.join(data_dir, "multiset_session.backup_*.json"), keep=5)
+    prune(os.path.join(data_dir, "_metadata_quality_backups", "review_before_metadata_quality_*.db"), keep=5)
+    prune(os.path.join(data_dir, "identifier_router_last_set_*.json"), keep=10)
+
+
+def _amir_review_db_path() -> str:
+    import os
+
+    for name in ["DB_PATH", "REVIEW_DB", "REVIEW_DB_PATH"]:
+        value = globals().get(name)
+
+        if value:
+            return str(value)
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    return os.path.join(str(data_dir), "review.db")
+
+
+def _amir_words(value: object) -> list[str]:
+    import re
+
+    return re.findall(r"[A-Za-z0-9]+", str(value or "").replace("_", " ").replace("-", " "))
+
+
+def _amir_clean_generation_text(value: object) -> str:
+    import re
+
+    text = str(value or "").strip()
+    text = text.replace("_", " ").replace("-", " ")
+
+    remove_words = [
+        "canon",
+        "eos",
+        "r5",
+        "mark",
+        "ii",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "shot",
+        "macro",
+    ]
+
+    for word in remove_words:
+        text = re.sub(rf"\b{re.escape(word)}\b", " ", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\s+", " ", text).strip(" ,.;:-")
+
+    for _ in range(4):
+        cleaned = re.sub(
+            r"\b(?:with|in|on|at|by|near|of|and|the)\s*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" ,.;:-")
+
+        if cleaned == text:
+            break
+
+        text = cleaned
+
+    return text
+
+
+def _amir_is_topic_like_location(value: object) -> bool:
+    raw = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+
+    if not raw:
+        return True
+
+    topic_words = {
+        "photography",
+        "photo",
+        "image",
+        "macro",
+        "nature",
+        "landscape",
+        "cityscape",
+        "architecture",
+        "flower",
+        "people",
+        "creative",
+        "miscellaneous",
+        "aviation",
+        "night",
+        "water",
+        "waterscape",
+        "botany",
+        "entomology",
+    }
+
+    tokens = [token for token in re.findall(r"[a-z0-9]+", raw) if token]
+
+    if not tokens:
+        return True
+
+    if "photography" in tokens:
+        return True
+
+    if all(token in topic_words for token in tokens):
+        return True
+
+    return False
+
+
+def _amir_location_from_filename(file_name: object, subject: str) -> str:
+    import re
+
+    stem = str(file_name or "")
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", stem)
+    stem = stem.replace("-", "_")
+
+    if not stem:
+        return ""
+
+    match = re.search(
+        r"(?:^|_)In_(?P<place>.+?)(?:_(?:Flower|Nature|Macro|Landscape|Cityscape|Architecture|People|Creative|Miscellaneous|Aviation|Night|Water|Waterscape|Botany|Entomology)_Photography|_Canon_|_\d{4}_\d{3}|$)",
+        stem,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return ""
+
+    place = match.group("place")
+    place = place.replace("_", " ")
+    place = re.sub(r"\s+", " ", place).strip(" ,.;:-")
+
+    bad_tail = {
+        "flower",
+        "nature",
+        "macro",
+        "landscape",
+        "cityscape",
+        "architecture",
+        "people",
+        "creative",
+        "miscellaneous",
+        "aviation",
+        "night",
+        "water",
+        "waterscape",
+        "botany",
+        "entomology",
+        "photography",
+    }
+
+    parts = place.split()
+
+    while parts and parts[-1].lower() in bad_tail:
+        parts.pop()
+
+    place = " ".join(parts).strip(" ,.;:-")
+
+    if not place:
+        return ""
+
+    subject_words = {word.lower() for word in _amir_words(subject)}
+
+    place_words = [
+        word
+        for word in place.split()
+        if word.lower() not in subject_words
+    ]
+
+    place = " ".join(place_words).strip(" ,.;:-")
+
+    return place
+
+
+def _amir_best_location_for_generation(row, cols: set[str], subject: str) -> str:
+    raw_location = row["Location"] if "Location" in cols else ""
+    file_name = row["File_Name"] if "File_Name" in cols else ""
+
+    parsed = _amir_location_from_filename(file_name, subject)
+
+    if parsed:
+        return parsed
+
+    if raw_location and not _amir_is_topic_like_location(raw_location):
+        return _amir_clean_generation_text(raw_location)
+
+    return ""
+
+
+def _amir_sluggy_or_bad_text(value: object) -> bool:
+    text = str(value or "").strip()
+
+    if not text:
+        return True
+
+    lower = text.lower()
+
+    bad_bits = [
+        "canon eos",
+        "r5 mark",
+        "flower photography nature photography",
+        "nature photography canon",
+        "photography canon",
+        "showing natural detail and outdoor context",
+        "clear visual detail and surrounding context",
+    ]
+
+    if any(bit in lower for bit in bad_bits):
+        return True
+
+    if "_" in text:
+        return True
+
+    if len(text.split()) < 8:
+        return True
+
+    return False
+
+
+def _amir_keyword_list(subject: str, location: str, folder: str, caption: str, alt_text: str, seq: int) -> str:
+    import re
+
+    banned = {
+        "a",
+        "an",
+        "and",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+        "visible",
+        "showing",
+        "surrounding",
+        "context",
+        "clear",
+        "detail",
+        "details",
+        "photographed",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "canon",
+        "eos",
+        "mark",
+        "r5",
+        "ii",
+        "natural",
+        "outdoor",
+        "outdoors",
+    }
+
+    items: list[str] = []
+
+    def add(value: str) -> None:
+        value = re.sub(r"\s+", " ", value).strip(" ,.;:-").lower()
+
+        if not value:
+            return
+
+        words = value.split()
+
+        if len(words) > 4:
+            return
+
+        if any(word in banned for word in words) and len(words) == 1:
+            return
+
+        if value not in items:
+            items.append(value)
+
+    subject_tokens = [
+        token.lower()
+        for token in _amir_words(subject)
+        if len(token) > 2 and token.lower() not in banned
+    ]
+
+    location_tokens = [
+        token.lower()
+        for token in _amir_words(location)
+        if len(token) > 2 and token.lower() not in banned
+    ]
+
+    folder_tokens = [
+        token.lower()
+        for token in _amir_words(folder)
+        if len(token) > 2 and token.lower() not in banned
+    ]
+
+    add(subject)
+
+    if location:
+        add(location)
+
+    for size in [2, 3]:
+        for index in range(0, max(0, len(subject_tokens) - size + 1)):
+            add(" ".join(subject_tokens[index:index + size]))
+
+    for token in subject_tokens:
+        add(token)
+
+    for size in [2]:
+        for index in range(0, max(0, len(location_tokens) - size + 1)):
+            add(" ".join(location_tokens[index:index + size]))
+
+    for token in location_tokens:
+        add(token)
+
+    if subject_tokens:
+        add(f"{subject_tokens[0]} close view")
+        add(f"{subject_tokens[-1]} detail")
+
+    if len(subject_tokens) >= 2:
+        add(f"{subject_tokens[0]} {subject_tokens[-1]} detail")
+
+    for token in folder_tokens:
+        add(token)
+
+    add(f"series image {seq:02d}")
+
+    return ", ".join(items[:15])
+
+
+def _amir_sentence_templates(subject: str, location: str, seq: int) -> tuple[str, str]:
+    location_part = f" in {location}" if location else ""
+
+    templates = [
+        (
+            f"{subject} photographed{location_part} with a soft background and clear branch detail.",
+            f"{subject}{location_part} with a soft background and clear branch detail.",
+        ),
+        (
+            f"{subject} captured{location_part} with shallow depth of field and soft natural tones.",
+            f"{subject}{location_part} with shallow depth of field and soft natural tones.",
+        ),
+        (
+            f"{subject} photographed{location_part} against a blurred background with delicate foreground detail.",
+            f"{subject}{location_part} against a blurred background with delicate foreground detail.",
+        ),
+        (
+            f"{subject} captured{location_part} with isolated detail and a calm natural background.",
+            f"{subject}{location_part} with isolated detail and a calm natural background.",
+        ),
+    ]
+
+    caption, alt_text = templates[(max(seq, 1) - 1) % len(templates)]
+
+    return caption, alt_text
+
+
+def _amir_repair_prefill_rows() -> int:
+    import sqlite3
+
+    db_path = _amir_review_db_path()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_queue)").fetchall()
+        }
+
+        required = {"id", "Subject", "Location", "Folder", "Caption", "alt_text", "Keywords", "File_Name"}
+
+        if not required.issubset(cols):
+            return 0
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM review_queue
+            WHERE COALESCE(Review_Status, '') IN ('', 'Queued', 'Pending')
+            ORDER BY id
+            """
+        ).fetchall()
+
+        repaired = 0
+
+        for index, row in enumerate(rows, start=1):
+            subject = (
+                _amir_clean_generation_text(row["final_subject"] if "final_subject" in cols else "")
+                or _amir_clean_generation_text(row["Subject"])
+                or _amir_clean_generation_text(row["ai_suggested_subject"] if "ai_suggested_subject" in cols else "")
+            )
+
+            if not subject:
+                continue
+
+            location = _amir_best_location_for_generation(row, cols, subject)
+            folder = _amir_clean_generation_text(row["Folder"])
+            caption, alt_text = _amir_sentence_templates(subject, location, index)
+
+            keywords = _amir_keyword_list(
+                subject=subject,
+                location=location,
+                folder=folder,
+                caption=caption,
+                alt_text=alt_text,
+                seq=index,
+            )
+
+            current_caption = row["Caption"]
+            current_alt = row["alt_text"]
+            current_keywords = row["Keywords"]
+            keyword_count = len([k for k in str(current_keywords or "").split(",") if k.strip()])
+
+            needs_repair = (
+                _amir_sluggy_or_bad_text(current_caption)
+                or _amir_sluggy_or_bad_text(current_alt)
+                or keyword_count < 10
+            )
+
+            if not needs_repair:
+                continue
+
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET Caption = ?,
+                    alt_text = ?,
+                    Keywords = ?,
+                    Review_Status = 'Pending'
+                WHERE id = ?
+                """,
+                (caption, alt_text, keywords, row["id"]),
+            )
+            repaired += 1
+
+        conn.commit()
+
+        if repaired:
+            print(f"[WARN] Better deterministic metadata repair created reviewable metadata for {repaired} row(s).")
+
+        return repaired
+    finally:
+        conn.close()
+# AMIR_BETTER_METADATA_REPAIR_END
+
+# AMIR_NO_CJK_METADATA_REPAIR_START
+# Generic no CJK metadata rule.
+# Any caption, alt text or keyword output containing CJK is invalid and must be repaired.
+
+def _amir_contains_cjk(value: object) -> bool:
+    import re
+
+    return bool(re.search(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]", str(value or "")))
+
+
+_PREVIOUS_AMIR_SLUGGY_OR_BAD_TEXT = _amir_sluggy_or_bad_text
+
+
+def _amir_sluggy_or_bad_text(value: object) -> bool:
+    if _amir_contains_cjk(value):
+        return True
+
+    return _PREVIOUS_AMIR_SLUGGY_OR_BAD_TEXT(value)
+
+
+_PREVIOUS_AMIR_REPAIR_PREFILL_ROWS = _amir_repair_prefill_rows
+
+
+def _amir_repair_prefill_rows() -> int:
+    import sqlite3
+
+    repaired = _PREVIOUS_AMIR_REPAIR_PREFILL_ROWS()
+
+    db_path = _amir_review_db_path()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_queue)").fetchall()
+        }
+
+        required = {"id", "Subject", "Location", "Folder", "Caption", "alt_text", "Keywords", "File_Name"}
+
+        if not required.issubset(cols):
+            return repaired
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM review_queue
+            WHERE COALESCE(Review_Status, '') IN ('', 'Queued', 'Pending')
+            ORDER BY id
+            """
+        ).fetchall()
+
+        extra_repaired = 0
+
+        for index, row in enumerate(rows, start=1):
+            current_caption = row["Caption"]
+            current_alt = row["alt_text"]
+            current_keywords = row["Keywords"]
+
+            if not (
+                _amir_contains_cjk(current_caption)
+                or _amir_contains_cjk(current_alt)
+                or _amir_contains_cjk(current_keywords)
+            ):
+                continue
+
+            subject = (
+                _amir_clean_generation_text(row["final_subject"] if "final_subject" in cols else "")
+                or _amir_clean_generation_text(row["Subject"])
+                or _amir_clean_generation_text(row["ai_suggested_subject"] if "ai_suggested_subject" in cols else "")
+            )
+
+            if not subject:
+                continue
+
+            location = _amir_best_location_for_generation(row, cols, subject)
+            folder = _amir_clean_generation_text(row["Folder"])
+            caption, alt_text = _amir_sentence_templates(subject, location, index)
+
+            keywords = _amir_keyword_list(
+                subject=subject,
+                location=location,
+                folder=folder,
+                caption=caption,
+                alt_text=alt_text,
+                seq=index,
+            )
+
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET Caption = ?,
+                    alt_text = ?,
+                    Keywords = ?,
+                    Review_Status = 'Pending'
+                WHERE id = ?
+                """,
+                (caption, alt_text, keywords, row["id"]),
+            )
+            extra_repaired += 1
+
+        conn.commit()
+
+        if extra_repaired:
+            print(f"[WARN] Repaired {extra_repaired} row(s) containing non-English/CJK metadata.")
+
+        return repaired + extra_repaired
+    finally:
+        conn.close()
+# AMIR_NO_CJK_METADATA_REPAIR_END
+
+
+# AMIR_EVIDENCE_METADATA_REPAIR_START
+# Generic evidence based metadata repair.
+# No topic patching. No subject patching.
+# ai_suggested_subject is NOT trusted evidence.
+# Concrete extra objects need trusted evidence before they may appear in caption, alt text or keywords.
+
+def cleanup_runtime_artifacts(*_args, **_kwargs) -> None:
+    import glob
+    import os
+    import shutil
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    used_names = globals().get("USED_NAMES", os.path.join(data_dir, "used_filenames.json"))
+
+    def prune(pattern: str, keep: int = 5) -> None:
+        try:
+            files = [p for p in glob.glob(pattern) if os.path.isfile(p)]
+            files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+            for old in files[int(keep):]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        ollama_root = os.path.join(data_dir, "ollama_tmp")
+
+        if os.path.isdir(ollama_root):
+            for run_dir in glob.glob(os.path.join(ollama_root, "run_*")):
+                if os.path.isdir(run_dir):
+                    shutil.rmtree(run_dir, ignore_errors=True)
+                    print(f"[CLEANUP] Removed Ollama temp folder: {run_dir}")
+    except Exception as exc:
+        print(f"[WARN] Could not clean ollama_tmp: {exc}")
+
+    try:
+        identifier_tmp = os.path.join(data_dir, "identifier_detail_tmp")
+
+        if os.path.isdir(identifier_tmp):
+            shutil.rmtree(identifier_tmp, ignore_errors=True)
+            print(f"[CLEANUP] Removed identifier detail temp folder: {identifier_tmp}")
+    except Exception as exc:
+        print(f"[WARN] Could not clean identifier detail temp: {exc}")
+
+    prune(f"{used_names}.bak_*", keep=5)
+    prune(os.path.join(data_dir, "multiset_session.backup_*.json"), keep=5)
+    prune(os.path.join(data_dir, "_metadata_quality_backups", "review_before_metadata_quality_*.db"), keep=5)
+    prune(os.path.join(data_dir, "identifier_router_last_set_*.json"), keep=10)
+
+
+def _amir_review_db_path() -> str:
+    import os
+
+    for name in ["DB_PATH", "REVIEW_DB", "REVIEW_DB_PATH"]:
+        value = globals().get(name)
+
+        if value:
+            return str(value)
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    return os.path.join(str(data_dir), "review.db")
+
+
+def _amir_contains_cjk(value: object) -> bool:
+    import re
+
+    return bool(re.search(r"[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF]", str(value or "")))
+
+
+def _amir_words(value: object) -> list[str]:
+    import re
+
+    return re.findall(r"[A-Za-z0-9]+", str(value or "").replace("_", " ").replace("-", " "))
+
+
+def _amir_root(word: str) -> str:
+    word = str(word or "").strip().lower()
+
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+
+    if len(word) > 4 and word.endswith("sses"):
+        return word[:-2]
+
+    if len(word) > 3 and word.endswith("s"):
+        return word[:-1]
+
+    return word
+
+
+def _amir_clean_text(value: object) -> str:
+    import re
+
+    text = str(value or "").replace("_", " ").replace("-", " ").strip()
+
+    remove_words = [
+        "canon",
+        "eos",
+        "r5",
+        "mark",
+        "ii",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "shot",
+        "macro",
+    ]
+
+    for word in remove_words:
+        text = re.sub(rf"\b{re.escape(word)}\b", " ", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\s+", " ", text).strip(" ,.;:-")
+
+    for _ in range(6):
+        cleaned = re.sub(
+            r"\b(?:with|in|on|at|by|near|of|and|the)\s*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip(" ,.;:-")
+
+        if cleaned == text:
+            break
+
+        text = cleaned
+
+    return text
+
+
+def _amir_slug(value: str) -> str:
+    return "_".join(word for word in _amir_words(value) if word)
+
+
+def _amir_is_context_bucket(value: object) -> bool:
+    import re
+
+    raw = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+
+    if not raw:
+        return False
+
+    tokens = [token for token in re.findall(r"[a-z0-9]+", raw) if token]
+
+    context_words = {
+        "photography",
+        "macro",
+        "nature",
+        "landscape",
+        "cityscape",
+        "architecture",
+        "flower",
+        "people",
+        "creative",
+        "miscellaneous",
+        "aviation",
+        "night",
+        "water",
+        "waterscape",
+        "botany",
+        "entomology",
+    }
+
+    return "photography" in tokens or all(token in context_words for token in tokens)
+
+
+def _amir_split_subject_place(subject: str) -> tuple[str, str]:
+    import re
+
+    clean = _amir_clean_text(subject)
+
+    match = re.match(
+        r"^(?P<subject>.+?)\s+in\s+(?P<place>[A-Z][A-Za-z0-9 ]{2,80})$",
+        clean,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return clean, ""
+
+    subject_part = match.group("subject").strip(" ,.;:-")
+    place_part = match.group("place").strip(" ,.;:-")
+
+    if _amir_is_context_bucket(place_part):
+        return clean, ""
+
+    return subject_part, place_part
+
+
+def _amir_place_from_filename(file_name: object, subject_core: str) -> str:
+    import re
+
+    stem = str(file_name or "")
+    stem = re.sub(r"\.[A-Za-z0-9]+$", "", stem)
+    stem = stem.replace("-", "_")
+
+    match = re.search(
+        r"(?:^|_)In_(?P<place>.+?)(?:_(?:Flower|Nature|Macro|Landscape|Cityscape|Architecture|People|Creative|Miscellaneous|Aviation|Night|Water|Waterscape|Botany|Entomology)_Photography|_Canon_|_\d{4}_\d{3}|$)",
+        stem,
+        flags=re.IGNORECASE,
+    )
+
+    if not match:
+        return ""
+
+    place = match.group("place").replace("_", " ")
+    place = re.sub(r"\s+", " ", place).strip(" ,.;:-")
+
+    if _amir_is_context_bucket(place):
+        return ""
+
+    subject_roots = {_amir_root(word) for word in _amir_words(subject_core)}
+
+    place_words = [
+        word
+        for word in place.split()
+        if _amir_root(word) not in subject_roots
+    ]
+
+    return " ".join(place_words).strip(" ,.;:-")
+
+
+def _amir_json_loads(value: object) -> object:
+    if not value:
+        return None
+
+    if isinstance(value, (dict, list)):
+        return value
+
+    try:
+        return json.loads(str(value))
+    except Exception:
+        return None
+
+
+def _amir_collect_structured_identifier_roots(value: object) -> set[str]:
+    from collections import Counter
+
+    payload = _amir_json_loads(value)
+
+    if payload is None:
+        return set()
+
+    text_counter = Counter()
+    trusted_roots: set[str] = set()
+
+    text_keys = {
+        "subject",
+        "label",
+        "specific_name",
+        "descriptive_subject",
+        "group_subject",
+        "subject_text",
+        "visible_text",
+    }
+
+    trait_keys = {
+        "visible_traits",
+        "keywords_seed",
+        "detected_objects",
+        "objects",
+        "evidence",
+    }
+
+    def visit(node: object, trust_parent: bool = False) -> None:
+        if isinstance(node, dict):
+            confidence = 0
+            score = 0
+            accepted = False
+
+            for key in ["confidence", "score", "identifier_confidence"]:
+                try:
+                    value_number = int(float(node.get(key) or 0))
+
+                    if key == "score":
+                        score = max(score, value_number)
+                    else:
+                        confidence = max(confidence, value_number)
+                except Exception:
+                    pass
+
+            accepted = bool(node.get("accepted") is True)
+            trusted_here = trust_parent or accepted or confidence >= 85 or score >= 90
+
+            for key, value in node.items():
+                key_str = str(key)
+
+                if key_str in text_keys and trusted_here:
+                    text_value = _amir_clean_text(value)
+
+                    for word in _amir_words(text_value):
+                        text_counter[_amir_root(word)] += 1
+
+                if key_str in trait_keys and trusted_here:
+                    if isinstance(value, list):
+                        for item in value:
+                            for word in _amir_words(item):
+                                text_counter[_amir_root(word)] += 1
+                    else:
+                        for word in _amir_words(value):
+                            text_counter[_amir_root(word)] += 1
+
+                visit(value, trust_parent=trusted_here)
+
+        elif isinstance(node, list):
+            for item in node:
+                visit(item, trust_parent=trust_parent)
+
+    visit(payload)
+
+    for root, count in text_counter.items():
+        if count >= 2:
+            trusted_roots.add(root)
+
+    return trusted_roots
+
+
+def _amir_trusted_evidence_roots(row, cols: set[str], subject_core: str, place: str, context: str) -> set[str]:
+    ignored = {
+        "canon",
+        "eos",
+        "r5",
+        "mark",
+        "ii",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "jpg",
+        "jpeg",
+        "png",
+        "nature",
+        "macro",
+        "cityscape",
+        "landscape",
+        "architecture",
+        "miscellaneous",
+        "flower",
+    }
+
+    roots: set[str] = set()
+
+    trusted_values = [
+        subject_core,
+        place,
+        context,
+        row["Subject"] if "Subject" in cols else "",
+        row["final_subject"] if "final_subject" in cols else "",
+        row["File_Name"] if "File_Name" in cols else "",
+        row["Original_File_Name"] if "Original_File_Name" in cols else "",
+    ]
+
+    for value in trusted_values:
+        for word in _amir_words(value):
+            root = _amir_root(word)
+
+            if root and root not in ignored:
+                roots.add(root)
+
+    # identifier_subject is trusted only if confidence is high.
+    try:
+        identifier_confidence = int(float(row["identifier_confidence"] if "identifier_confidence" in cols else 0))
+    except Exception:
+        identifier_confidence = 0
+
+    if identifier_confidence >= 85 and "identifier_subject" in cols:
+        for word in _amir_words(row["identifier_subject"]):
+            root = _amir_root(word)
+
+            if root and root not in ignored:
+                roots.add(root)
+
+    # Raw JSON is trusted only for structured/high confidence/repeated evidence.
+    if "identifier_raw_json" in cols:
+        roots.update(_amir_collect_structured_identifier_roots(row["identifier_raw_json"]))
+
+    return roots
+
+
+def _amir_has_unsupported_interaction(value: object, trusted_roots: set[str]) -> bool:
+    import re
+
+    text = str(value or "").lower().replace("_", " ").replace("-", " ")
+
+    if not text:
+        return False
+
+    # Strong interaction/action patterns only.
+    # This avoids blocking normal background context like "cars in the background".
+    patterns = [
+        r"\b(?P<object>[a-z][a-z ]{1,32})\s+(?:on|onto|holding|feeding|flying|landing|perched|sitting|standing|walking|riding|driving|carrying|wearing)\b",
+        r"\b(?:with|featuring|including)\s+(?P<object>[a-z][a-z ]{1,32})\b",
+    ]
+
+    safe_roots = {
+        "background",
+        "blur",
+        "field",
+        "tone",
+        "sky",
+        "cloud",
+        "water",
+        "road",
+        "street",
+        "park",
+        "branch",
+        "blossom",
+        "flower",
+        "tree",
+        "leaf",
+        "leafe",
+        "roof",
+        "rooftop",
+        "detail",
+        "composition",
+        "silhouette",
+        "reflection",
+    }
+
+    ignored = {
+        "soft",
+        "shallow",
+        "gentle",
+        "natural",
+        "clear",
+        "visible",
+        "delicate",
+        "minimal",
+        "broad",
+        "quiet",
+        "calm",
+        "fine",
+        "close",
+        "white",
+        "black",
+        "blue",
+        "green",
+        "yellow",
+        "red",
+        "purple",
+        "pink",
+        "orange",
+        "brown",
+        "grey",
+        "gray",
+        "cloudy",
+    }
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            object_text = match.group("object")
+            roots = [
+                _amir_root(word)
+                for word in _amir_words(object_text)
+                if _amir_root(word)
+            ]
+
+            risky_roots = [
+                root
+                for root in roots
+                if root not in trusted_roots
+                and root not in safe_roots
+                and root not in ignored
+            ]
+
+            if risky_roots:
+                return True
+
+    return False
+
+
+def _amir_bad_caption_or_alt(value: object, trusted_roots: set[str]) -> bool:
+    import re
+
+    text = str(value or "").strip()
+    lower = text.lower()
+
+    if not text:
+        return True
+
+    if _amir_contains_cjk(text):
+        return True
+
+    if "_" in text:
+        return True
+
+    if len(text.split()) < 8:
+        return True
+
+    if _amir_has_unsupported_interaction(text, trusted_roots):
+        return True
+
+    bad_patterns = [
+        r"\bin\s+with\b",
+        r"^of\s+",
+        r"\bshowing\s+showing\b",
+        r"\bshowing\s+[a-z]+\s+showing\b",
+        r"\bshowing\s+pointed\b",
+        r"\brooftop\s+showing\b",
+        r"\bstructure\s+against\b",
+        r"\bcaption\s*:",
+        r"\balt\s*:",
+    ]
+
+    if any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in bad_patterns):
+        return True
+
+    bad_bits = [
+        "canon eos",
+        "r5 mark",
+        "flower photography nature photography",
+        "nature photography canon",
+        "photography canon",
+        "showing natural detail and outdoor context",
+        "clear visual detail and surrounding context",
+    ]
+
+    return any(bit in lower for bit in bad_bits)
+
+
+def _amir_bad_keywords(value: object, trusted_roots: set[str]) -> bool:
+    text = str(value or "").strip()
+
+    if not text:
+        return True
+
+    if _amir_contains_cjk(text):
+        return True
+
+    if _amir_has_unsupported_interaction(text, trusted_roots):
+        return True
+
+    items = [
+        item.strip().lower()
+        for item in text.split(",")
+        if item.strip()
+    ]
+
+    if len(items) < 5:
+        return True
+
+    bad_start_words = {
+        "showing",
+        "against",
+        "distant",
+        "visible",
+        "appearing",
+        "view",
+    }
+
+    bad_fragments = [
+        "showing pointed",
+        "rooftop showing",
+        "roof against",
+        "against cloudy",
+        "distant pointed",
+        "distant netherlands",
+        "in with",
+        "of cherry",
+    ]
+
+    for item in items:
+        words = item.split()
+
+        if not words:
+            return True
+
+        if words[0] in bad_start_words:
+            return True
+
+        if any(fragment in item for fragment in bad_fragments):
+            return True
+
+    root_keys = [
+        " ".join(_amir_root(word) for word in item.split())
+        for item in items
+    ]
+
+    return len(set(root_keys)) < max(8, int(len(root_keys) * 0.70))
+
+
+def _amir_add_keyword(items: list[str], value: str, max_words: int = 4) -> None:
+    import re
+
+    value = re.sub(r"\s+", " ", str(value or "")).strip(" ,.;:-").lower()
+
+    if not value:
+        return
+
+    words = value.split()
+
+    banned_single = {
+        "natural",
+        "outdoor",
+        "outdoors",
+        "detail",
+        "details",
+        "context",
+        "showing",
+        "visible",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "canon",
+        "eos",
+        "mark",
+        "distant",
+        "against",
+    }
+
+    if len(words) == 1 and words[0] in banned_single:
+        return
+
+    if len(words) > max_words:
+        return
+
+    if words[0] in {"showing", "against", "visible", "appearing"}:
+        return
+
+    root_key = " ".join(_amir_root(word) for word in words)
+
+    existing_root_keys = {
+        " ".join(_amir_root(word) for word in item.split())
+        for item in items
+    }
+
+    if root_key not in existing_root_keys:
+        items.append(value)
+
+
+def _amir_keyword_list(subject_core: str, place: str, context: str, seq: int, folder: str = "", trusted_roots: set[str] | None = None) -> str:
+    banned = {
+        "a",
+        "an",
+        "and",
+        "at",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "with",
+        "visible",
+        "showing",
+        "surrounding",
+        "context",
+        "clear",
+        "detail",
+        "details",
+        "photographed",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "canon",
+        "eos",
+        "mark",
+        "r5",
+        "ii",
+        "natural",
+        "outdoor",
+        "outdoors",
+        "against",
+    }
+
+    subject_tokens = [
+        token.lower()
+        for token in _amir_words(subject_core)
+        if len(token) > 2 and token.lower() not in banned
+    ]
+
+    place_tokens = [
+        token.lower()
+        for token in _amir_words(place)
+        if len(token) > 2 and token.lower() not in banned
+    ]
+
+    context_tokens = [
+        token.lower()
+        for token in _amir_words(context)
+        if len(token) > 2 and token.lower() not in banned
+    ]
+
+    items: list[str] = []
+
+    _amir_add_keyword(items, subject_core)
+
+    if place:
+        _amir_add_keyword(items, place)
+
+    for size in [2, 3]:
+        for index in range(0, max(0, len(subject_tokens) - size + 1)):
+            _amir_add_keyword(items, " ".join(subject_tokens[index:index + size]))
+
+    for token in subject_tokens:
+        _amir_add_keyword(items, token)
+
+    for size in [2]:
+        for index in range(0, max(0, len(place_tokens) - size + 1)):
+            _amir_add_keyword(items, " ".join(place_tokens[index:index + size]))
+
+    for token in place_tokens:
+        _amir_add_keyword(items, token)
+
+    if context:
+        _amir_add_keyword(items, context)
+
+    for token in context_tokens:
+        _amir_add_keyword(items, token)
+
+
+    knowledge_terms = _amir_knowledge_fetch_terms(
+        subject_core=subject_core,
+        place=place,
+        context=context,
+        folder=folder,
+        trusted_roots=trusted_roots or set(),
+        limit=5,
+    )
+
+    for term in knowledge_terms:
+        _amir_add_keyword(items, term)
+
+    return ", ".join(items[:8])
+
+
+def _amir_sentence_pair(subject_core: str, place: str, seq: int) -> tuple[str, str]:
+    return "", ""
+
+
+def _amir_repair_prefill_rows() -> int:
+    import sqlite3
+
+    db_path = _amir_review_db_path()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        cols = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(review_queue)").fetchall()
+        }
+
+        required = {"id", "Subject", "Location", "Folder", "Caption", "alt_text", "Keywords", "File_Name"}
+
+        if not required.issubset(cols):
+            return 0
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM review_queue
+            WHERE COALESCE(Review_Status, '') IN ('', 'Queued', 'Pending')
+            ORDER BY id
+            """
+        ).fetchall()
+
+        repaired = 0
+
+        for index, row in enumerate(rows, start=1):
+            raw_subject = (
+                str(row["final_subject"] if "final_subject" in cols else "").strip()
+                or str(row["Subject"] or "").strip()
+            )
+
+            # Do not use ai_suggested_subject as trusted repair source.
+            if not raw_subject:
+                continue
+
+            subject_core, place_from_subject = _amir_split_subject_place(raw_subject)
+            place = place_from_subject or _amir_place_from_filename(row["File_Name"], subject_core)
+
+            raw_context = str(row["Location"] or "").strip()
+            context = _amir_clean_text(raw_context) if _amir_is_context_bucket(raw_context) else ""
+
+            if not subject_core:
+                continue
+
+            trusted_roots = _amir_trusted_evidence_roots(row, cols, subject_core, place, context)
+
+            current_caption = row["Caption"]
+            current_alt = row["alt_text"]
+            current_keywords = row["Keywords"]
+
+            needs_repair = (
+                _amir_bad_caption_or_alt(current_caption, trusted_roots)
+                or _amir_bad_caption_or_alt(current_alt, trusted_roots)
+                or _amir_bad_keywords(current_keywords, trusted_roots)
+            )
+
+            if needs_repair:
+                continue
+
+            clean_subject_slug = _amir_slug(subject_core)
+
+            if str(row["Subject"] or "") == clean_subject_slug:
+                continue
+
+            conn.execute(
+                """
+                UPDATE review_queue
+                SET Subject = ?,
+                    Review_Status = 'Pending'
+                WHERE id = ?
+                """,
+                (clean_subject_slug, row["id"]),
+            )
+
+            repaired += 1
+
+        conn.commit()
+
+        if repaired:
+            print(f"[WARN] Evidence based metadata repair updated {repaired} row(s).")
+
+        return repaired
+    finally:
+        conn.close()
+# AMIR_REVAMP_KNOWLEDGE_KEYWORDS_START
+# Generic revamp_knowledge.db keyword enrichment.
+# Uses curated/local DB terms as supporting metadata terms.
+# Does not trust AI suggested subject.
+# Does not patch per subject/topic/image.
+
+def _amir_knowledge_db_path() -> str:
+    import os
+
+    data_dir = globals().get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    return os.path.join(str(data_dir), "revamp_knowledge.db")
+
+
+def _amir_knowledge_normalize(value: object) -> str:
+    import re
+
+    text = str(value or "").lower().replace("_", " ").replace("-", " ")
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _amir_knowledge_term_ok(term: object, trusted_roots: set[str]) -> bool:
+    text = _amir_knowledge_normalize(term)
+
+    if not text:
+        return False
+
+    words = text.split()
+
+    if len(words) > 4:
+        return False
+
+    banned_words = {
+        "canon",
+        "eos",
+        "mark",
+        "photography",
+        "photo",
+        "image",
+        "picture",
+        "stunning",
+        "beautiful",
+        "amazing",
+        "breathtaking",
+        "mesmerizing",
+        "dutch",
+        "photographer",
+        "amir",
+        "darzi",
+        "website",
+        "against",
+        "showing",
+        "visible",
+        "distant",
+    }
+
+    if any(word in banned_words for word in words):
+        return False
+
+    roots = {_amir_root(word) for word in words if len(word) > 2}
+
+    if not roots:
+        return False
+
+    # A DB term must overlap trusted evidence, unless it is a safe descriptive stock keyword.
+    safe_descriptive = {
+        "background",
+        "blur",
+        "soft",
+        "detail",
+        "composition",
+        "seasonal",
+        "close",
+        "foreground",
+        "sky",
+        "cloud",
+        "water",
+        "reflection",
+        "urban",
+        "architectural",
+        "nature",
+        "plant",
+        "botanical",
+        "flower",
+        "branch",
+        "blossom",
+        "tree",
+        "roof",
+        "rooftop",
+    }
+
+    if roots & trusted_roots:
+        return True
+
+    if roots & safe_descriptive:
+        return True
+
+    return False
+
+
+def _amir_knowledge_fetch_terms(
+    subject_core: str,
+    place: str,
+    context: str,
+    folder: str,
+    trusted_roots: set[str],
+    limit: int = 12,
+) -> list[str]:
+    import os
+    import sqlite3
+
+    db_path = _amir_knowledge_db_path()
+
+    if not os.path.exists(db_path):
+        return []
+
+    query_text = " ".join(
+        part
+        for part in [
+            subject_core,
+            place,
+            context,
+            folder,
+        ]
+        if part
+    )
+
+    roots = [
+        _amir_root(word)
+        for word in _amir_words(query_text)
+        if len(_amir_root(word)) >= 4
+    ]
+
+    roots = [
+        root
+        for root in roots
+        if root not in {
+            "canon",
+            "eos",
+            "mark",
+            "photography",
+            "photo",
+            "image",
+            "picture",
+            "nature",
+            "macro",
+            "cityscape",
+            "landscape",
+            "miscellaneou",
+        }
+    ]
+
+    if not roots:
+        return []
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        blocked = set()
+
+        for table, col in [
+            ("mysql_blocked_terms", "normalized"),
+            ("mysql_raw_keyword_blocked_supertags", "term_norm"),
+        ]:
+            try:
+                for row in conn.execute(f"SELECT {col} AS term FROM {table}").fetchall():
+                    for word in _amir_words(row["term"]):
+                        blocked.add(_amir_root(word))
+            except Exception:
+                pass
+
+        results: list[tuple[float, str]] = []
+        seen_norms: set[str] = set()
+
+        def add_result(score: float, term: object) -> None:
+            text = str(term or "").strip()
+
+            if not text:
+                return
+
+            norm = _amir_knowledge_normalize(text)
+
+            if not norm or norm in seen_norms:
+                return
+
+            if _amir_knowledge_location_expansion_bad(norm, subject_core, place, context, folder):
+                return
+
+            term_roots = {_amir_root(word) for word in _amir_words(norm)}
+
+            if term_roots & blocked:
+                return
+
+            if not _amir_knowledge_term_ok(norm, trusted_roots):
+                return
+
+            seen_norms.add(norm)
+            results.append((score, text))
+
+        # 1. Curated MySQL keyword terms, small table, high trust.
+        for root in roots[:8]:
+            like = f"%{root}%"
+
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        term,
+                        term_norm,
+                        kind,
+                        CAST(commercial_weight AS REAL) AS commercial_weight,
+                        CAST(precision_weight AS REAL) AS precision_weight,
+                        CAST(allow_in_supertags AS INTEGER) AS allow_in_supertags
+                    FROM mysql_raw_keyword_terms
+                    WHERE active = '1'
+                      AND term_norm LIKE ?
+                    ORDER BY
+                        allow_in_supertags DESC,
+                        precision_weight DESC,
+                        commercial_weight DESC
+                    LIMIT 30
+                    """,
+                    (like,),
+                ).fetchall()
+
+                for row in rows:
+                    score = float(row["precision_weight"] or 0) + float(row["commercial_weight"] or 0)
+                    add_result(score + 1000, row["term"])
+            except Exception:
+                pass
+
+        # 2. Candidate visual terms, useful for visual vocabulary.
+        for root in roots[:8]:
+            like = f"%{root}%"
+
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        display_term,
+                        normalized,
+                        best_source,
+                        best_kind,
+                        score,
+                        source_count
+                    FROM revamp_candidate_terms
+                    WHERE normalized LIKE ?
+                    ORDER BY score DESC, source_count DESC
+                    LIMIT 40
+                    """,
+                    (like,),
+                ).fetchall()
+
+                for row in rows:
+                    add_result(float(row["score"] or 0), row["display_term"])
+            except Exception:
+                pass
+
+        # 3. Gallery folder keywords, useful as safe context.
+        folder_norm = _amir_knowledge_normalize(folder)
+
+        if folder_norm:
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT Keywords
+                    FROM mysql_raw_revamp_gallery_meta
+                    WHERE lower(Folder) = lower(?)
+                    LIMIT 1
+                    """,
+                    (folder,),
+                ).fetchall()
+
+                for row in rows:
+                    for item in str(row["Keywords"] or "").split(","):
+                        add_result(500, item.strip())
+            except Exception:
+                pass
+
+        results.sort(key=lambda item: item[0], reverse=True)
+
+        final: list[str] = []
+
+        for _score, term in results:
+            norm = _amir_knowledge_normalize(term)
+
+            if norm not in {_amir_knowledge_normalize(existing) for existing in final}:
+                final.append(term)
+
+            if len(final) >= limit:
+                break
+
+        return final
+
+    finally:
+        conn.close()
+# AMIR_KNOWLEDGE_LOCATION_EXPANSION_GUARD_START
+# Generic guard against DB over-expansion from weak place words.
+# Example: Spaarnwoude Park must not authorize glacier national park, amusement park, water park, etc.
+
+def _amir_knowledge_location_expansion_bad(
+    term: object,
+    subject_core: str,
+    place: str,
+    context: str,
+    folder: str,
+) -> bool:
+    term_norm = _amir_knowledge_normalize(term)
+    subject_norm = _amir_knowledge_normalize(subject_core)
+    place_norm = _amir_knowledge_normalize(place)
+    context_norm = _amir_knowledge_normalize(context)
+    folder_norm = _amir_knowledge_normalize(folder)
+
+    if not term_norm:
+        return True
+
+    term_roots = {
+        _amir_root(word)
+        for word in _amir_words(term_norm)
+        if len(_amir_root(word)) >= 3
+    }
+
+    subject_roots = {
+        _amir_root(word)
+        for word in _amir_words(subject_norm)
+        if len(_amir_root(word)) >= 3
+    }
+
+    place_roots = {
+        _amir_root(word)
+        for word in _amir_words(place_norm)
+        if len(_amir_root(word)) >= 3
+    }
+
+    context_roots = {
+        _amir_root(word)
+        for word in _amir_words(context_norm)
+        if len(_amir_root(word)) >= 3
+    }
+
+    folder_roots = {
+        _amir_root(word)
+        for word in _amir_words(folder_norm)
+        if len(_amir_root(word)) >= 3
+    }
+
+    exact_context = " ".join(
+        part
+        for part in [
+            subject_norm,
+            place_norm,
+            context_norm,
+            folder_norm,
+        ]
+        if part
+    )
+
+    # Exact phrase from subject/place/context is allowed.
+    if term_norm and term_norm in exact_context:
+        return False
+
+    # Subject overlap is allowed.
+    if term_roots & subject_roots:
+        return False
+
+    weak_place_roots = {
+        "park",
+        "city",
+        "town",
+        "village",
+        "street",
+        "road",
+        "lake",
+        "river",
+        "beach",
+        "mountain",
+        "valley",
+        "canyon",
+        "harbor",
+        "harbour",
+        "station",
+        "airport",
+    }
+
+    location_roots = place_roots | context_roots | folder_roots
+    only_location_overlap = bool(term_roots & location_roots) and not bool(term_roots & subject_roots)
+
+    if only_location_overlap and term_roots & weak_place_roots:
+        return True
+
+    suspicious_place_expanders = {
+        "national",
+        "glacier",
+        "amusement",
+        "playground",
+        "resort",
+        "water",
+        "theme",
+        "zoo",
+        "museum",
+        "campground",
+        "gate",
+        "gates",
+    }
+
+    if term_roots & suspicious_place_expanders and not (term_roots & subject_roots):
+        return True
+
+    return False
+# AMIR_KNOWLEDGE_LOCATION_EXPANSION_GUARD_END
+# AMIR_REVAMP_KNOWLEDGE_KEYWORDS_END
+# AMIR_BAD_DB_EXPANSION_FILTER_START
+def _amir_filter_bad_db_expansion_keywords(value: str) -> str:
+    bad_exact = {
+        "glacier national park",
+        "national park",
+        "park gates",
+        "amusement park",
+        "park and playground",
+        "water park",
+    }
+
+    items = []
+
+    for item in str(value or "").split(","):
+        clean = item.strip()
+        norm = _amir_knowledge_normalize(clean)
+
+        if not clean:
+            continue
+
+        if norm in bad_exact:
+            continue
+
+        items.append(clean)
+
+    return ", ".join(items)
+# AMIR_BAD_DB_EXPANSION_FILTER_END
+# AMIR_EVIDENCE_METADATA_REPAIR_END
+
+
+# AMIR_HINT_KEYWORDS_SOFT_EVIDENCE_V1_START
+# Optional hint keywords for the current batch.
+# Empty field = skipped.
+# Non-empty field = soft evidence only. It helps the model, but does not force output.
+
+import json as _amir_hint_json
+import os as _amir_hint_os
+import re as _amir_hint_re
+import time as _amir_hint_time
+from pathlib import Path as _amir_hint_Path
+
+
+_AMIR_HINT_PROJECT_ROOT = _amir_hint_Path(__file__).resolve().parent
+_AMIR_HINT_DATA_DIR = _AMIR_HINT_PROJECT_ROOT / "data"
+_AMIR_HINT_FILE = _AMIR_HINT_DATA_DIR / "hint_keywords_pending.json"
+
+
+def _amir_hint_clean(value):
+    text = str(value or "")
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = _amir_hint_re.sub(r"\s+", " ", text).strip()
+    return text[:500]
+
+
+def _amir_hint_norm(value):
+    text = str(value or "")
+    text = text.replace("_", " ").replace("-", " ").lower()
+    text = _amir_hint_re.sub(r"[^a-z0-9\s]", " ", text)
+    text = _amir_hint_re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _amir_hint_var_get(app, names):
+    for name in names:
+        try:
+            obj = getattr(app, name, None)
+
+            if obj is None:
+                continue
+
+            if hasattr(obj, "get"):
+                value = obj.get()
+            else:
+                value = str(obj)
+
+            if value:
+                return str(value)
+        except Exception:
+            pass
+
+    return ""
+
+
+def _amir_hint_get_subject(app):
+    return _amir_hint_var_get(app, ["subject_var", "subject", "subject_entry"])
+
+
+def _amir_hint_get_location(app):
+    return _amir_hint_var_get(app, ["location_var", "location", "location_entry"])
+
+
+def _amir_hint_get_folder(app):
+    return _amir_hint_var_get(app, ["folder_var", "folder", "folder_combo", "folder_combo_var"])
+
+
+def _amir_hint_get_hint(app):
+    try:
+        return _amir_hint_clean(app.hint_keywords_var.get())
+    except Exception:
+        return ""
+
+
+def _amir_hint_reset_file():
+    _AMIR_HINT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "created_at": _amir_hint_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "items": [],
+    }
+    _AMIR_HINT_FILE.write_text(
+        _amir_hint_json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _amir_hint_os.environ["AMIR_HINT_KEYWORDS_FILE"] = str(_AMIR_HINT_FILE)
+
+
+def _amir_hint_load_payload():
+    if not _AMIR_HINT_FILE.exists():
+        return {
+            "created_at": _amir_hint_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "items": [],
+        }
+
+    try:
+        payload = _amir_hint_json.loads(_AMIR_HINT_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+
+    if not isinstance(payload.get("items"), list):
+        payload["items"] = []
+
+    return payload
+
+
+def _amir_hint_save_for_current_set(app):
+    hint = _amir_hint_get_hint(app)
+
+    if not hint:
+        _amir_hint_os.environ.pop("AMIR_CURRENT_HINT_KEYWORDS", None)
+        return
+
+    subject = _amir_hint_get_subject(app)
+    location = _amir_hint_get_location(app)
+    folder = _amir_hint_get_folder(app)
+
+    payload = _amir_hint_load_payload()
+    item = {
+        "created_at": _amir_hint_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "subject": subject,
+        "location": location,
+        "folder": folder,
+        "hint_keywords": hint,
+        "subject_norm": _amir_hint_norm(subject),
+        "location_norm": _amir_hint_norm(location),
+        "folder_norm": _amir_hint_norm(folder),
+    }
+
+    payload["items"].append(item)
+
+    _AMIR_HINT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _AMIR_HINT_FILE.write_text(
+        _amir_hint_json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    _amir_hint_os.environ["AMIR_HINT_KEYWORDS_FILE"] = str(_AMIR_HINT_FILE)
+    _amir_hint_os.environ["AMIR_CURRENT_HINT_KEYWORDS"] = hint
+
+    try:
+        print(f"[HINT] Stored optional hint keywords for set: {hint}")
+    except Exception:
+        pass
+
+
+def _amir_hint_set_env_from_field(app):
+    hint = _amir_hint_get_hint(app)
+
+    if hint:
+        _amir_hint_os.environ["AMIR_CURRENT_HINT_KEYWORDS"] = hint
+        _amir_hint_os.environ["AMIR_HINT_KEYWORDS_FILE"] = str(_AMIR_HINT_FILE)
+    else:
+        _amir_hint_os.environ.pop("AMIR_CURRENT_HINT_KEYWORDS", None)
+        _amir_hint_os.environ["AMIR_HINT_KEYWORDS_FILE"] = str(_AMIR_HINT_FILE)
+
+
+def _amir_hint_apply_spell_style(app, bad=False):
+    entry = getattr(app, "hint_keywords_entry", None)
+
+    if entry is None:
+        return
+
+    try:
+        entry.configure(style="AmirHintBad.TEntry" if bad else "AmirHint.TEntry")
+    except Exception:
+        pass
+
+
+def _amir_hint_spellcheck_update(app, force=False):
+    text = _amir_hint_get_hint(app)
+
+    if not force and getattr(app, "_hint_last_spell_text", None) == text:
+        return
+
+    app._hint_last_spell_text = text
+
+    try:
+        issues = find_misspellings(text, DATA_DIR) if text else []
+    except Exception as exc:
+        issues = []
+        try:
+            app._runlog("SPELLCHECK_HINT_ERR", f"{type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+
+    app._hint_issues = issues
+    _amir_hint_apply_spell_style(app, bool(issues))
+
+
+def _amir_hint_context_menu(app, ev):
+    entry = getattr(app, "hint_keywords_entry", None)
+
+    if entry is None:
+        return
+
+    try:
+        col = int(entry.index(f"@{ev.x}"))
+    except Exception:
+        return
+
+    issues = getattr(app, "_hint_issues", []) or []
+    hit = None
+
+    for item in issues:
+        try:
+            if int(item["start"]) <= col < int(item["end"]):
+                hit = item
+                break
+        except Exception:
+            continue
+
+    if not hit:
+        _amir_hint_spellcheck_update(app, force=True)
+        return
+
+    start = int(hit.get("start") or 0)
+    end = int(hit.get("end") or start)
+    word = str(hit.get("word") or "").strip()
+    sug = str(hit.get("suggestion") or "").strip()
+
+    if not word:
+        return
+
+    menu = tk.Menu(app.root, tearoff=0)
+
+    def do_replace():
+        if not sug:
+            return
+
+        current = _amir_hint_get_hint(app)
+        app.hint_keywords_var.set(f"{current[:start]}{sug}{current[end:]}")
+        _amir_hint_spellcheck_update(app, force=True)
+
+    def do_keep():
+        try:
+            ok = add_spell_exception(word, DATA_DIR)
+        except Exception:
+            ok = False
+
+        if ok:
+            try:
+                app._runlog("SPELL_KEEP_HINT", word)
+            except Exception:
+                pass
+            _amir_hint_spellcheck_update(app, force=True)
+
+    if sug:
+        menu.add_command(label=f"Replace with: {sug}", command=do_replace)
+
+    menu.add_command(label=f"Keep term (add to exceptions): {word}", command=do_keep)
+    menu.tk_popup(ev.x_root, ev.y_root)
+
+
+def _amir_hint_install_gui_patch():
+    import tkinter as _amir_hint_tk
+    from tkinter import ttk as _amir_hint_ttk
+
+    add_method_name = "_add_current_set"
+    start_method_name = "proceed"
+
+    for cls in list(globals().values()):
+        if not isinstance(cls, type):
+            continue
+
+        if not hasattr(cls, add_method_name):
+            continue
+
+        if getattr(cls, "_amir_hint_keywords_patch_installed", False):
+            continue
+
+        original_init = getattr(cls, "__init__", None)
+        original_add = getattr(cls, add_method_name)
+
+        def patched_init(self, *args, __original_init=original_init, **kwargs):
+            __original_init(self, *args, **kwargs)
+
+            if getattr(self, "_amir_hint_ui_ready", False):
+                return
+
+            try:
+                if not _AMIR_HINT_FILE.exists():
+                    _amir_hint_reset_file()
+            except Exception as exc:
+                print(f"[WARN] Could not reset hint keyword file: {exc}")
+
+            try:
+                self.hint_keywords_var = _amir_hint_tk.StringVar()
+                self._hint_last_spell_text = None
+                self._hint_issues = []
+
+                parent = None
+
+                for attr in ["ai_subject_regen_btn", "ai_subject_btn"]:
+                    widget = getattr(self, attr, None)
+
+                    if widget is not None:
+                        parent = getattr(widget, "master", None)
+                        break
+
+                if parent is None:
+                    return
+
+                self.hint_keywords_label = _amir_hint_ttk.Label(
+                    parent,
+                    text="Hint keywords:",
+                )
+                self.hint_keywords_label.pack(side="left", padx=(16, 4))
+
+                self.hint_keywords_entry = _amir_hint_ttk.Entry(
+                    parent,
+                    textvariable=self.hint_keywords_var,
+                    width=42,
+                )
+                self.hint_keywords_entry.pack(side="left", padx=(0, 8))
+
+                try:
+                    style = _amir_hint_ttk.Style()
+                    style.configure("AmirHint.TEntry")
+                    style.configure(
+                        "AmirHintBad.TEntry",
+                        foreground="#c00000",
+                        fieldbackground="#fff2f2",
+                    )
+                    self.hint_keywords_entry.configure(style="AmirHint.TEntry")
+                except Exception:
+                    pass
+
+                try:
+                    self.hint_keywords_var.trace_add(
+                        "write",
+                        lambda *_args, _self=self: _amir_hint_spellcheck_update(_self),
+                    )
+                except Exception:
+                    pass
+
+                self.hint_keywords_entry.bind(
+                    "<KeyRelease>",
+                    lambda _ev, _self=self: _amir_hint_spellcheck_update(_self),
+                    add="+",
+                )
+                self.hint_keywords_entry.bind(
+                    "<FocusOut>",
+                    lambda _ev, _self=self: _amir_hint_spellcheck_update(_self, force=True),
+                    add="+",
+                )
+                self.hint_keywords_entry.bind(
+                    "<Button-3>",
+                    lambda ev, _self=self: _amir_hint_context_menu(_self, ev),
+                    add="+",
+                )
+
+                self._amir_hint_ui_ready = True
+                print("[HINT] Optional Hint keywords field added.")
+            except Exception as exc:
+                print(f"[WARN] Could not add Hint keywords field: {exc}")
+
+        def patched_add(self, *args, __original_add=original_add, **kwargs):
+            _amir_hint_spellcheck_update(self, force=True)
+            _amir_hint_save_for_current_set(self)
+            return __original_add(self, *args, **kwargs)
+
+        setattr(cls, "__init__", patched_init)
+        setattr(cls, add_method_name, patched_add)
+
+        if hasattr(cls, "_ai_suggest_subject_for_current"):
+            original_ai = getattr(cls, "_ai_suggest_subject_for_current")
+
+            def patched_ai(self, *args, __original_ai=original_ai, **kwargs):
+                _amir_hint_set_env_from_field(self)
+                return __original_ai(self, *args, **kwargs)
+
+            setattr(cls, "_ai_suggest_subject_for_current", patched_ai)
+
+        if start_method_name and hasattr(cls, start_method_name):
+            original_start = getattr(cls, start_method_name)
+
+            def patched_start(self, *args, __original_start=original_start, **kwargs):
+                _amir_hint_os.environ["AMIR_HINT_KEYWORDS_FILE"] = str(_AMIR_HINT_FILE)
+                return __original_start(self, *args, **kwargs)
+
+            setattr(cls, start_method_name, patched_start)
+
+        setattr(cls, "_amir_hint_keywords_patch_installed", True)
+        print(f"[HINT] Hint keywords patch installed on {cls.__name__}.")
+        break
+
+
+_amir_hint_install_gui_patch()
+# AMIR_HINT_KEYWORDS_SOFT_EVIDENCE_V1_END
+
+# AMIR_FORCE_REGENERATE_ALTERNATE_ROUTE_V1_START
+# Force the Regenerate subject button to use the alternate model route.
+# Normal AI suggest remains image-only.
+# Regenerate must set AMIR_SUBJECT_MODEL_MODE=regenerate_alt so make_model_list()
+# returns the configured light vision alternate first, then fallback models.
+
+import os as _amir_regen_route_os
+
+
+def _amir_regen_route_install():
+    for cls in list(globals().values()):
+        if not isinstance(cls, type):
+            continue
+
+        if not hasattr(cls, "_ai_suggest_subject_for_current"):
+            continue
+
+        if getattr(cls, "_amir_regen_route_patch_installed", False):
+            continue
+
+        original_init = getattr(cls, "__init__", None)
+        original_ai = getattr(cls, "_ai_suggest_subject_for_current")
+
+        def patched_ai(self, *args, __original_ai=original_ai, **kwargs):
+            regenerate = bool(kwargs.get("regenerate", False))
+
+            if regenerate:
+                _amir_regen_route_os.environ["AMIR_SUBJECT_MODEL_MODE"] = "regenerate_alt"
+                _amir_regen_route_os.environ["AMIR_SUBJECT_FORCE_MODEL"] = _amir_regen_route_os.environ.get(
+                    "AMIR_SUBJECT_REGENERATE_MODEL",
+                    "qwen3-vl:4b",
+                )
+                print(f"[SUBJECT AI] regenerate route forced: {_amir_regen_route_os.environ['AMIR_SUBJECT_FORCE_MODEL']}")
+            else:
+                # Newer context-file regenerate wrapper calls through with
+                # regenerate=False to avoid old hint-copy behavior. In that
+                # case, do not clear the active forced model route.
+                if _amir_regen_route_os.environ.get("AMIR_SUBJECT_REGENERATE", "").strip() != "1":
+                    _amir_regen_route_os.environ.pop("AMIR_SUBJECT_MODEL_MODE", None)
+                    _amir_regen_route_os.environ.pop("AMIR_SUBJECT_FORCE_MODEL", None)
+
+            return __original_ai(self, *args, **kwargs)
+
+        def patched_init(self, *args, __original_init=original_init, **kwargs):
+            __original_init(self, *args, **kwargs)
+
+            try:
+                btn = getattr(self, "ai_subject_regen_btn", None)
+
+                if btn is not None:
+                    btn.configure(
+                        command=lambda: self._ai_suggest_subject_for_current(regenerate=True)
+                    )
+                    print("[SUBJECT AI] Regenerate button command forced to alternate route.")
+            except Exception as exc:
+                print(f"[WARN] Could not force regenerate button route: {exc}")
+
+        setattr(cls, "_ai_suggest_subject_for_current", patched_ai)
+        setattr(cls, "__init__", patched_init)
+        setattr(cls, "_amir_regen_route_patch_installed", True)
+
+        print(f"[SUBJECT AI] Regenerate route patch installed on {cls.__name__}.")
+        break
+
+
+_amir_regen_route_install()
+# AMIR_FORCE_REGENERATE_ALTERNATE_ROUTE_V1_END
+
+
+
+
+# AMIR_HINT_KEYWORDS_CLEAR_AFTER_ADD_V1_START
+# Hint keywords are optional.
+# They are used only when Regenerate subject is clicked and the field is non-empty.
+# After Add set, clear the field so hints cannot leak into the next set.
+
+def _amir_clear_hint_keywords_after_add_install():
+    for cls in list(globals().values()):
+        if not isinstance(cls, type):
+            continue
+
+        if getattr(cls, "_amir_clear_hint_after_add_installed", False):
+            continue
+
+        add_method_name = None
+
+        for name in dir(cls):
+            if "add" in name.lower() and "set" in name.lower():
+                attr = getattr(cls, name, None)
+
+                if callable(attr):
+                    add_method_name = name
+                    break
+
+        if not add_method_name:
+            continue
+
+        original_add = getattr(cls, add_method_name)
+
+        def patched_add(self, *args, __original_add=original_add, **kwargs):
+            result = __original_add(self, *args, **kwargs)
+
+            try:
+                if hasattr(self, "hint_keywords_var"):
+                    self.hint_keywords_var.set("")
+                    print("[HINT] Cleared optional Hint keywords after Add set.")
+            except Exception as exc:
+                print(f"[WARN] Could not clear Hint keywords: {exc}")
+
+            return result
+
+        setattr(cls, add_method_name, patched_add)
+        setattr(cls, "_amir_clear_hint_after_add_installed", True)
+
+        print(f"[HINT] Optional Hint keywords clear-after-add installed on {cls.__name__}.")
+        break
+
+
+_amir_clear_hint_keywords_after_add_install()
+# AMIR_HINT_KEYWORDS_CLEAR_AFTER_ADD_V1_END
+
+
+
+
+
+
+
+# AMIR_PROPER_SUBJECT_REGENERATE_SYSTEM_V2_START
+# Correct subject system:
+# AI suggest = image only.
+# Regenerate without hints = image only, alternate model route.
+# Regenerate with hints = image + soft hints through model.
+# Hints are passed through data/subject_regenerate_context.json.
+# Hints are never copied directly and never written into Folder.
+
+def _amir_subject_v2_context_path():
+    from pathlib import Path
+
+    root = Path.cwd()
+    data_dir = root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    return data_dir / "subject_regenerate_context.json"
+
+
+def _amir_subject_v2_get_var(app, names):
+    for name in names:
+        obj = getattr(app, name, None)
+
+        if obj is None:
+            continue
+
+        try:
+            if hasattr(obj, "get"):
+                value = obj.get()
+            else:
+                value = str(obj)
+
+            value = str(value or "").strip()
+
+            if value:
+                return value
+        except Exception:
+            pass
+
+    return ""
+
+
+def _amir_subject_v2_get_hints(app):
+    return _amir_subject_v2_get_var(app, ["hint_keywords_var"])
+
+
+def _amir_subject_v2_get_current_subject(app):
+    try:
+        getter = getattr(app, "_subject_get", None)
+
+        if callable(getter):
+            value = str(getter() or "").strip()
+
+            if value:
+                return value
+    except Exception:
+        pass
+
+    return _amir_subject_v2_get_var(
+        app,
+        [
+            "subject_var",
+            "subject_text_var",
+            "subject_value",
+            "subject_input_var",
+        ],
+    )
+
+
+def _amir_subject_v2_write_context(active, hints="", current_subject=""):
+    import json
+    import time
+
+    path = _amir_subject_v2_context_path()
+
+    payload = {
+        "active": bool(active),
+        "hints": str(hints or "").strip(),
+        "current_subject": str(current_subject or "").strip(),
+        "created_at": time.time(),
+    }
+
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return path
+
+
+def _amir_subject_v2_install():
+    import os
+
+    for cls in list(globals().values()):
+        if not isinstance(cls, type):
+            continue
+
+        if not hasattr(cls, "_ai_suggest_subject_for_current"):
+            continue
+
+        if getattr(cls, "_amir_subject_regenerate_system_v2_installed", False):
+            continue
+
+        original_ai = getattr(cls, "_ai_suggest_subject_for_current")
+
+        def patched_ai(self, *args, __original_ai=original_ai, **kwargs):
+            regenerate = bool(kwargs.get("regenerate", False))
+            identify = bool(kwargs.get("identify", False))
+
+            if args and isinstance(args[0], bool):
+                regenerate = bool(args[0])
+
+            hints = _amir_subject_v2_get_hints(self)
+            current_subject = _amir_subject_v2_get_current_subject(self)
+            context_file = str(_amir_subject_v2_context_path())
+
+            old_env = {
+                "AMIR_SUBJECT_CONTEXT_FILE": os.environ.get("AMIR_SUBJECT_CONTEXT_FILE"),
+                "AMIR_SUBJECT_REGENERATE": os.environ.get("AMIR_SUBJECT_REGENERATE"),
+                "AMIR_SUBJECT_FORCE_MODEL": os.environ.get("AMIR_SUBJECT_FORCE_MODEL"),
+                "AMIR_SUBJECT_MODEL_MODE": os.environ.get("AMIR_SUBJECT_MODEL_MODE"),
+                "AMIR_SUBJECT_IGNORE_SUBJECT_HINT": os.environ.get("AMIR_SUBJECT_IGNORE_SUBJECT_HINT"),
+                "AMIR_SUBJECT_IDENTIFY_MODE": os.environ.get("AMIR_SUBJECT_IDENTIFY_MODE"),
+            }
+
+            try:
+                os.environ["AMIR_SUBJECT_CONTEXT_FILE"] = context_file
+
+                if identify:
+                    _amir_subject_v2_write_context(
+                        active=False,
+                        hints="",
+                        current_subject="",
+                    )
+
+                    print("[SUBJECT AI] Identify: strict living/macro identifier mode")
+
+                elif regenerate:
+                    os.environ["AMIR_SUBJECT_REGENERATE"] = "1"
+                    os.environ["AMIR_SUBJECT_FORCE_MODEL"] = os.environ.get(
+                        "AMIR_SUBJECT_REGENERATE_MODEL",
+                        "qwen3-vl:4b",
+                    )
+                    os.environ["AMIR_SUBJECT_MODEL_MODE"] = "regenerate_alt"
+                    os.environ["AMIR_SUBJECT_IGNORE_SUBJECT_HINT"] = "1"
+
+                    _amir_subject_v2_write_context(
+                        active=True,
+                        hints=hints,
+                        current_subject=current_subject,
+                    )
+
+                    if hints:
+                        print(f"[SUBJECT AI] Regenerate: image + soft hints via context file | hints={hints}")
+                    else:
+                        print("[SUBJECT AI] Regenerate: image only alternate model via context file")
+
+                    # Prevent old alternate route logic from copy/pasting hints.
+                    if args and isinstance(args[0], bool):
+                        args = (False,) + tuple(args[1:])
+                    else:
+                        kwargs["regenerate"] = False
+
+                else:
+                    os.environ.pop("AMIR_SUBJECT_REGENERATE", None)
+                    os.environ.pop("AMIR_SUBJECT_FORCE_MODEL", None)
+                    os.environ.pop("AMIR_SUBJECT_MODEL_MODE", None)
+                    os.environ.pop("AMIR_SUBJECT_IGNORE_SUBJECT_HINT", None)
+                    os.environ.pop("AMIR_SUBJECT_IDENTIFY_MODE", None)
+
+                    _amir_subject_v2_write_context(
+                        active=False,
+                        hints="",
+                        current_subject="",
+                    )
+
+                    print("[SUBJECT AI] AI suggest: image only")
+
+                return __original_ai(self, *args, **kwargs)
+
+            finally:
+                if regenerate:
+                    # The original method starts a background worker thread.
+                    # Keep regenerate env/context alive until that worker has
+                    # called the subject identifier, then the worker clears it.
+                    pass
+                else:
+                    _amir_subject_v2_write_context(
+                        active=False,
+                        hints="",
+                        current_subject="",
+                    )
+
+                    for key, value in old_env.items():
+                        if value is None:
+                            os.environ.pop(key, None)
+                        else:
+                            os.environ[key] = value
+
+        setattr(cls, "_ai_suggest_subject_for_current", patched_ai)
+        setattr(cls, "_amir_subject_regenerate_system_v2_installed", True)
+
+        print(f"[SUBJECT AI] Proper regenerate context-file system installed on {cls.__name__}.")
+        break
+
+
+_amir_subject_v2_install()
+# AMIR_PROPER_SUBJECT_REGENERATE_SYSTEM_V2_END
+
+# AMIR_METADATA_AUTO_REPAIR_MAINSET_V1_START
+# Run deterministic metadata auto repair after prefill/evidence cleanup and before quality gate.
+# This is not NEEDS_MANUAL. This repairs weak generated metadata automatically.
+
+def _amir_run_metadata_auto_repair_loop(db_path=None, py=None):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(APP_DIR).resolve()
+    try:
+        script = Path(_prepare_external_script(os.path.join("scripts", "metadata_auto_repair_loop.py")))
+    except Exception:
+        script = root / "scripts" / "metadata_auto_repair_loop.py"
+    db = Path(db_path or DB_PATH).resolve()
+    python_exe = py or sys.executable
+
+    if not script.exists():
+        print(f"[WARN] Metadata auto repair script missing: {script}")
+        return
+
+    print("[AUTO-REPAIR] Running deterministic metadata compiler before quality gate...")
+
+    result = subprocess.run(
+        [
+            python_exe,
+            "-u",
+            str(script),
+            "--db",
+            str(db),
+            "--table",
+            "review_queue",
+            "--status-col",
+            "Review_Status",
+            "--statuses",
+            "Pending,Queued",
+        ],
+        cwd=str(root),
+        text=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "AMIR_PROJECT_ROOT": str(root),
+            "AMIR_REVIEW_DB": str(db),
+        },
+    )
+
+    if result.stdout:
+        print(result.stdout.rstrip())
+
+    if result.stderr:
+        print(result.stderr.rstrip())
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Metadata auto repair failed with rc={result.returncode}")
+# AMIR_METADATA_AUTO_REPAIR_MAINSET_V1_END
+
+
+# AMIR_AUTO_SPLIT_EMPTY_SUBJECT_V1_START
+# Generic no-manual fallback:
+# if a multi-image selection has no safe common subject, split it into
+# per-image sets instead of using the first image's subject for every row.
+def _amir_auto_split_empty_subject_install():
+    for cls in list(globals().values()):
+        if not isinstance(cls, type):
+            continue
+
+        if getattr(cls, "_amir_auto_split_empty_subject_installed", False):
+            continue
+
+        if not all(hasattr(cls, name) for name in ["_add_set", "_subject_get", "_subject_set"]):
+            continue
+
+        original_add_set = getattr(cls, "_add_set")
+
+        def patched_add_set(self, files, *args, __original_add_set=original_add_set, **kwargs):
+            if os.getenv("AMIR_AUTO_SPLIT_MIXED_ON_EMPTY_SUBJECT", "1") != "1":
+                return __original_add_set(self, files, *args, **kwargs)
+
+            files_list = [str(path) for path in (files or []) if path and os.path.exists(str(path))]
+
+            if len(files_list) < 2 or getattr(self, "_amir_auto_split_active", False):
+                return __original_add_set(self, files, *args, **kwargs)
+
+            try:
+                current_subject = str(self._subject_get() or "").strip()
+            except Exception:
+                current_subject = ""
+
+            if current_subject:
+                return __original_add_set(self, files, *args, **kwargs)
+
+            def _suggest_for_paths(paths, label):
+                temp_map = {}
+
+                try:
+                    temp_map = _amir_prepare_ollama_temp_images_for_subject(paths, label=label)
+                    model_paths = [
+                        temp_map.get(_amir_norm_temp_source_path(path), path)
+                        for path in paths
+                    ]
+                    subject = clean_token(ai_suggest_subject_multi(model_paths) or "")
+                except Exception as exc:
+                    print(f"[SUBJECT AI] auto-split suggestion failed ({label}): {type(exc).__name__}: {exc}")
+                    subject = ""
+
+                return subject, temp_map
+
+            common_subject, common_temp_map = _suggest_for_paths(files_list, "subject_common")
+
+            if common_subject:
+                try:
+                    self._last_ai_suggested_subject = common_subject
+                    self._last_ai_subject_paths_sig = {self._norm_path(path) for path in files_list if path}
+                    self._last_ai_subject_temp_by_original = dict(common_temp_map or {})
+                    self._subject_set(common_subject)
+                    print(f"[SUBJECT AI] auto-split common subject accepted: {common_subject}")
+                except Exception:
+                    pass
+
+                return __original_add_set(self, files, *args, **kwargs)
+
+            print(
+                "[SUBJECT AI] auto-split | no safe common subject; "
+                f"splitting {len(files_list)} image(s) into per-image sets"
+            )
+
+            previous_subject = current_subject
+            previous_last_subject = str(getattr(self, "_last_ai_suggested_subject", "") or "")
+            previous_last_sig = set(getattr(self, "_last_ai_subject_paths_sig", set()) or set())
+            previous_last_temp = dict(getattr(self, "_last_ai_subject_temp_by_original", {}) or {})
+            successes = 0
+            failures = []
+
+            self._amir_auto_split_active = True
+
+            try:
+                for index, path in enumerate(files_list, start=1):
+                    subject, temp_map = _suggest_for_paths([path], f"subject_split_{index:03d}")
+
+                    if not subject:
+                        failures.append(os.path.basename(path))
+                        print(f"[SUBJECT AI] auto-split skipped | no subject | {os.path.basename(path)}")
+                        continue
+
+                    try:
+                        self._subject_set(subject)
+                        self._last_ai_suggested_subject = subject
+                        self._last_ai_subject_paths_sig = {self._norm_path(path)}
+                        self._last_ai_subject_temp_by_original = dict(temp_map or {})
+                    except Exception:
+                        pass
+
+                    if __original_add_set(self, [path], *args, **kwargs):
+                        successes += 1
+                        print(
+                            "[SUBJECT AI] auto-split added "
+                            f"{index}/{len(files_list)} | {os.path.basename(path)} | {subject}"
+                        )
+                    else:
+                        failures.append(os.path.basename(path))
+            finally:
+                self._amir_auto_split_active = False
+
+                try:
+                    self._subject_set(previous_subject)
+                except Exception:
+                    pass
+
+                self._last_ai_suggested_subject = previous_last_subject
+                self._last_ai_subject_paths_sig = previous_last_sig
+                self._last_ai_subject_temp_by_original = previous_last_temp
+
+            if successes:
+                if failures:
+                    print(
+                        "[SUBJECT AI] auto-split partial "
+                        f"| added={successes} failed={len(failures)} "
+                        f"| failed_files={', '.join(failures[:8])}"
+                    )
+                else:
+                    print(f"[SUBJECT AI] auto-split complete | added={successes}")
+
+                return True
+
+            return __original_add_set(self, files, *args, **kwargs)
+
+        setattr(cls, "_add_set", patched_add_set)
+        setattr(cls, "_amir_auto_split_empty_subject_installed", True)
+        print(f"[SUBJECT AI] Empty-subject auto-split installed on {cls.__name__}.")
+        break
+
+
+_amir_auto_split_empty_subject_install()
+# AMIR_AUTO_SPLIT_EMPTY_SUBJECT_V1_END
+
+
 if __name__ == "__main__":
     # EXE self-test: catch missing spellcheck dictionary fast after build
     if "--selftest-spellcheck" in sys.argv:
@@ -5872,4 +11235,3 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
-

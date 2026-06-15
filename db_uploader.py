@@ -1,3 +1,19 @@
+# AMIR_FORCE_LOGS_DIR_IMPORT_START
+from pathlib import Path as _amir_force_logs_pathlib_path
+import sys as _amir_force_logs_sys
+
+_amir_force_logs_root = _amir_force_logs_pathlib_path(__file__).resolve().parent
+
+while not (_amir_force_logs_root / "utils").exists() and _amir_force_logs_root.parent != _amir_force_logs_root:
+    _amir_force_logs_root = _amir_force_logs_root.parent
+
+if str(_amir_force_logs_root) not in _amir_force_logs_sys.path:
+    _amir_force_logs_sys.path.insert(0, str(_amir_force_logs_root))
+
+from utils.force_logs_dir import install as _amir_force_logs_install
+_amir_force_logs_install()
+# AMIR_FORCE_LOGS_DIR_IMPORT_END
+
 import logging
 from pathlib import Path
 import sys
@@ -170,6 +186,16 @@ PUBLIC_URL_BASE = PUBLISH.get("PUBLIC_URL_BASE") or ""
 
 TABLE_NAME = (PUBLISH.get("MYSQL_MIRROR_TABLE") or os.getenv("AMIR_MYSQL_TABLE") or "photos_info_revamp").strip()
 REVIEW_QUEUE = (PUBLISH.get("REVIEW_QUEUE_TABLE") or os.getenv("AMIR_REVIEW_QUEUE_TABLE") or "review_queue").strip()
+METADATA_QUALITY_TABLE = (
+    PUBLISH.get("METADATA_QUALITY_TABLE")
+    or os.getenv("AMIR_METADATA_QUALITY_TABLE")
+    or "metadata_quality"
+).strip()
+SYNC_METADATA_QUALITY_AFTER_UPLOAD = str(
+    PUBLISH.get("METADATA_QUALITY_SYNC_AFTER_UPLOAD")
+    or os.getenv("AMIR_METADATA_QUALITY_SYNC_AFTER_UPLOAD")
+    or "1"
+).strip() == "1"
 
 if not TABLE_NAME or not REVIEW_QUEUE:
     raise RuntimeError(
@@ -340,6 +366,353 @@ def row_get(row, key, default=None):
         return default
 
 
+
+
+def _metadata_quality_columns_sqlite() -> list[tuple[str, str]]:
+    return [
+        ("revamp_id", "INTEGER"),
+        ("revamp_File_Name", "TEXT NOT NULL"),
+        ("revamp_Original_File_Name", "TEXT"),
+        ("revamp_Location", "TEXT"),
+        ("revamp_Folder", "TEXT"),
+        ("current_caption", "TEXT"),
+        ("current_alt_text", "TEXT"),
+        ("current_keywords", "TEXT"),
+        ("upload_caption", "TEXT"),
+        ("upload_alt_text", "TEXT"),
+        ("upload_keywords", "TEXT"),
+        ("overall_quality_status", "TEXT"),
+        ("overall_quality_score", "REAL"),
+        ("overall_quality_issues", "TEXT"),
+        ("generation_mode", "TEXT"),
+        ("repair_attempts", "INTEGER DEFAULT 0"),
+        ("fallback_used", "INTEGER DEFAULT 0"),
+        ("fallback_reason", "TEXT"),
+        ("accepted_for_upload", "INTEGER DEFAULT 0"),
+        ("caption_accepted_for_upload", "INTEGER DEFAULT 0"),
+        ("alt_text_accepted_for_upload", "INTEGER DEFAULT 0"),
+        ("keywords_accepted_for_upload", "INTEGER DEFAULT 0"),
+        ("part_of_serie", "INTEGER DEFAULT 0"),
+        ("unique_name", "TEXT"),
+        ("ai_suggested_subject", "TEXT"),
+        ("final_subject", "TEXT"),
+        ("subject_seed", "TEXT"),
+        ("subject_seed_mode", "TEXT"),
+        ("subject_seed_confidence", "INTEGER"),
+        ("subject_seed_reason", "TEXT"),
+        ("manual_decision", "TEXT"),
+        ("uploaded_to_mysql", "INTEGER DEFAULT 0"),
+        ("mysql_synced_at", "TEXT"),
+        ("upload_public_path", "TEXT"),
+        ("upload_status", "TEXT"),
+        ("source_review_status", "TEXT"),
+        ("created_at", "TEXT DEFAULT CURRENT_TIMESTAMP"),
+        ("updated_at", "TEXT DEFAULT CURRENT_TIMESTAMP"),
+    ]
+
+
+def ensure_metadata_quality_local_schema(conn: sqlite3.Connection) -> None:
+    cols = _metadata_quality_columns_sqlite()
+    body = ",\n            ".join([f"{name} {definition}" for name, definition in cols])
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {METADATA_QUALITY_TABLE} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            {body}
+        )
+        """
+    )
+
+    have = {row[1] for row in conn.execute(f"PRAGMA table_info({METADATA_QUALITY_TABLE})").fetchall()}
+
+    for name, definition in cols:
+        if name not in have:
+            conn.execute(f"ALTER TABLE {METADATA_QUALITY_TABLE} ADD COLUMN {name} {definition}")
+
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{METADATA_QUALITY_TABLE}_revamp_id "
+        f"ON {METADATA_QUALITY_TABLE}(revamp_id)"
+    )
+    conn.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_{METADATA_QUALITY_TABLE}_file "
+        f"ON {METADATA_QUALITY_TABLE}(revamp_File_Name)"
+    )
+    conn.commit()
+
+
+def ensure_metadata_quality_mysql_schema(cur) -> None:
+    cur.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {METADATA_QUALITY_TABLE} (
+            id BIGINT NOT NULL AUTO_INCREMENT,
+            revamp_id BIGINT NULL,
+            revamp_File_Name VARCHAR(300) NOT NULL,
+            revamp_Original_File_Name VARCHAR(300) NULL,
+            revamp_Location VARCHAR(250) NULL,
+            revamp_Folder VARCHAR(255) NULL,
+            current_caption TEXT NULL,
+            current_alt_text TEXT NULL,
+            current_keywords TEXT NULL,
+            upload_caption TEXT NULL,
+            upload_alt_text TEXT NULL,
+            upload_keywords TEXT NULL,
+            overall_quality_status VARCHAR(64) NULL,
+            overall_quality_score DOUBLE NULL,
+            overall_quality_issues TEXT NULL,
+            generation_mode VARCHAR(80) NULL,
+            repair_attempts INT DEFAULT 0,
+            fallback_used TINYINT DEFAULT 0,
+            fallback_reason VARCHAR(255) NULL,
+            accepted_for_upload TINYINT DEFAULT 0,
+            caption_accepted_for_upload TINYINT DEFAULT 0,
+            alt_text_accepted_for_upload TINYINT DEFAULT 0,
+            keywords_accepted_for_upload TINYINT DEFAULT 0,
+            part_of_serie TINYINT DEFAULT 0,
+            unique_name VARCHAR(300) NULL,
+            ai_suggested_subject VARCHAR(300) NULL,
+            final_subject VARCHAR(300) NULL,
+            subject_seed VARCHAR(300) NULL,
+            subject_seed_mode VARCHAR(40) NULL,
+            subject_seed_confidence INT NULL,
+            subject_seed_reason VARCHAR(255) NULL,
+            manual_decision VARCHAR(80) NULL,
+            uploaded_to_mysql TINYINT DEFAULT 0,
+            mysql_synced_at DATETIME NULL,
+            upload_public_path VARCHAR(500) NULL,
+            upload_status VARCHAR(80) NULL,
+            source_review_status VARCHAR(80) NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY uq_metadata_quality_file (revamp_File_Name),
+            KEY idx_metadata_quality_status (overall_quality_status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+
+    mysql_columns = {
+        "revamp_id": "BIGINT NULL",
+        "revamp_File_Name": "VARCHAR(300) NOT NULL",
+        "revamp_Original_File_Name": "VARCHAR(300) NULL",
+        "revamp_Location": "VARCHAR(250) NULL",
+        "revamp_Folder": "VARCHAR(255) NULL",
+        "current_caption": "TEXT NULL",
+        "current_alt_text": "TEXT NULL",
+        "current_keywords": "TEXT NULL",
+        "upload_caption": "TEXT NULL",
+        "upload_alt_text": "TEXT NULL",
+        "upload_keywords": "TEXT NULL",
+        "overall_quality_status": "VARCHAR(64) NULL",
+        "overall_quality_score": "DOUBLE NULL",
+        "overall_quality_issues": "TEXT NULL",
+        "generation_mode": "VARCHAR(80) NULL",
+        "repair_attempts": "INT DEFAULT 0",
+        "fallback_used": "TINYINT DEFAULT 0",
+        "fallback_reason": "VARCHAR(255) NULL",
+        "accepted_for_upload": "TINYINT DEFAULT 0",
+        "caption_accepted_for_upload": "TINYINT DEFAULT 0",
+        "alt_text_accepted_for_upload": "TINYINT DEFAULT 0",
+        "keywords_accepted_for_upload": "TINYINT DEFAULT 0",
+        "part_of_serie": "TINYINT DEFAULT 0",
+        "unique_name": "VARCHAR(300) NULL",
+        "ai_suggested_subject": "VARCHAR(300) NULL",
+        "final_subject": "VARCHAR(300) NULL",
+        "subject_seed": "VARCHAR(300) NULL",
+        "subject_seed_mode": "VARCHAR(40) NULL",
+        "subject_seed_confidence": "INT NULL",
+        "subject_seed_reason": "VARCHAR(255) NULL",
+        "manual_decision": "VARCHAR(80) NULL",
+        "uploaded_to_mysql": "TINYINT DEFAULT 0",
+        "mysql_synced_at": "DATETIME NULL",
+        "upload_public_path": "VARCHAR(500) NULL",
+        "upload_status": "VARCHAR(80) NULL",
+        "source_review_status": "VARCHAR(80) NULL",
+        "created_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "updated_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
+    }
+
+    try:
+        cur.execute(f"SHOW COLUMNS FROM {METADATA_QUALITY_TABLE}")
+        have = {str(row[0]) for row in cur.fetchall()}
+        for name, definition in mysql_columns.items():
+            if name not in have:
+                cur.execute(f"ALTER TABLE {METADATA_QUALITY_TABLE} ADD COLUMN {name} {definition}")
+    except Exception:
+        # If the table was just created this should not be needed.
+        # If ALTER fails, the later sync query will raise a clear error.
+        pass
+
+
+def _metadata_quality_for_upload(row: sqlite3.Row) -> tuple[str | None, str | None, str | None]:
+    caption = none_if_empty(row_get(row, "MQ_Caption"))
+    alt_text = none_if_empty(row_get(row, "MQ_alt_text"))
+    keywords = none_if_empty(row_get(row, "MQ_Keywords"))
+
+    return keywords, caption, alt_text
+
+
+def _sync_metadata_quality_after_upload(
+    qconn: sqlite3.Connection,
+    mcur,
+    review_row: sqlite3.Row,
+    photo_revamp_id: int,
+    public_path: str,
+) -> None:
+    """Sync local metadata_quality row to MySQL after successful photo upload.
+
+    Identity rule:
+    - photo_revamp_id is photos_info_revamp.id from MySQL.
+    - metadata_quality.revamp_id stores that id.
+    - review_queue.id is temporary and is never stored in metadata_quality.revamp_id.
+    """
+    if not SYNC_METADATA_QUALITY_AFTER_UPLOAD:
+        return
+
+    ensure_metadata_quality_local_schema(qconn)
+
+    fname = str(row_get(review_row, "File_Name") or "").strip()
+
+    if not fname:
+        return
+
+    qcur = qconn.cursor()
+    qcur.execute(
+        f"SELECT * FROM {METADATA_QUALITY_TABLE} WHERE revamp_File_Name=? ORDER BY id DESC LIMIT 1",
+        (fname,),
+    )
+    mq = qcur.fetchone()
+
+    if mq is None:
+        LOGGER.warning("No metadata_quality row found for uploaded file %s", fname)
+        return
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    qcur.execute(
+        f"""
+        UPDATE {METADATA_QUALITY_TABLE}
+        SET
+            revamp_id = ?,
+            uploaded_to_mysql = 1,
+            mysql_synced_at = ?,
+            upload_public_path = ?,
+            upload_status = 'UPLOADED',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (photo_revamp_id, now, public_path, mq["id"]),
+    )
+    qconn.commit()
+
+    ensure_metadata_quality_mysql_schema(mcur)
+
+    def mq_get(key, default=None):
+        if key == "revamp_id":
+            return photo_revamp_id
+        if key == "uploaded_to_mysql":
+            return 1
+        if key == "mysql_synced_at":
+            return now
+        if key == "upload_public_path":
+            return public_path
+        if key == "upload_status":
+            return "UPLOADED"
+        return row_get(mq, key, default)
+
+    fields = [
+        "revamp_id",
+        "revamp_File_Name",
+        "revamp_Original_File_Name",
+        "revamp_Location",
+        "revamp_Folder",
+        "current_caption",
+        "current_alt_text",
+        "current_keywords",
+        "upload_caption",
+        "upload_alt_text",
+        "upload_keywords",
+        "overall_quality_status",
+        "overall_quality_score",
+        "overall_quality_issues",
+        "generation_mode",
+        "repair_attempts",
+        "fallback_used",
+        "fallback_reason",
+        "accepted_for_upload",
+        "caption_accepted_for_upload",
+        "alt_text_accepted_for_upload",
+        "keywords_accepted_for_upload",
+        "part_of_serie",
+        "unique_name",
+        "ai_suggested_subject",
+        "final_subject",
+        "subject_seed",
+        "subject_seed_mode",
+        "subject_seed_confidence",
+        "subject_seed_reason",
+        "manual_decision",
+        "uploaded_to_mysql",
+        "mysql_synced_at",
+        "upload_public_path",
+        "upload_status",
+        "source_review_status",
+    ]
+
+    insert_cols = ",\n            ".join(fields)
+    placeholders = ", ".join(["%s"] * len(fields))
+    updates = ",\n            ".join(
+        f"{name}=VALUES({name})"
+        for name in fields
+        if name != "revamp_File_Name"
+    )
+
+    sql = f"""
+        INSERT INTO {METADATA_QUALITY_TABLE} (
+            {insert_cols}
+        )
+        VALUES ({placeholders})
+        ON DUPLICATE KEY UPDATE
+            {updates}
+    """
+
+    vals = tuple(mq_get(name) for name in fields)
+    mcur.execute(sql, vals)
+
+
+def _mark_metadata_quality_upload_failed(
+    qconn: sqlite3.Connection,
+    fname: str,
+    public_path: str,
+    status: str,
+    reason: str,
+) -> None:
+    """Record remote upload failure locally without removing the approved queue row."""
+    if not fname:
+        return
+    clean_reason = " ".join(str(reason or "").split())[:900]
+    note = f"remote_upload_failed:{status}:{clean_reason}"
+    cur = qconn.cursor()
+    cur.execute(
+        f"""
+        UPDATE {METADATA_QUALITY_TABLE}
+        SET
+            uploaded_to_mysql = 0,
+            upload_status = ?,
+            upload_public_path = CASE
+                WHEN ? <> '' THEN ?
+                ELSE upload_public_path
+            END,
+            overall_quality_issues = CASE
+                WHEN COALESCE(overall_quality_issues, '') = '' THEN ?
+                ELSE overall_quality_issues || ';' || ?
+            END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE revamp_File_Name = ?
+        """,
+        (status, public_path or "", public_path or "", note, note, fname),
+    )
+    qconn.commit()
+
+
 def _derive_local_src(path_val: str, local_base: str, public_base: str, year: str, folder_key: str, fname: str) -> str:
     """
     Resolve a local filesystem source path for upload.
@@ -393,8 +766,29 @@ def upload():
     # open local queue
     qconn = sqlite3.connect(DB_PATH)
     qconn.row_factory = sqlite3.Row
+    ensure_metadata_quality_local_schema(qconn)
     qc = qconn.cursor()
-    qc.execute(f"SELECT * FROM {REVIEW_QUEUE} WHERE Review_Status='Approved'")
+    qc.execute(
+        f"""
+        SELECT
+            q.*,
+            mq.upload_keywords AS MQ_Keywords,
+            mq.upload_caption AS MQ_Caption,
+            mq.upload_alt_text AS MQ_alt_text,
+            mq.overall_quality_status AS MQ_quality_status,
+            mq.overall_quality_score AS MQ_quality_score,
+            mq.overall_quality_issues AS MQ_quality_issues,
+            mq.accepted_for_upload AS MQ_accepted_for_upload
+        FROM {REVIEW_QUEUE} q
+        INNER JOIN {METADATA_QUALITY_TABLE} mq
+            ON mq.revamp_File_Name = q.File_Name
+        WHERE q.Review_Status='Approved'
+          AND COALESCE(mq.accepted_for_upload, 0) = 1
+          AND COALESCE(mq.upload_caption, '') <> ''
+          AND COALESCE(mq.upload_alt_text, '') <> ''
+          AND COALESCE(mq.upload_keywords, '') <> ''
+        """
+    )
     rows = qc.fetchall()
     run_dirs_to_cleanup = _collect_ollama_run_dirs(qconn, rows)
 
@@ -429,10 +823,25 @@ def upload():
             retry["use_pure"] = True
             retry.setdefault("auth_plugin", "mysql_native_password")
             LOGGER.warning("Retrying MySQL connect in pure mode after auth-plugin load failure.")
-            mconn = mysql.connector.connect(**retry)
+            try:
+                mconn = mysql.connector.connect(**retry)
+            except Exception as retry_ex:
+                for r in rows:
+                    fname = str(row_get(r, "File_Name") or "")
+                    _mark_metadata_quality_upload_failed(qconn, fname, "", "MYSQL_CONNECT_FAILED", retry_ex)
+                qconn.close()
+                print(f"[UPLOAD ERROR] MySQL connect failed: {retry_ex}", file=sys.stderr)
+                return 1
         else:
-            raise
+            for r in rows:
+                fname = str(row_get(r, "File_Name") or "")
+                _mark_metadata_quality_upload_failed(qconn, fname, "", "MYSQL_CONNECT_FAILED", ex)
+            qconn.close()
+            print(f"[UPLOAD ERROR] MySQL connect failed: {ex}", file=sys.stderr)
+            return 1
     mcur = mconn.cursor()
+    if SYNC_METADATA_QUALITY_AFTER_UPLOAD:
+        ensure_metadata_quality_mysql_schema(mcur)
 
     # local mirror db
     lconn = sqlite3.connect(LOCAL_MIRROR_DB)
@@ -440,15 +849,50 @@ def upload():
     lcur = lconn.cursor()
 
     # FTP
-    ftp = FTP()
-    ftp.connect(FTP_CONFIG["host"], FTP_CONFIG["port"], timeout=60)
-    ftp.login(FTP_CONFIG["user"], FTP_CONFIG["passwd"])
-    ftp.encoding = "utf-8"
+    try:
+        ftp = FTP()
+        ftp.connect(FTP_CONFIG["host"], FTP_CONFIG["port"], timeout=60)
+        ftp.login(FTP_CONFIG["user"], FTP_CONFIG["passwd"])
+        ftp.encoding = "utf-8"
+    except Exception as ex:
+        for r in rows:
+            fname = str(row_get(r, "File_Name") or "")
+            _mark_metadata_quality_upload_failed(qconn, fname, "", "FTP_CONNECT_FAILED", ex)
+        try:
+            mcur.close()
+            mconn.close()
+        except Exception:
+            pass
+        lconn.close()
+        qconn.close()
+        print(f"[UPLOAD ERROR] FTP connect/login failed: {ex}", file=sys.stderr)
+        return 1
 
     success = 0
     fail = 0
 
+    def refresh_mysql_cursor():
+        nonlocal mconn, mcur
+        try:
+            mconn.ping(reconnect=True, attempts=2, delay=2)
+        except Exception:
+            try:
+                mcur.close()
+            except Exception:
+                pass
+            try:
+                mconn.close()
+            except Exception:
+                pass
+            mconn = mysql.connector.connect(**conn_kwargs)
+            mcur = mconn.cursor()
+            if SYNC_METADATA_QUALITY_AFTER_UPLOAD:
+                ensure_metadata_quality_mysql_schema(mcur)
+
     for r in tqdm(rows, desc="Uploading", unit="img"):
+        fname = "<unknown>"
+        public_path = ""
+        stage = "prepare"
         try:
             folder = str(r["Folder"] or "")
             display_folder = folder
@@ -471,6 +915,17 @@ def upload():
             if not os.path.exists(local_src):
                 raise FileNotFoundError(local_src)
 
+            public_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, folder_key, fname] if p])
+            public_path = public_path.replace(" ", "%20")
+            thumb_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, "thumbs", folder_key, fname] if p])
+            thumb_path = thumb_path.replace(" ", "%20")
+            thumb_local = os.path.join(LOCAL_BASE, year, "thumbs", folder_key, fname) if LOCAL_BASE else ""
+            if not thumb_local or not os.path.exists(thumb_local):
+                raise FileNotFoundError(f"local thumb missing before upload: {thumb_local}")
+
+            stage = "mysql_preflight"
+            refresh_mysql_cursor()
+
             # Compute remote target
             remote_dir = REMOTE_BASE.strip("/")
             if remote_dir:
@@ -484,6 +939,7 @@ def upload():
             else:
                 remote_thumb_dir = f"{year}/thumbs/{folder_key}"
 
+            stage = "ftp_main"
             mkdir_p(ftp, remote_dir)
             ftp.cwd("/")
             ftp.cwd(remote_dir)
@@ -492,24 +948,12 @@ def upload():
             with open(local_src, "rb") as f:
                 ftp.storbinary(f"STOR {fname}", f)
 
-            # Build public URL path
-            public_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, folder_key, fname] if p])
-            public_path = public_path.replace(" ", "%20")
-
-            # Always persist a deterministic thumb URL (never NULL in DB).
-            thumb_path = "/".join([p.strip("/") for p in [PUBLIC_URL_BASE, year, "thumbs", folder_key, fname] if p])
-            thumb_path = thumb_path.replace(" ", "%20")
-
-            # Upload thumb from local mirror if present
-            thumb_local = os.path.join(LOCAL_BASE, year, "thumbs", folder_key, fname) if LOCAL_BASE else ""
-            if thumb_local and os.path.exists(thumb_local):
-                mkdir_p(ftp, remote_thumb_dir)
-                ftp.cwd("/")
-                ftp.cwd(remote_thumb_dir)
-                with open(thumb_local, "rb") as tf:
-                    ftp.storbinary(f"STOR {fname}", tf)
-            else:
-                LOGGER.warning("Thumb missing locally for %s (expected %s); URL still set in DB.", fname, thumb_local)
+            stage = "ftp_thumb"
+            mkdir_p(ftp, remote_thumb_dir)
+            ftp.cwd("/")
+            ftp.cwd(remote_thumb_dir)
+            with open(thumb_local, "rb") as tf:
+                ftp.storbinary(f"STOR {fname}", tf)
 
             # Insert/update by File_Name (UNIQUE). Never reuse review_queue id for MySQL PK.
             sql = f"""
@@ -558,6 +1002,14 @@ def upload():
                     clip_aesthetic_score=VALUES(clip_aesthetic_score)
             """
 
+            upload_keywords, upload_caption, upload_alt_text = _metadata_quality_for_upload(r)
+
+            if not upload_keywords or not upload_caption or not upload_alt_text:
+                raise ValueError(
+                    "metadata_quality upload fields missing for approved row "
+                    f"id={row_get(r, 'id')} file={fname}"
+                )
+
             vals_no_id = (
                 display_folder,
                 fname,
@@ -572,9 +1024,9 @@ def upload():
                 none_if_empty(row_get(r, "Aperture")),
                 row_get(r, "ISO"),
                 row_get(r, "Focal_length"),
-                none_if_empty(row_get(r, "Keywords")),
-                none_if_empty(row_get(r, "Caption")),
-                none_if_empty(row_get(r, "alt_text")),
+                upload_keywords,
+                upload_caption,
+                upload_alt_text,
                 none_if_empty(row_get(r, "Location")),
                 row_get(r, "QR"),
                 none_if_empty(row_get(r, "QC_Status")),
@@ -587,6 +1039,8 @@ def upload():
                 row_get(r, "clip_aesthetic_score"),
             )
 
+            stage = "mysql_upsert"
+            refresh_mysql_cursor()
             mcur.execute(sql, vals_no_id)
 
             # Resolve canonical MySQL id after insert/update (by unique filename)
@@ -616,6 +1070,14 @@ def upload():
             )
             lconn.commit()
 
+            _sync_metadata_quality_after_upload(
+                qconn=qconn,
+                mcur=mcur,
+                review_row=r,
+                photo_revamp_id=mysql_row_id,
+                public_path=public_path,
+            )
+
             # Delete from queue once uploaded
             qc.execute(f"DELETE FROM {REVIEW_QUEUE} WHERE id=?", (r["id"],))
             qconn.commit()
@@ -626,20 +1088,30 @@ def upload():
 
         except Exception as e:
             fail += 1
-            fname = str(row_get(r, "File_Name") or "<unknown>")
+            status = "MYSQL_FAILED" if stage.startswith("mysql") else "FTP_FAILED" if stage.startswith("ftp") else "LOCAL_UPLOAD_PREP_FAILED"
             try:
                 LOGGER.exception("Upload failed for %s", fname)
             except Exception:
                 pass
-            print(f"[UPLOAD ERROR] {fname}: {e}", file=sys.stderr)
+            try:
+                _mark_metadata_quality_upload_failed(qconn, fname, public_path, status, e)
+            except Exception:
+                pass
+            print(f"[UPLOAD ERROR] {fname}: {status} during {stage}: {e}", file=sys.stderr)
 
     # close everything
     try:
         mconn.commit()
     except Exception:
         pass
-    mcur.close()
-    mconn.close()
+    try:
+        mcur.close()
+    except Exception:
+        pass
+    try:
+        mconn.close()
+    except Exception:
+        pass
     lconn.close()
 
     if fail == 0:
