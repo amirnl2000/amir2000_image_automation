@@ -964,6 +964,13 @@ def smart_title(value: str) -> str:
             words.append(upper)
             continue
 
+        if re.fullmatch(
+            r"(?:PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS)-?[A-Z0-9]{3,5}",
+            upper,
+        ):
+            words.append(upper)
+            continue
+
         if re.fullmatch(r"[A-Z]{1,3}-?[A-Z0-9]{2,6}", upper) and any(ch.isdigit() for ch in upper):
             words.append(upper)
             continue
@@ -1258,7 +1265,7 @@ def identifier_detail_crop_paths(path: Path) -> list[Path]:
                 crop.save(dst, format="JPEG", quality=JPEG_QUALITY, optimize=True)
                 out.append(dst)
 
-            return out[:4]
+            return out
     except Exception:
         return []
 
@@ -1340,6 +1347,458 @@ def visible_text_subject_candidate(visible_text: str) -> str:
 
     candidates.sort(key=lambda item: (len(word_tokens(item)), len(item)), reverse=True)
     return candidates[0]
+
+
+_AMIR_AIRCRAFT_CONTEXT_TERMS = {
+    "aircraft",
+    "airplane",
+    "aeroplane",
+    "plane",
+    "jet",
+    "airline",
+    "airport",
+    "runway",
+    "aviation",
+    "landing",
+    "takeoff",
+    "taking off",
+    "taxiing",
+    "boeing",
+    "airbus",
+    "embraer",
+    "bombardier",
+    "cessna",
+    "atr",
+    "helicopter",
+    "klm",
+    "transavia",
+    "easyjet",
+    "easy jet",
+    "air canada",
+}
+
+
+def _amir_aircraft_context(*texts: object) -> bool:
+    haystack = " ".join(str(text or "") for text in texts).lower()
+    haystack = re.sub(r"[_\-]+", " ", haystack)
+    return any(term in haystack for term in _AMIR_AIRCRAFT_CONTEXT_TERMS)
+
+
+def _amir_aircraft_format_registration(prefix: str, suffix: str = "") -> str:
+    prefix = re.sub(r"[^A-Z0-9]+", "", str(prefix or "").upper())
+    suffix = re.sub(r"[^A-Z0-9]+", "", str(suffix or "").upper())
+
+    if not prefix:
+        return ""
+
+    if suffix:
+        return f"{prefix}-{suffix}"
+
+    return prefix
+
+
+def _amir_aircraft_registration_from_text(text: object) -> str:
+    value = str(text or "").upper()
+
+    if not value:
+        return ""
+
+    value = re.sub(r"\b([A-Z]{1,3})\s*-\s*([A-Z0-9]{3,5})\b", r"\1-\2", value)
+
+    patterns = [
+        r"\b(PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS)[-\s]?([A-Z0-9]{3,5})\b",
+        r"\b(G|D|F|C)[-\s]([A-Z]{3,5})\b",
+        r"\b(N[0-9][0-9A-Z]{2,5})\b",
+        r"\b(B)[-\s]([0-9A-Z]{4,5})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, value)
+
+        if not match:
+            continue
+
+        if re.fullmatch(r"SE[-\s]?RIES", match.group(0) or "", flags=re.IGNORECASE):
+            continue
+
+        if len(match.groups()) == 1:
+            reg = _amir_aircraft_format_registration(match.group(1))
+        else:
+            reg = _amir_aircraft_format_registration(match.group(1), match.group(2))
+
+        if reg and not re.search(r"BOEING\s*" + re.escape(reg.replace("-", "")), value):
+            return reg
+
+    return ""
+
+
+def _amir_aircraft_model_from_text(text: object) -> str:
+    value = str(text or "")
+    if not value:
+        return ""
+
+    normalized = re.sub(r"[_/]+", " ", value)
+
+    model_patterns = [
+        (r"\bBoeing\s+(7[0-9]7(?:[-\s]?[0-9A-Z]{2,4})?)\b", "Boeing"),
+        (r"\b(7[0-9]7[-\s]?[0-9A-Z]{2,4})\b", "Boeing"),
+        (r"\bAirbus\s+(A[0-9]{3}(?:[-\s]?[0-9A-Z]{2,4})?)\b", "Airbus"),
+        (r"\b(A[0-9]{3}(?:[-\s]?[0-9A-Z]{2,4})?)\b", "Airbus"),
+        (r"\bEmbraer\s+((?:E|ERJ)[-\s]?[0-9]{3,4})\b", "Embraer"),
+        (r"\b((?:E|ERJ)[-\s]?[0-9]{3,4})\b", "Embraer"),
+        (r"\bATR\s+([0-9]{2}(?:[-\s]?[0-9]{3})?)\b", "ATR"),
+        (r"\bBombardier\s+([A-Z]{2,4}[-\s]?[0-9]{3,4})\b", "Bombardier"),
+        (r"\bCessna\s+([0-9]{3,4}[A-Z]?)\b", "Cessna"),
+    ]
+
+    for pattern, maker in model_patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+
+        model = re.sub(r"\s+", "-", match.group(1).upper().replace(" ", "-"))
+        model = re.sub(r"-+", "-", model).strip("-")
+
+        # Guard against phrase bleed such as "Air France" turning A320 into
+        # A320-Air. Keep real variant suffixes, strip generic trailing words.
+        model_parts = model.split("-")
+        valid_suffixes = {"NEO", "CEO", "XLR", "LR", "ER", "F", "BCF", "ERF", "MAX"}
+        if (
+            len(model_parts) > 1
+            and re.fullmatch(r"[A-Z]{2,4}", model_parts[-1])
+            and model_parts[-1] not in valid_suffixes
+        ):
+            model = "-".join(model_parts[:-1])
+
+        return smart_title(f"{maker} {model}")
+
+    return ""
+
+
+def _amir_airline_from_text(text: object) -> str:
+    value = str(text or "")
+    if not value:
+        return ""
+
+    airline_names = [
+        "Transavia",
+        "KLM",
+        "EasyJet",
+        "Air Canada",
+        "Air France",
+        "British Airways",
+        "Lufthansa",
+        "Ryanair",
+        "Wizz Air",
+        "TUI",
+        "SAS",
+        "LOT",
+        "Emirates",
+        "Qatar Airways",
+        "Turkish Airlines",
+        "Delta Air Lines",
+        "United Airlines",
+        "American Airlines",
+        "DHL",
+        "UPS",
+    ]
+
+    for name in airline_names:
+        if re.search(rf"\b{re.escape(name)}\b", value, flags=re.IGNORECASE):
+            return clean_subject_label(name, max_words=4, max_chars=40)
+
+    match = re.search(
+        r"\b([A-Za-z][A-Za-z0-9]+(?:\s+[A-Za-z][A-Za-z0-9]+){0,2}\s+(?:Airlines?|Airways|Cargo))\b",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    if match:
+        return clean_subject_label(match.group(1), max_words=4, max_chars=45)
+
+    return ""
+
+
+def _amir_aircraft_state_from_text(text: object) -> str:
+    value = str(text or "").lower()
+
+    if "landing gear down" in value:
+        return "Landing Gear Down"
+    if "final approach" in value or "on approach" in value or "approach" in value or "landing" in value:
+        return "Landing"
+    if "taking off" in value or "takeoff" in value or "take off" in value:
+        return "Taking Off"
+    if "taxiing" in value or "taxiway" in value:
+        return "Taxiing"
+    if "runway" in value:
+        return "On Runway"
+    if "in flight" in value or "flying" in value:
+        return "In Flight"
+
+    return ""
+
+
+def _amir_aircraft_subject_from_text(*texts: object) -> str:
+    combined = " ".join(str(text or "") for text in texts)
+
+    if not _amir_aircraft_context(combined):
+        return ""
+
+    airline = _amir_airline_from_text(combined)
+    model = _amir_aircraft_model_from_text(combined)
+    registration = _amir_aircraft_registration_from_text(combined)
+    state = _amir_aircraft_state_from_text(combined)
+
+    parts = [part for part in [airline, model, registration] if part]
+
+    if len(parts) < 2 and state:
+        parts.append(state)
+
+    if len(parts) < 2:
+        return ""
+
+    subject = clean_subject_label(" ".join(parts), max_words=8, max_chars=72)
+
+    if model and "-" in model:
+        subject = re.sub(rf"\b{re.escape(model.replace('-', ' '))}\b", model, subject, flags=re.IGNORECASE)
+
+    if registration and "-" in registration:
+        subject = re.sub(
+            rf"\b{re.escape(registration.replace('-', ' '))}\b",
+            registration,
+            subject,
+            flags=re.IGNORECASE,
+        )
+
+    if not subject or is_exact_generic(subject):
+        return ""
+
+    return subject
+
+
+def _amir_aircraft_model_specificity_score(model: object) -> int:
+    value = str(model or "").strip()
+    if not value:
+        return 0
+
+    score = 1
+
+    if "-" in value:
+        score += 2
+
+    if re.search(
+        r"\b(?:737|747|757|767|777|787|A220|A3[0-9]{2}|A380|E1[79]0|E[0-9]{3}|ERJ)[-\s]?[0-9A-Z]{2,4}\b",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        score += 2
+
+    if re.search(
+        r"\b(?:Boeing|Airbus|Embraer|Bombardier|Cessna|Piper|De Havilland|ATR)\b",
+        value,
+        flags=re.IGNORECASE,
+    ):
+        score += 1
+
+    return score
+
+
+def _amir_aircraft_subject_specificity_score(subject: object) -> int:
+    value = str(subject or "").strip()
+    if not value:
+        return 0
+
+    score = 0
+
+    if _amir_aircraft_context(value):
+        score += 1
+    if _amir_airline_from_text(value):
+        score += 2
+
+    model = _amir_aircraft_model_from_text(value)
+    if model:
+        score += 3 + _amir_aircraft_model_specificity_score(model)
+
+    if _amir_aircraft_registration_from_text(value):
+        score += 4
+
+    if _amir_aircraft_state_from_text(value):
+        score += 1
+
+    if re.search(r"\b(?:aircraft|airplane|plane|jet|airliner)$", value, flags=re.IGNORECASE):
+        score -= 2
+
+    return score
+
+
+def _amir_aircraft_group_subject_from_rows(rows: list[dict], current_subject: object = "", hints: object = "") -> str:
+    accepted = [row for row in (rows or []) if isinstance(row, dict)]
+    if len(accepted) < 2:
+        return ""
+
+    airlines: Counter[str] = Counter()
+    models: Counter[str] = Counter()
+    registrations: Counter[str] = Counter()
+    registration_best_score: dict[str, int] = {}
+    registration_first_seen: dict[str, int] = {}
+    states: Counter[str] = Counter()
+    aircraft_rows = 0
+
+    for row in accepted:
+        values = [
+            row.get("subject", ""),
+            row.get("specific", ""),
+            row.get("descriptive", ""),
+            row.get("evidence", ""),
+            row.get("reason", ""),
+        ]
+
+        try:
+            values.extend(_amir_set_attempt_values(row))
+        except Exception:
+            pass
+
+        text = " ".join(str(value or "") for value in values if value)
+        if not _amir_aircraft_context(text):
+            continue
+
+        aircraft_rows += 1
+
+        airline = _amir_airline_from_text(text)
+        model = _amir_aircraft_model_from_text(text)
+        registration = _amir_aircraft_registration_from_text(text)
+        state = _amir_aircraft_state_from_text(text)
+        row_score = _amir_aircraft_subject_specificity_score(text)
+
+        if airline:
+            airlines[airline] += 1
+        if model:
+            models[model] += 1
+        if registration:
+            registrations[registration] += 1
+            registration_best_score[registration] = max(
+                registration_best_score.get(registration, 0),
+                row_score,
+            )
+            registration_first_seen.setdefault(registration, aircraft_rows)
+        if state:
+            states[state] += 1
+
+    context_text = " ".join(str(value or "") for value in [current_subject, hints] if value)
+    if aircraft_rows < 2 and not _amir_aircraft_context(context_text):
+        return ""
+
+    airline = ""
+    if airlines:
+        airline, airline_support = airlines.most_common(1)[0]
+        if len(airlines) > 1 and airline_support * 2 < max(2, aircraft_rows):
+            return ""
+
+    model = ""
+    if models:
+        model = max(
+            models,
+            key=lambda value: (
+                _amir_aircraft_model_specificity_score(value),
+                models[value],
+                len(str(value)),
+            ),
+        )
+
+    registration = _amir_aircraft_registration_from_text(context_text)
+    if not registration and registrations:
+        ordered_regs = sorted(
+            registrations,
+            key=lambda value: (
+                registrations[value],
+                registration_best_score.get(value, 0),
+                -registration_first_seen.get(value, 9999),
+                len(str(value)),
+            ),
+            reverse=True,
+        )
+        registration = ordered_regs[0]
+
+        if len(ordered_regs) > 1:
+            try:
+                candidate_summary = ", ".join(
+                    f"{value}:{registrations[value]}"
+                    for value in ordered_regs[:5]
+                )
+                log(
+                    "[SUBJECT AI AIRCRAFT] registration candidates | "
+                    f"selected={registration!r} | candidates={candidate_summary}"
+                )
+            except Exception:
+                pass
+
+    state = states.most_common(1)[0][0] if states else ""
+    if not (model or registration):
+        return ""
+
+    subject = _amir_aircraft_subject_from_text("aircraft", airline, model, registration, state)
+    if not subject or _amir_aircraft_subject_specificity_score(subject) < 5:
+        return ""
+
+    log(
+        "[SUBJECT AI AIRCRAFT] group merge | "
+        f"subject={subject!r} | aircraft_rows={aircraft_rows}/{len(accepted)} | "
+        f"airline={airline!r} | model={model!r} | registration={registration!r}"
+    )
+    return subject
+
+
+def _amir_aircraft_analysis_sheet_path(image_path: Path) -> Path | None:
+    from PIL import Image, ImageDraw
+
+    try:
+        with Image.open(image_path) as source:
+            image = source.convert("RGB")
+            width, height = image.size
+
+            if width < 900 or height < 600:
+                return None
+
+            digest = hashlib.sha1(str(image_path.resolve()).encode("utf-8", errors="replace")).hexdigest()[:16]
+            sheet_dir = DATA_DIR / "identifier_aircraft_tmp" / digest
+            sheet_dir.mkdir(parents=True, exist_ok=True)
+            sheet_path = sheet_dir / "aircraft_detail_sheet.jpg"
+
+            crop_specs = [
+                ("full", (0.00, 0.00, 1.00, 1.00)),
+                ("tail and rear fuselage", (0.42, 0.04, 1.00, 0.90)),
+                ("center fuselage and markings", (0.18, 0.22, 0.88, 0.82)),
+                ("wing registration area", (0.22, 0.05, 0.84, 0.56)),
+                ("front livery area", (0.00, 0.18, 0.58, 0.88)),
+            ]
+
+            panels: list[tuple[str, Image.Image]] = []
+
+            for label, (left, top, right, bottom) in crop_specs:
+                l = max(0, min(width - 1, int(width * left)))
+                t = max(0, min(height - 1, int(height * top)))
+                r = max(l + 1, min(width, int(width * right)))
+                b = max(t + 1, min(height, int(height * bottom)))
+                crop = image.crop((l, t, r, b))
+                crop.thumbnail((640, 420))
+                panels.append((label, crop))
+
+            panel_w, panel_h = 680, 470
+            sheet = Image.new("RGB", (panel_w * 2, panel_h * 3), "white")
+            draw = ImageDraw.Draw(sheet)
+
+            for index, (label, crop) in enumerate(panels):
+                col = index % 2
+                row = index // 2
+                x = col * panel_w + 20
+                y = row * panel_h + 20
+                draw.text((x, y), label, fill=(0, 0, 0))
+                sheet.paste(crop, (x, y + 30))
+
+            sheet.save(sheet_path, format="JPEG", quality=max(90, JPEG_QUALITY), optimize=True)
+            return sheet_path
+    except Exception:
+        return None
 
 
 def identifier_analysis_image_paths(image_path: Path) -> list[tuple[str, Path]]:
@@ -2229,6 +2688,19 @@ def candidate_texts_from_json(data: dict[str, Any]) -> list[tuple[str, str, int,
 
     visible_text = clean_text(data.get("visible_text"))
 
+    aircraft_label = _amir_aircraft_subject_from_text(
+        visible_text,
+        evidence,
+        data.get("subject_text"),
+        data.get("specific_name"),
+        data.get("descriptive_subject"),
+        data.get("group_subject"),
+        data.get("_raw_response"),
+    )
+
+    if aircraft_label:
+        raw_items.append((aircraft_label, "aircraft_visible_evidence", max(confidence, 84), "aircraft airline, model, or registration visible in image evidence"))
+
     visible_label = visible_text_subject_candidate(visible_text)
 
     if visible_label:
@@ -2253,6 +2725,7 @@ def candidate_texts_from_json(data: dict[str, Any]) -> list[tuple[str, str, int,
         "base_plus_action",
         "base_plus_setting",
         "alternative",
+        "aircraft_visible_evidence",
         "visible_text_untrusted_context",
         "visible_text_label",
     }
@@ -2390,6 +2863,8 @@ def score_candidate(
         score += 22
     elif source == "specific_name":
         score += 18
+    elif source == "aircraft_visible_evidence":
+        score += 20
     elif source in {"visible_text_label"}:
         score += 16
     elif source in {"subject_text", "best_subject", "primary_subject", "main_subject", "visible_text_untrusted_context"}:
@@ -2449,6 +2924,7 @@ def best_candidate_from_json(data: dict[str, Any], image_path: Path, model: str)
     source_priority = {
         "specific_context": 95,
         "specific_name": 90,
+        "aircraft_visible_evidence": 88,
         "visible_text_untrusted_context": 86,
         "visible_text_label": 84,
         "subject_text": 70,
@@ -2756,8 +3232,21 @@ def analyze_one_image(
             "notes": "No trusted Qwen subject model available.",
         }
 
+    aircraft_context = _amir_aircraft_context(subject_hint, location_hint, folder_hint, image_path.name)
+
     try:
-        raw_variants = identifier_analysis_image_paths(image_path)
+        if aircraft_context:
+            raw_variants = [("full", image_path)]
+
+            sheet_path = _amir_aircraft_analysis_sheet_path(image_path)
+            if sheet_path and sheet_path.exists():
+                raw_variants.append(("aircraft_detail_sheet", sheet_path))
+
+            for crop_path in identifier_detail_crop_paths(image_path):
+                if crop_path.exists():
+                    raw_variants.append((crop_path.stem, crop_path))
+        else:
+            raw_variants = identifier_analysis_image_paths(image_path)
     except Exception:
         raw_variants = [
             (
@@ -2767,12 +3256,29 @@ def analyze_one_image(
         ]
 
     variants = []
+    allowed_variants = {
+        "full",
+        "center",
+    }
+    variant_limit = 2
+
+    if aircraft_context:
+        allowed_variants = {
+            "full",
+            "aircraft_detail_sheet",
+            "center",
+            "top",
+            "bottom",
+            "left",
+            "right",
+        }
+        variant_limit = max(
+            3,
+            min(7, int(os.getenv("SUBJECT_IDENTIFIER_AIRCRAFT_VARIANTS", "7") or "7")),
+        )
 
     for variant_label, analysis_path in raw_variants:
-        if variant_label in {
-            "full",
-            "center",
-        }:
+        if variant_label in allowed_variants:
             variants.append(
                 (
                     variant_label,
@@ -2783,7 +3289,17 @@ def analyze_one_image(
     if not variants:
         variants = raw_variants[:1]
 
-    variants = variants[:2]
+    deduped_variants = []
+    seen_variant_paths = set()
+
+    for variant_label, analysis_path in variants:
+        key = str(Path(analysis_path).resolve()).lower()
+        if key in seen_variant_paths:
+            continue
+        seen_variant_paths.add(key)
+        deduped_variants.append((variant_label, analysis_path))
+
+    variants = deduped_variants[:variant_limit]
 
     best = None
 
@@ -3642,6 +4158,17 @@ def _amir_identifier_reference_needed(rows, result):
     subject = str(getattr(result, "subject", "") or "")
     category = str(getattr(result, "category", "") or "")
     error = str(getattr(result, "error", "") or "")
+    reference_text = " ".join([subject, category, error] + [
+        " ".join(
+            str(row.get(key, "") or "")
+            for key in ("subject", "specific", "descriptive", "evidence", "reason")
+        )
+        for row in (rows or [])
+        if isinstance(row, dict)
+    ])
+
+    if _amir_aircraft_context(reference_text):
+        return False
 
     if not subject or error or category in {"underidentified_taxon", "identify_insufficient_set_support"}:
         return True
@@ -7043,6 +7570,72 @@ def _amir_subject_evidence_from_model_raw(raw_text):
     return clean_text(" ".join(parts))
 
 
+def _amir_aircraft_detail_subject_from_image(image_path, model, base_raw="", base_subject="", hints="", current_subject=""):
+    context_text = " ".join(
+        str(value or "")
+        for value in [base_raw, base_subject, hints, current_subject, image_path]
+    )
+
+    if not _amir_aircraft_context(context_text):
+        return "", ""
+
+    subject_from_existing = _amir_aircraft_subject_from_text(base_raw, base_subject, hints, current_subject)
+    if subject_from_existing and (
+        _amir_aircraft_registration_from_text(subject_from_existing)
+        or _amir_aircraft_model_from_text(subject_from_existing)
+    ):
+        return subject_from_existing, str(base_raw or "")
+
+    sheet_path = _amir_aircraft_analysis_sheet_path(Path(image_path))
+
+    if not sheet_path:
+        return "", ""
+
+    prompt = f"""
+You are reading aircraft identity details from a real photograph.
+
+The image is a detail sheet made from the same aircraft photo: full frame plus tail, fuselage, wing, and livery crops.
+
+Return JSON only:
+{{"subject": "airline aircraft model registration", "airline": "", "aircraft_model": "", "registration": "", "state": "", "visible_text": "", "confidence": 0, "evidence": ""}}
+
+Rules:
+- Use only text, markings, livery, registration, and model details visible in the image.
+- Read tail, fuselage, wing, and engine markings carefully.
+- If airline, aircraft model, and registration are visible, return all three in subject.
+- If model text is visible as Boeing 737-800, keep it as Boeing 737-800.
+- If registration is visible as PH-HSF style text, keep that registration.
+- If a field is not readable, leave it empty.
+- Do not invent airline, model, or registration.
+- Do not use location, filename, camera, or hidden context.
+
+Earlier broad subject:
+{base_subject}
+
+Earlier evidence:
+{_amir_subject_evidence_from_model_raw(base_raw)}
+""".strip()
+
+    try:
+        raw_text = _amir_subject_call_model(
+            image_path=sheet_path,
+            prompt=prompt,
+            model=model,
+            temperature=0.0,
+            num_predict=260,
+            json_mode=True,
+        )
+    except Exception as exc:
+        try:
+            log(f"[SUBJECT AI AIRCRAFT] detail pass failed | model={model} | {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        return "", ""
+
+    subject = _amir_aircraft_subject_from_text(raw_text, base_raw, base_subject, hints, current_subject)
+    return subject, raw_text
+
+
 def _amir_subject_direct_model_subject(image_path, force_regenerate=False, hints="", current_subject=""):
     global _AMIR_LAST_DIRECT_SUBJECT_EVIDENCE
     _AMIR_LAST_DIRECT_SUBJECT_EVIDENCE = ""
@@ -7102,6 +7695,9 @@ Rules:
 - For birds, flowers, plants, insects, and animals, prefer the safest common species or common group name when visible traits support it.
 - Use visible traits such as bill color, wing shape, leg color, flower shape, petal color, insect body pattern, markings, and habitat before choosing a broad label.
 - Do not return bare taxonomy labels like birds, animals, flowers, plants, insects, wildlife, or waterfowl when a more useful visible name is possible.
+- For aircraft, actively read visible airline or livery text, tail or fuselage registration, and model markings.
+- If aircraft details are readable, use airline plus aircraft model plus registration, for example Airline Boeing 737-800 PH-HSF.
+- Do not invent aircraft details that are not readable in the image.
 - Include visible action, count, setting, or context only when it helps identify the subject.
 - Prefer visible activity, role, object, and setting over clothing or accessory details.
 - Use clothing or accessory details only when they are the main meaningful subject.
@@ -7189,8 +7785,50 @@ Rules:
             subject = _amir_subject_clean(raw_text)
             subject = _amir_subject_broaden_unprompted_specific(subject, hints, current_subject)
 
+            aircraft_subject, aircraft_raw = _amir_aircraft_detail_subject_from_image(
+                image_path=image_path,
+                model=model,
+                base_raw=raw_text,
+                base_subject=subject,
+                hints=hints,
+                current_subject=current_subject,
+            )
+
+            if aircraft_subject:
+                try:
+                    log(
+                        "[SUBJECT AI AIRCRAFT] refined aircraft subject "
+                        f"| old={subject!r} | new={aircraft_subject!r}"
+                    )
+                except Exception:
+                    pass
+
+                subject = aircraft_subject
+                aircraft_evidence = _amir_subject_evidence_from_model_raw(aircraft_raw)
+
+                if aircraft_evidence:
+                    _AMIR_LAST_DIRECT_SUBJECT_EVIDENCE = clean_text(
+                        f"{_AMIR_LAST_DIRECT_SUBJECT_EVIDENCE} {aircraft_evidence}"
+                    )
+
             if _amir_subject_identifier_mode() and subject:
                 direct_subject, direct_confidence = _amir_identifier_direct_subject_from_raw(raw_text, current_subject)
+
+                if direct_subject:
+                    aircraft_score = _amir_aircraft_subject_specificity_score(subject)
+                    direct_score = _amir_aircraft_subject_specificity_score(direct_subject)
+
+                    if aircraft_subject and aircraft_score > 0 and aircraft_score >= direct_score:
+                        try:
+                            log(
+                                "[SUBJECT AI AIRCRAFT] preserved aircraft detail "
+                                f"| kept={subject!r} | ignored={direct_subject!r} "
+                                f"| kept_score={aircraft_score} | ignored_score={direct_score}"
+                            )
+                        except Exception:
+                            pass
+
+                        direct_subject = ""
 
                 if direct_subject:
                     try:
@@ -8920,6 +9558,15 @@ def _amir_set_group_subject_from_contact_sheet(rows):
                 pass
 
             current_subject = ""
+
+    aircraft_group_subject = _amir_aircraft_group_subject_from_rows(
+        rows,
+        current_subject=current_subject,
+        hints=hints,
+    )
+
+    if aircraft_group_subject:
+        return aircraft_group_subject
 
     sheet_path = _amir_set_contact_sheet(rows)
 
