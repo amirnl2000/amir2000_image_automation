@@ -131,6 +131,7 @@ $piArgs = @(
     "--hidden-import","PIL.ImageTk",
     "--hidden-import","PIL.ImageOps",
     "--hidden-import","PIL.ImageEnhance",
+    "--hidden-import","PIL.ImageCms",
 
     # Spellchecker resources
     "--hidden-import","spellchecker",

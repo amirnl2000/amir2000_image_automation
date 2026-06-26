@@ -14,7 +14,8 @@ from utils.force_logs_dir import install as _amir_force_logs_install
 _amir_force_logs_install()
 # AMIR_FORCE_LOGS_DIR_IMPORT_END
 
-from PIL import Image, ImageDraw, ImageFont
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont, ImageCms, ImageOps
 import os
 import shutil
 
@@ -23,62 +24,115 @@ try:
 except Exception:
     piexif = None
 
-def resize_and_watermark(src_path, dest_path, thumb_path, desktop_copy_path, watermark_text, font_path, quality=100):
+
+WEB_MAX_SIZE = (1500, 1000)
+THUMB_MAX_SIZE = (548, 365)
+WEB_JPEG_QUALITY = 100
+THUMB_JPEG_QUALITY = 95
+
+
+def _srgb_profile_bytes():
+    srgb_profile = ImageCms.createProfile("sRGB")
+    return ImageCms.ImageCmsProfile(srgb_profile).tobytes()
+
+
+def _convert_to_srgb(src_img):
+    icc_bytes = src_img.info.get("icc_profile")
+    img = ImageOps.exif_transpose(src_img)
+
+    if icc_bytes:
+        try:
+            input_profile = ImageCms.ImageCmsProfile(BytesIO(icc_bytes))
+            output_profile = ImageCms.createProfile("sRGB")
+            img = ImageCms.profileToProfile(
+                img,
+                input_profile,
+                output_profile,
+                outputMode="RGB",
+                renderingIntent=0,
+            )
+            return img.convert("RGB")
+        except Exception as exc:
+            print(f"[WARN] ICC conversion failed, assuming sRGB: {exc}")
+
+    return img.convert("RGB")
+
+
+def _clean_exif_after_transpose(src_path):
+    if piexif is None:
+        return None
+
+    try:
+        exif_dict = piexif.load(src_path)
+        if "0th" in exif_dict:
+            exif_dict["0th"][piexif.ImageIFD.Orientation] = 1
+        return piexif.dump(exif_dict)
+    except Exception:
+        return None
+
+
+def _draw_watermark(img, watermark_text, font_path):
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    font_size = max(12, int(img.size[1] * 0.03))
+    font = ImageFont.truetype(font_path, font_size)
+
+    lines = watermark_text.strip().split("\n")
+    spacing = int(font_size * 0.4)
+    line_boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
+    line_heights = [box[3] - box[1] for box in line_boxes]
+    total_height = sum(line_heights) + spacing * (len(lines) - 1)
+
+    y_offset = img.height - total_height - 10
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        text_width = bbox[2] - bbox[0]
+        x = img.width - text_width - 20
+        draw.text((x, y_offset), line, font=font, fill=(255, 255, 255, 200))
+        y_offset += line_heights[i] + spacing
+
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+def _save_jpeg(img, path, quality, exif_bytes, icc_profile_bytes):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    save_kwargs = {
+        "format": "JPEG",
+        "quality": quality,
+        "subsampling": 0,
+        "optimize": True,
+        "progressive": True,
+        "icc_profile": icc_profile_bytes,
+    }
+    if exif_bytes:
+        save_kwargs["exif"] = exif_bytes
+    img.save(path, **save_kwargs)
+
+
+def resize_and_watermark(src_path, dest_path, thumb_path, desktop_copy_path, watermark_text, font_path, quality=WEB_JPEG_QUALITY):
     try:
         if not font_path or not os.path.exists(font_path):
             raise FileNotFoundError(f"watermark font not found: {font_path}")
 
-        # Load original image and EXIF
+        srgb_icc = _srgb_profile_bytes()
+        exif_bytes = _clean_exif_after_transpose(src_path)
+
         with Image.open(src_path) as src_img:
-            exif_bytes = src_img.info.get("exif")
-            img = src_img.convert("RGB")
-        if not exif_bytes and piexif is not None:
-            try:
-                exif_dict = piexif.load(src_path)
-                exif_bytes = piexif.dump(exif_dict)
-            except Exception:
-                exif_bytes = None
+            img = _convert_to_srgb(src_img)
 
-        # Resize to fit within 1500x1000
-        max_size = (1500, 1000)
-        img.thumbnail(max_size, Image.LANCZOS)
+        img.thumbnail(WEB_MAX_SIZE, Image.Resampling.LANCZOS)
+        img = _draw_watermark(img, watermark_text, font_path)
+        _save_jpeg(img, dest_path, quality, exif_bytes, srgb_icc)
 
-        # Add watermark (multi-line, line-by-line draw)
-        draw = ImageDraw.Draw(img)
-        font_size = int(img.size[1] * 0.03)
-        font = ImageFont.truetype(font_path, font_size)
-
-        lines = watermark_text.strip().split("\n")
-        spacing = int(font_size * 0.4)
-        line_heights = [draw.textbbox((0, 0), line, font=font)[3] for line in lines]
-        total_height = sum(line_heights) + spacing * (len(lines) - 1)
-
-        y_offset = img.height - total_height - 10
-        for i, line in enumerate(lines):
-            bbox = draw.textbbox((0, 0), line, font=font)
-            text_width = bbox[2] - bbox[0]
-            x = img.width - text_width - 20
-            draw.text((x, y_offset), line, font=font, fill=(255, 255, 255, 200))
-            y_offset += line_heights[i] + spacing
-
-        # Save web image with EXIF
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        save_kwargs = {"format": "JPEG", "quality": quality}
-        if exif_bytes:
-            save_kwargs["exif"] = exif_bytes
-        img.save(dest_path, **save_kwargs)
-
-        # Create thumbnail with EXIF
         thumb = img.copy()
-        thumb.thumbnail((548, 365), Image.LANCZOS)
-        os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
-        thumb.save(thumb_path, **save_kwargs)
+        thumb.thumbnail(THUMB_MAX_SIZE, Image.Resampling.LANCZOS)
+        _save_jpeg(thumb, thumb_path, THUMB_JPEG_QUALITY, exif_bytes, srgb_icc)
 
-        # Copy web image to desktop folder
         os.makedirs(os.path.dirname(desktop_copy_path), exist_ok=True)
         shutil.copy2(dest_path, desktop_copy_path)
 
-        print(f"Processed: {os.path.basename(src_path)}")
+        print(f"Processed with sRGB ICC: {os.path.basename(src_path)}")
         return True
     except Exception as e:
         print(f"Error processing {src_path}: {e}")

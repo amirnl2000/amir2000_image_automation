@@ -25,6 +25,7 @@ V1.0 adds the identifier and metadata-quality layers needed for a reproducible w
 - Deterministic repair through `scripts/metadata_auto_repair_loop.py`.
 - Upload-readiness proof through `scripts/metadata_quality_production.py`.
 - Review and publish control through `review_editor.py` and `db_uploader.py`.
+- Color-managed website export through `utils/image_processor.py`: tagged source ICC profiles are converted to sRGB, and the generated web JPG plus thumbnail embed an sRGB ICC profile.
 
 ## Metadata Quality and ML Readiness
 
@@ -33,6 +34,12 @@ V1.0 adds the identifier and metadata-quality layers needed for a reproducible w
 It stores the generated fields, repaired fields, pass/fail status, quality issues, subject evidence, series context, and upload state. This makes the workflow measurable instead of only manual. Approved, rejected, repaired, and uploaded rows can later become the first evaluation dataset for metadata improvement.
 
 In V1.0 this is the start of the ML feedback layer: the system records what passed, what failed, and why.
+
+## Publish Image Export Quality
+
+Approved images are resized and watermarked by `utils/image_processor.py` before FTP upload. The export path is color-managed: tagged source images are converted to sRGB with Pillow `ImageCms`, and both the website JPG and thumbnail are saved with an embedded sRGB ICC profile. This avoids faded browser/viewer output from wide-gamut source files.
+
+For already-exported 2026 files, `scripts/reexport_2026_srgb_from_originals.py` can audit, re-export, and optionally re-upload website JPGs from the preserved originals. It defaults to dry-run, supports `--apply --upload`, and can resume failed FTP rows with `--retry-failed-report`.
 
 ## Key Files
 
@@ -84,7 +91,8 @@ In V1.0 this is the start of the ML feedback layer: the system records what pass
 |   |-- download_identifier_models.py
 |   |-- series_versioning.py
 |   |-- metadata_auto_repair_loop.py
-|   `-- metadata_quality_production.py
+|   |-- metadata_quality_production.py
+|   `-- reexport_2026_srgb_from_originals.py
 |
 |-- utils/
 |-- vendor/
