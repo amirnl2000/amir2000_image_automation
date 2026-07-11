@@ -15,7 +15,7 @@ _amir_force_logs_install()
 # AMIR_FORCE_LOGS_DIR_IMPORT_END
 
 # main_set.py — Multi-set launcher (keeps your pipeline intact)
-import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math, glob, queue
+import os, sys, json, time, shutil, sqlite3, threading, subprocess, socket, traceback, math, glob, queue, filecmp
 # AMIR_FORCE_CAPTION_MODEL_CHAIN_START
 # Production caption chain:
 # primary = installed Qwen vision route that returns usable metadata facts here
@@ -68,6 +68,14 @@ _SUBJECT_UPPER_TOKENS = {
     "viii",
     "ix",
     "x",
+    "atr",
+    "klm",
+    "tui",
+    "sas",
+    "lot",
+    "dhl",
+    "ups",
+    "raf",
 }
 
 
@@ -90,6 +98,8 @@ def _title_case_subject_input_text(text: str) -> str:
         if tl in _SUBJECT_UPPER_TOKENS:
             return tl.upper()
         if tok.isupper():
+            return tok
+        if re.search(r"[a-z][A-Z]", tok):
             return tok
         if any(ch.isdigit() for ch in tok):
             if tok[:1].isalpha():
@@ -1373,6 +1383,67 @@ def _format_prefill_qc_message(summary: dict) -> str:
     return "\n".join(lines)
 
 
+_METADATA_QUALITY_POPUP_KEYS = [
+    "proof_status",
+    "rows_checked",
+    "rows_exported",
+    "rows_blocked",
+    "duplicate_caption_groups",
+    "duplicate_alt_groups",
+    "duplicate_keyword_groups",
+    "image_grounded_duplicate_caption_groups",
+    "image_grounded_duplicate_alt_groups",
+    "near_duplicate_caption_groups",
+    "near_duplicate_alt_groups",
+    "near_duplicate_keyword_groups",
+    "pass_high",
+    "pass_repaired",
+    "pass_generic",
+    "fail_blocked",
+    "report_path",
+]
+
+
+def _parse_metadata_quality_summary(
+    text: str,
+    *,
+    total_rows: int = 0,
+    accepted_rows: int = 0,
+    blocked_rows: int = 0,
+) -> dict:
+    summary: dict[str, object] = {
+        "db_total_rows": int(total_rows or 0),
+        "db_accepted_rows": int(accepted_rows or 0),
+        "db_blocked_rows": int(blocked_rows or 0),
+    }
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if line == "== Metadata quality production run ==":
+            summary["has_production_header"] = True
+            continue
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$", line)
+        if match:
+            summary[match.group(1)] = match.group(2).strip()
+    return summary
+
+
+def _format_metadata_quality_message(summary: dict) -> str:
+    if not summary:
+        return ""
+    lines = ["== Metadata quality production run =="]
+    for key in _METADATA_QUALITY_POPUP_KEYS:
+        if key in summary and str(summary.get(key, "")).strip() != "":
+            lines.append(f"{key}: {summary.get(key)}")
+    total_rows = int(summary.get("db_total_rows", 0) or 0)
+    accepted_rows = int(summary.get("db_accepted_rows", 0) or 0)
+    blocked_rows = int(summary.get("db_blocked_rows", 0) or 0)
+    if total_rows or accepted_rows or blocked_rows:
+        lines.append(f"metadata_quality rows: {total_rows}")
+        lines.append(f"accepted_for_upload: {accepted_rows}")
+        lines.append(f"blocked_rows: {blocked_rows}")
+    return "\n".join(lines)
+
+
 def _b64_image_for_ollama(path: str) -> str:
     # shrink and base64 so the request is small
     from io import BytesIO
@@ -1882,6 +1953,70 @@ def _extract_json_object(raw: str) -> dict | None:
 
     return None
 
+def _format_aircraft_model_token(value: str) -> str:
+    token = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    token = re.sub(r"\b([A-Z]?\d{3,4}[A-Z]?)[-\s]+([0-9A-Z]{2,5})\b", r"\1-\2", token)
+    return token
+
+
+def _format_aircraft_registration(prefix: str, suffix: str = "") -> str:
+    prefix = re.sub(r"[^A-Z0-9]+", "", str(prefix or "").upper())
+    suffix = re.sub(r"[^A-Z0-9]+", "", str(suffix or "").upper())
+    if not prefix:
+        return ""
+    if suffix:
+        return f"{prefix}-{suffix}"
+    return prefix
+
+
+def _aircraft_registration_from_text(text: str) -> str:
+    value = str(text or "").upper()
+    if not value:
+        return ""
+
+    patterns = [
+        r"\b(PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS|4X)[-\s]?([A-Z0-9]{3,5})\b",
+        r"\b(G|D|F|C)[-\s]([A-Z]{3,5})\b",
+        r"\b(N[0-9][0-9A-Z]{2,5})\b",
+        r"\b(B)[-\s]([0-9A-Z]{4,5})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if not match:
+            continue
+
+        if len(match.groups()) == 1:
+            return _format_aircraft_registration(match.group(1))
+
+        return _format_aircraft_registration(match.group(1), match.group(2))
+
+    return ""
+
+
+def _aircraft_model_from_text(text: str) -> str:
+    value = str(text or "")
+    patterns = [
+        (r"\bBoeing\s+(7[0-9]7(?:[-\s]?[0-9A-Z]{2,4})?)\b", "Boeing"),
+        (r"\b(7[0-9]7[-\s]?[0-9A-Z]{2,4})\b", "Boeing"),
+        (r"\bAirbus\s+(A[0-9]{3}(?:[-\s]?[0-9A-Z]{2,4})?)\b", "Airbus"),
+        (r"\b(A[0-9]{3}(?:[-\s]?[0-9A-Z]{2,4})?)\b", "Airbus"),
+        (r"\bEmbraer\s+((?:E|ERJ)[-\s]?[0-9]{3,4})\b", "Embraer"),
+        (r"\bATR\s+([0-9]{2}(?:[-\s]?[0-9]{3})?)\b", "ATR"),
+        (r"\bBombardier\s+([A-Z]{2,4}[-\s]?[0-9]{3,4})\b", "Bombardier"),
+        (r"\bCessna\s+([0-9]{3,4}[A-Z]?)\b", "Cessna"),
+    ]
+
+    for pattern, maker in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE)
+        if match:
+            model = _format_aircraft_model_token(match.group(1))
+            label = re.sub(r"\s+", " ", f"{maker} {model}").strip()
+            return label[:50].strip()
+
+    return ""
+
+
 def _extract_aircraft_visible_fields(visible_text: str) -> tuple[str, str]:
     vt = re.sub(r"\s+", " ", str(visible_text or "").strip())
     if not vt:
@@ -1906,16 +2041,12 @@ def _extract_aircraft_visible_fields(visible_text: str) -> tuple[str, str]:
             or ""
         )
 
-    vt_u = vt.upper()
-    m_reg = re.search(r"\b([A-Z]-?\d{3,5}|[A-Z]{1,2}\d{3,5})\b", vt_u)
-    if m_reg:
-        registration = m_reg.group(1).replace("-", "")
+    registration = _aircraft_registration_from_text(vt)
 
     return airline, registration
 
 def _line_has_registration(line: str) -> bool:
-    s = str(line or "").upper()
-    return bool(re.search(r"\b[A-Z]?\d{3,5}\b", s))
+    return bool(_aircraft_registration_from_text(str(line or "")))
 
 
 def _b64_aircraft_reg_crop(path: str) -> str | None:
@@ -2003,9 +2134,8 @@ def _aircraft_registration_from_analysis(raw: str) -> str:
     if visible_registration:
         return visible_registration
 
-    reg_raw = str(data.get("registration") or "").strip().upper()
-    reg_raw = re.sub(r"[^A-Z0-9]+", "", reg_raw)
-    if reg_raw and len(reg_raw) >= 4 and any(ch.isdigit() for ch in reg_raw):
+    reg_raw = _aircraft_registration_from_text(str(data.get("registration") or ""))
+    if reg_raw:
         return reg_raw
 
     return ""
@@ -2018,7 +2148,9 @@ def _merge_aircraft_registration(line: str, registration: str) -> str:
         max_words=None,
         min_words=3,
     )
-    reg = re.sub(r"[^A-Z0-9]+", "", str(registration or "").upper())
+    reg = _aircraft_registration_from_text(str(registration or ""))
+    if not reg:
+        reg = re.sub(r"[^A-Z0-9]+", " ", str(registration or "").upper()).strip()
 
     if not base or not reg:
         return base or ""
@@ -2181,6 +2313,13 @@ def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
             max_words=5,
             min_words=1,
         )
+        if not family:
+            family = _aircraft_model_from_text(
+                " ".join(
+                    str(data.get(key) or "")
+                    for key in ["visible_text", "evidence", "detail", "primary_subject"]
+                )
+            )
         state = _normalize_subject_line(
             str(data.get("state") or data.get("detail") or ""),
             max_chars=max_chars,
@@ -2206,10 +2345,10 @@ def _subject_line_from_analysis(raw: str, *, max_chars: int) -> str | None:
 
         registration = visible_registration
         if not registration:
-            reg_raw = str(data.get("registration") or "").strip().upper()
-            reg_raw = re.sub(r"[^A-Z0-9]+", "", reg_raw)
+            reg_raw = _aircraft_registration_from_text(str(data.get("registration") or ""))
             vis_u = re.sub(r"[^A-Z0-9]+", "", visible_text.upper())
-            if reg_raw and len(reg_raw) >= 4 and reg_raw in vis_u and any(ch.isdigit() for ch in reg_raw):
+            reg_key = re.sub(r"[^A-Z0-9]+", "", reg_raw.upper())
+            if reg_raw and len(reg_key) >= 4 and reg_key in vis_u:
                 registration = reg_raw
 
         if state:
@@ -2516,7 +2655,7 @@ def _copy_if_changed(src: str, dst: str) -> None:
         if os.path.exists(dst):
             s1 = os.stat(src)
             s2 = os.stat(dst)
-            if int(s1.st_size) == int(s2.st_size) and int(s1.st_mtime) <= int(s2.st_mtime):
+            if int(s1.st_size) == int(s2.st_size) and filecmp.cmp(src, dst, shallow=False):
                 return
     except Exception:
         pass
@@ -5436,6 +5575,7 @@ class MultiSetApp:
         moved: list[str] = []
         orig_paths: dict[str, str] = {}
         prefill_qc_summary: dict | None = None
+        metadata_quality_summary: dict | None = None
 
         def _stream_cmd_with_ok_counter(
             cmd,
@@ -6899,9 +7039,9 @@ class MultiSetApp:
                         )
                         remaining_after = len(_query_prefill_ids(0))
                         if remaining_after > 0:
-                            print(
-                                f"[WARN] Prefill incomplete: remaining queued rows={remaining_after}. "
-                                "Run Start Batch again to continue from where it stopped."
+                            raise RuntimeError(
+                                f"Prefill incomplete: {remaining_after} queued row(s) still need captions. "
+                                "Metadata quality was not run on placeholder rows; run Start Batch again after fixing prefill."
                             )
 
                         if CAPTION_FAIL_ON_ROW_ERRORS and fail_total > 0:
@@ -7024,6 +7164,12 @@ class MultiSetApp:
                             f"rows={int(_mq_total or 0)} "
                             f"accepted={int(_mq_accepted or 0)} "
                             f"blocked={int(_mq_blocked or 0)}"
+                        )
+                        metadata_quality_summary = _parse_metadata_quality_summary(
+                            tail_mq,
+                            total_rows=int(_mq_total or 0),
+                            accepted_rows=int(_mq_accepted or 0),
+                            blocked_rows=int(_mq_blocked or 0),
                         )
                 except Exception as _mq_e:
                     raise RuntimeError(f"Metadata quality stage failed: {_mq_e}")
@@ -7184,7 +7330,11 @@ class MultiSetApp:
                             pass
 
                         try:
-                            if prefill_qc_summary:
+                            if metadata_quality_summary:
+                                _mq_msg = _format_metadata_quality_message(metadata_quality_summary)
+                                if _mq_msg:
+                                    messagebox.showinfo("Metadata Quality Summary", _mq_msg)
+                            elif prefill_qc_summary:
                                 _qc_msg = _format_prefill_qc_message(prefill_qc_summary)
                                 if _qc_msg:
                                     messagebox.showinfo("Prefill QC Summary", _qc_msg)
@@ -7480,7 +7630,10 @@ class MultiSetApp:
             if ok:
                 self._on_subject_change()
 
-        menu.add_command(label=f"Replace with: {sug}", command=do_replace)
+        if sug:
+            menu.add_command(label=f"Replace with: {sug}", command=do_replace)
+        else:
+            menu.add_command(label="No safe spelling suggestion", state="disabled")
         menu.add_command(
             label=f"Keep term (add to exceptions): {word}", command=do_keep
         )
@@ -7588,7 +7741,10 @@ class MultiSetApp:
                 self._runlog("SPELL_KEEP_LOCATION", word)
                 self._on_location_change()
 
-        menu.add_command(label=f"Replace with: {sug}", command=do_replace)
+        if sug:
+            menu.add_command(label=f"Replace with: {sug}", command=do_replace)
+        else:
+            menu.add_command(label="No safe spelling suggestion", state="disabled")
         menu.add_command(
             label=f"Keep term (add to exceptions): {word}", command=do_keep
         )

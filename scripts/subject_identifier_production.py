@@ -946,6 +946,7 @@ def smart_title(value: str) -> str:
         "DHL",
         "ATC",
         "RAF",
+        "ATR",
     }
 
     small_words = {"and", "or", "of", "on", "in", "at", "with", "to", "for", "the"}
@@ -965,7 +966,7 @@ def smart_title(value: str) -> str:
             continue
 
         if re.fullmatch(
-            r"(?:PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS)-?[A-Z0-9]{3,5}",
+            r"(?:PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS|4X)-?[A-Z0-9]{3,5}",
             upper,
         ):
             words.append(upper)
@@ -994,6 +995,8 @@ def smart_title(value: str) -> str:
 
             if part_upper in keep_upper:
                 title_parts.append(part_upper)
+            elif re.search(r"[a-z][A-Z]", part):
+                title_parts.append(part)
             elif re.fullmatch(r"[A-Z]{1,3}\d{2,4}|\d{2,4}[A-Z]?", part_upper):
                 title_parts.append(part_upper)
             elif part_lower in small_words and title_parts:
@@ -1406,7 +1409,7 @@ def _amir_aircraft_registration_from_text(text: object) -> str:
     value = re.sub(r"\b([A-Z]{1,3})\s*-\s*([A-Z0-9]{3,5})\b", r"\1-\2", value)
 
     patterns = [
-        r"\b(PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS)[-\s]?([A-Z0-9]{3,5})\b",
+        r"\b(PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS|4X)[-\s]?([A-Z0-9]{3,5})\b",
         r"\b(G|D|F|C)[-\s]([A-Z]{3,5})\b",
         r"\b(N[0-9][0-9A-Z]{2,5})\b",
         r"\b(B)[-\s]([0-9A-Z]{4,5})\b",
@@ -1481,9 +1484,24 @@ def _amir_airline_from_text(text: object) -> str:
         return ""
 
     airline_names = [
+        "airHaifa",
+        "airBaltic",
         "Transavia",
         "KLM",
         "EasyJet",
+        "easyJet",
+        "Tus Air",
+        "TUS Air",
+        "Aegean Airlines",
+        "Aegean",
+        "Cyprus Airways",
+        "Austrian Airlines",
+        "Arkia",
+        "Lauda Europe",
+        "World2Fly",
+        "WORLD2FLY",
+        "Singapore Airlines Cargo",
+        "Singapore Airlines",
         "Air Canada",
         "Air France",
         "British Airways",
@@ -1765,11 +1783,12 @@ def _amir_aircraft_analysis_sheet_path(image_path: Path) -> Path | None:
             sheet_path = sheet_dir / "aircraft_detail_sheet.jpg"
 
             crop_specs = [
-                ("full", (0.00, 0.00, 1.00, 1.00)),
-                ("tail and rear fuselage", (0.42, 0.04, 1.00, 0.90)),
-                ("center fuselage and markings", (0.18, 0.22, 0.88, 0.82)),
-                ("wing registration area", (0.22, 0.05, 0.84, 0.56)),
-                ("front livery area", (0.00, 0.18, 0.58, 0.88)),
+                ("full frame", (0.00, 0.00, 1.00, 1.00)),
+                ("tail and registration area", (0.00, 0.12, 0.42, 0.82)),
+                ("center fuselage and airline text", (0.25, 0.20, 0.72, 0.76)),
+                ("nose and type markings", (0.55, 0.18, 1.00, 0.74)),
+                ("wing and engine markings", (0.34, 0.18, 0.78, 0.86)),
+                ("rear fuselage close crop", (0.10, 0.24, 0.52, 0.70)),
             ]
 
             panels: list[tuple[str, Image.Image]] = []
@@ -4137,6 +4156,59 @@ def _amir_identifier_reference_context_is_biological(rows, result) -> bool:
         "mushrooms",
         "plant",
         "plants",
+        "beak",
+        "bill",
+        "bills",
+        "plumage",
+        "feather",
+        "feathers",
+        "wing",
+        "wings",
+        "tail",
+        "tails",
+        "blackbird",
+        "blackbirds",
+        "grackle",
+        "grackles",
+        "grebe",
+        "grebes",
+        "duck",
+        "ducks",
+        "goose",
+        "geese",
+        "parrot",
+        "parrots",
+        "parakeet",
+        "parakeets",
+        "starling",
+        "starlings",
+        "stilt",
+        "stilts",
+        "lapwing",
+        "lapwings",
+        "heron",
+        "herons",
+        "kingfisher",
+        "kingfishers",
+        "butterfly",
+        "butterflies",
+        "moth",
+        "moths",
+        "bee",
+        "bees",
+        "dragonfly",
+        "dragonflies",
+        "horse",
+        "horses",
+        "cat",
+        "cats",
+        "dog",
+        "dogs",
+        "cow",
+        "cows",
+        "deer",
+        "fox",
+        "foxes",
         "spike",
         "stalk",
         "stalks",
@@ -5801,6 +5873,10 @@ def _amir_subject_is_weak_regen_subject(subject, hints=""):
                         "_amir_taxon_is_broad" in globals()
                         and _amir_taxon_is_broad(subject)
                     )
+                    or (
+                        "_amir_identifier_subject_is_descriptive_living_phrase" in globals()
+                        and _amir_identifier_subject_is_descriptive_living_phrase(subject, raw_text)
+                    )
                 )
             ):
                 return True
@@ -6053,6 +6129,10 @@ _AMIR_TAXON_BROAD_LABELS = {
     "gulls",
     "pigeon",
     "pigeons",
+    "parrot",
+    "parrots",
+    "parakeet",
+    "parakeets",
     "heron",
     "herons",
     "cormorant",
@@ -6241,6 +6321,9 @@ _AMIR_TAXON_VISUAL_ONLY_DESCRIPTOR_ROOTS = {
     "stalks",
     "slender",
     "small",
+    "sphere",
+    "spheres",
+    "spherical",
     "spray",
     "sprays",
     "tall",
@@ -6248,6 +6331,32 @@ _AMIR_TAXON_VISUAL_ONLY_DESCRIPTOR_ROOTS = {
     "tufts",
     "upright",
     "wet",
+    "feathered",
+    "feathery",
+    "fine",
+    "filament",
+    "filaments",
+    "fluffy",
+    "fuzzy",
+    "plume",
+    "plumes",
+    "cylinder",
+    "cylindrical",
+    "seed",
+    "seeds",
+    "seedhead",
+    "seedheads",
+    "pod",
+    "pods",
+    "central",
+    "dense",
+    "numerous",
+    "greenish",
+    "grayish",
+    "greyish",
+    "silvery",
+    "white",
+    "whitish",
 }
 
 _AMIR_TAXON_NAME_QUALIFIER_WORDS = {
@@ -6283,6 +6392,12 @@ _AMIR_TAXON_IDENTIFIER_TRIGGER_WORDS = {
     "gulls",
     "pigeon",
     "pigeons",
+    "parrot",
+    "parrots",
+    "parakeet",
+    "parakeets",
+    "flamingo",
+    "flamingos",
     "lapwing",
     "lapwings",
     "oystercatcher",
@@ -6395,6 +6510,11 @@ _AMIR_TAXON_LABELS = [
     "house sparrow",
     "eurasian magpie",
     "carrion crow",
+    "rose-ringed parakeet",
+    "alexandrine parakeet",
+    "monk parakeet",
+    "greater flamingo",
+    "lesser flamingo",
     "shorebirds",
     "wading birds",
     "waterfowl",
@@ -6415,6 +6535,14 @@ _AMIR_TAXON_LABELS = [
     "hydrangea flowers",
     "cherry blossom",
     "white blossom",
+    "purple allium flowers",
+    "scabious flowers",
+    "globe thistle",
+    "smoke bush",
+    "tiger lily",
+    "spotted lily",
+    "hibiscus seed pods",
+    "grass seed heads",
     "wildflowers",
     "mushroom",
     "fern fronds",
@@ -6426,6 +6554,9 @@ _AMIR_TAXON_LABELS = [
     "red admiral butterfly",
     "butterfly",
     "moth",
+    "white-tailed bumblebee",
+    "buff-tailed bumblebee",
+    "common carder bee",
     "honey bee",
     "bumblebee",
     "hoverfly",
@@ -6848,10 +6979,14 @@ def _amir_subject_underidentified_taxon(subject):
         "ducks",
         "gull",
         "gulls",
-        "pigeon",
-        "pigeons",
-        "heron",
-        "herons",
+    "pigeon",
+    "pigeons",
+    "parrot",
+    "parrots",
+    "parakeet",
+    "parakeets",
+    "heron",
+    "herons",
         "cormorant",
         "cormorants",
         "swan",
@@ -7078,6 +7213,18 @@ def _amir_identifier_subject_is_specific_enough(subject, evidence=""):
     if _amir_subject_underidentified_taxon(subject):
         return False
 
+    if _amir_identifier_subject_is_generic_living_label(subject):
+        return False
+
+    try:
+        if (
+            "_amir_identifier_subject_is_descriptive_living_phrase" in globals()
+            and _amir_identifier_subject_is_descriptive_living_phrase(subject, evidence)
+        ):
+            return False
+    except Exception:
+        pass
+
     if not _amir_subject_should_run_taxon_identifier(subject, evidence):
         return True
 
@@ -7118,6 +7265,136 @@ def _amir_identifier_subject_is_specific_enough(subject, evidence=""):
     return bool(useful)
 
 
+_AMIR_TAXON_GENERIC_HEAD_ROOTS = {
+    "animal", "wildlife", "bird", "waterfowl", "shorebird", "wader",
+    "goose", "duck", "gull", "pigeon", "parrot", "parakeet", "flamingo",
+    "lapwing", "oystercatcher", "heron", "cormorant", "swan", "coot",
+    "moorhen", "raptor", "buzzard", "kestrel", "robin", "tit", "sparrow",
+    "magpie", "crow", "deer", "fox", "rabbit", "hare", "squirrel",
+    "horse", "cow", "sheep", "dog", "cat", "flower", "plant", "tree",
+    "leaf", "petal", "stamen", "insect", "butterfly", "moth", "bee",
+    "beetle", "dragonfly", "damselfly", "fly", "wasp", "spider", "macro",
+}
+
+_AMIR_TAXON_ULTRA_BROAD_ROOTS = {
+    "animal", "wildlife", "bird", "flower", "plant", "tree", "leaf",
+    "petal", "stamen", "insect", "macro",
+}
+
+_AMIR_TAXON_GENERIC_MODIFIER_NOISE_ROOTS = {
+    "at", "by", "for", "from", "in", "near", "of", "on", "over", "to",
+    "with", "post", "posts", "perch", "perched", "branch", "branches",
+    "wire", "wires", "fence", "fences", "flying", "flight", "landing",
+    "sitting", "standing", "walking", "swimming", "resting", "feeding",
+}
+
+
+def _amir_identifier_subject_is_descriptive_living_phrase(subject, evidence=""):
+    if not _amir_subject_identifier_mode():
+        return False
+
+    key = _amir_subject_norm(subject)
+
+    if not key:
+        return False
+
+    try:
+        if key in _amir_taxon_label_keys() and _amir_taxon_is_specific_label(key):
+            return False
+    except Exception:
+        pass
+
+    text = f"{subject or ''} {evidence or ''}"
+    if not _amir_subject_should_run_taxon_identifier(subject, evidence):
+        return False
+
+    roots = [singular_token(token) for token in _amir_subject_re.findall(r"[a-z0-9]+", key)]
+    roots = [root for root in roots if root]
+
+    if not roots:
+        return False
+
+    connector_roots = {
+        "with", "in", "on", "at", "over", "under", "near", "by", "from",
+        "flying", "flight", "perched", "standing", "walking", "swimming",
+        "resting", "feeding", "close", "closeup", "macro",
+    }
+    visual_roots = (
+        set(_AMIR_TAXON_WEAK_CONTEXT_WORDS)
+        | set(_AMIR_TAXON_VISUAL_ONLY_DESCRIPTOR_ROOTS)
+        | set(COLOR_WORDS)
+        | set(QUANTITY_WORDS)
+        | set(ACTION_WORDS)
+        | {
+            "bill", "beak", "wing", "tail", "leg", "foot", "feet", "head",
+            "neck", "eye", "back", "breast", "belly", "plumage", "fur",
+            "marking", "pattern", "petal", "stem", "leaf", "branch",
+            "antenna", "body", "cap", "gill", "surface",
+        }
+    )
+
+    if set(roots) & connector_roots and set(roots) & visual_roots:
+        return True
+
+    useful = [
+        root
+        for root in roots
+        if root not in connector_roots
+        and root not in visual_roots
+        and root not in LOCATION_NOISE
+        and root not in GEAR_NOISE
+    ]
+
+    return len(useful) <= 1 and bool(set(roots) & visual_roots)
+
+
+def _amir_identifier_subject_is_generic_living_label(subject):
+    key = _amir_subject_norm(subject)
+
+    if not key:
+        return True
+
+    roots = []
+    for token in _amir_subject_re.findall(r"[a-z0-9]+", key):
+        root = singular_token(token)
+        if root:
+            roots.append(root)
+
+    if not roots:
+        return True
+
+    generic_roots = {root for root in roots if root in _AMIR_TAXON_GENERIC_HEAD_ROOTS}
+
+    if not generic_roots:
+        return False
+
+    modifiers = []
+    for root in roots:
+        if root in generic_roots:
+            continue
+        if root in _AMIR_TAXON_WEAK_CONTEXT_WORDS:
+            continue
+        if root in _AMIR_TAXON_VISUAL_ONLY_DESCRIPTOR_ROOTS:
+            continue
+        if root in _AMIR_TAXON_GENERIC_MODIFIER_NOISE_ROOTS:
+            continue
+        if root in COLOR_WORDS or root in QUANTITY_WORDS or root in ACTION_WORDS:
+            continue
+        if root in LOCATION_NOISE or root in GEAR_NOISE:
+            continue
+        modifiers.append(root)
+
+    if not modifiers:
+        return True
+
+    if generic_roots <= _AMIR_TAXON_ULTRA_BROAD_ROOTS and all(
+        root in _AMIR_TAXON_NAME_QUALIFIER_WORDS for root in modifiers
+    ):
+        return True
+
+    return False
+
+
 def _amir_identifier_direct_subject_from_raw(raw_text, original_subject=""):
     data = _amir_identifier_data_from_raw(raw_text)
 
@@ -7142,6 +7419,10 @@ def _amir_identifier_direct_subject_from_raw(raw_text, original_subject=""):
     if confidence < min_confidence:
         return "", confidence
 
+    signature_subject = _amir_taxon_signature_from_evidence(evidence, subject)
+    if signature_subject and _amir_subject_norm(signature_subject) != _amir_subject_norm(subject):
+        return "", confidence
+
     if not _amir_identifier_subject_is_specific_enough(subject, evidence):
         return "", confidence
 
@@ -7153,6 +7434,13 @@ def _amir_taxon_label_keys():
 
 
 _AMIR_TAXON_TRAIT_SIGNATURES = {
+    "rose-ringed parakeet": [
+        {"parrot", "parrots", "parakeet", "parakeets", "bird", "birds"},
+        {"green"},
+        {"red", "rose", "orange"},
+        {"bill", "bills", "beak", "beaks"},
+        {"ring", "ringed", "eye", "neck", "collar", "tail", "curved"},
+    ],
     "greylag goose": [
         {"goose", "geese", "bird", "birds"},
         {"orange", "pink"},
@@ -7203,6 +7491,56 @@ _AMIR_TAXON_TRAIT_SIGNATURES = {
         {"crocus", "petal", "petals", "flower", "flowers"},
         {"orange", "yellow", "stamen", "stamens"},
     ],
+    "globe thistle": [
+        {"sphere", "spheres", "spherical", "globe", "round"},
+        {"spiky", "spike", "bract", "bracts", "thistle"},
+        {"flower", "flowers", "head", "heads"},
+    ],
+    "smoke bush": [
+        {"pink", "rose", "reddish", "greenish"},
+        {"feathery", "feathered", "fluffy", "filament", "filaments", "plume", "plumes"},
+        {"bush", "cotinus", "flower", "flowers", "inflorescence", "inflorescences", "plant"},
+    ],
+    "tiger lily": [
+        {"orange", "yellow"},
+        {"spotted", "spots", "dark"},
+        {"lily", "lilies", "tepal", "tepals", "petal", "petals"},
+        {"stamen", "stamens", "pistil", "hanging", "pendant"},
+    ],
+    "hibiscus seed pods": [
+        {"hibiscus"},
+        {"seed", "seeds", "pod", "pods"},
+        {"fluffy", "fiber", "fibers", "white"},
+    ],
+    "purple allium flowers": [
+        {"purple", "pink", "magenta"},
+        {"allium", "spherical", "round", "cluster", "dense", "florets"},
+        {"flower", "flowers", "floret", "florets", "head"},
+    ],
+    "white-tailed bumblebee": [
+        {"bee", "bees", "bumblebee", "bumblebees"},
+        {"black"},
+        {"yellow"},
+        {"white"},
+        {"tail", "tails"},
+    ],
+    "buff-tailed bumblebee": [
+        {"bee", "bees", "bumblebee", "bumblebees"},
+        {"black"},
+        {"yellow"},
+        {"buff", "cream", "pale"},
+        {"tail", "tails"},
+    ],
+    "common carder bee": [
+        {"bee", "bees", "bumblebee", "bumblebees"},
+        {"ginger", "orange", "brown", "brownish"},
+        {"hairy", "fuzzy", "carder"},
+    ],
+    "honey bee": [
+        {"bee", "bees"},
+        {"striped", "banded", "abdomen"},
+        {"transparent", "wing", "wings"},
+    ],
     "red admiral butterfly": [
         {"butterfly"},
         {"black", "dark"},
@@ -7219,7 +7557,7 @@ _AMIR_TAXON_TRAIT_SIGNATURES = {
 }
 
 
-def _amir_taxon_signature_from_evidence(evidence):
+def _amir_taxon_signature_from_evidence(evidence, subject=""):
     text = _amir_subject_norm(evidence)
 
     if not text:
@@ -7239,9 +7577,62 @@ def _amir_taxon_signature_from_evidence(evidence):
                 break
 
         if ok:
-            return _amir_taxon_title(label)
+            candidate = _amir_taxon_title(label)
+            if subject and not _amir_taxon_refinement_class_compatible(subject, candidate):
+                continue
+            return candidate
 
     return ""
+
+
+_AMIR_TAXON_CLASS_ROOTS = {
+    "insect": {
+        "bee", "bumblebee", "honeybee", "hoverfly", "butterfly", "moth",
+        "beetle", "ladybird", "ladybug", "dragonfly", "damselfly", "wasp",
+        "fly", "spider", "insect",
+    },
+    "plant": {
+        "flower", "plant", "tree", "leaf", "petal", "stamen", "floret",
+        "crocus", "tulip", "daffodil", "rose", "sunflower", "orchid",
+        "daisy", "poppy", "iris", "lavender", "hydrangea", "blossom",
+        "allium", "scabious", "thistle", "lily", "hibiscus", "bush",
+        "grass", "seed", "pod", "fern", "reed", "mushroom", "fungus",
+    },
+    "bird": {
+        "bird", "duck", "goose", "swan", "gull", "heron", "cormorant",
+        "pigeon", "parakeet", "parrot", "crow", "magpie", "lapwing",
+        "godwit", "redshank", "curlew", "snipe", "avocet", "flamingo",
+        "kestrel", "buzzard", "robin", "sparrow",
+    },
+    "animal": {
+        "animal", "fox", "deer", "rabbit", "hare", "squirrel", "horse",
+        "cow", "sheep", "dog", "cat",
+    },
+}
+
+
+def _amir_taxon_primary_class(value):
+    for token in word_tokens(value):
+        root = singular_token(token)
+
+        if not root:
+            continue
+
+        for class_name, roots in _AMIR_TAXON_CLASS_ROOTS.items():
+            if token in roots or root in roots:
+                return class_name
+
+    return ""
+
+
+def _amir_taxon_refinement_class_compatible(subject, refined):
+    source_class = _amir_taxon_primary_class(subject)
+    refined_class = _amir_taxon_primary_class(refined)
+
+    if not source_class or not refined_class:
+        return True
+
+    return source_class == refined_class
 
 
 def _amir_taxon_refine_from_evidence(subject, raw_text):
@@ -7251,10 +7642,10 @@ def _amir_taxon_refine_from_evidence(subject, raw_text):
         return "", 0
 
     signature_subject = ""
-    if _amir_subject_os.getenv("AMIR_TAXON_USE_TRAIT_SIGNATURES", "0").strip() == "1":
-        signature_subject = _amir_taxon_signature_from_evidence(evidence)
+    if _amir_subject_identifier_mode() or _amir_subject_os.getenv("AMIR_TAXON_USE_TRAIT_SIGNATURES", "0").strip() == "1":
+        signature_subject = _amir_taxon_signature_from_evidence(evidence, subject)
 
-    if signature_subject:
+    if signature_subject and _amir_taxon_refinement_class_compatible(subject, signature_subject):
         return signature_subject, 88
 
     model = _amir_subject_os.getenv("AMIR_TAXON_REFINE_MODEL", "qwen2.5vl:3b").strip() or "qwen2.5vl:3b"
@@ -7332,6 +7723,9 @@ Do not use location, filename, folder, camera, or hidden context.
     if _amir_taxon_is_broad(refined) or _amir_taxon_is_group_label(refined):
         return "", confidence
 
+    if not _amir_taxon_refinement_class_compatible(subject, refined):
+        return "", confidence
+
     if confidence < int(_amir_subject_os.getenv("AMIR_TAXON_REFINE_MIN_CONFIDENCE", "70") or "70"):
         return "", confidence
 
@@ -7392,6 +7786,9 @@ Rules:
         return "", confidence
 
     if _amir_taxon_is_broad(refined) or _amir_taxon_is_group_label(refined):
+        return "", confidence
+
+    if not _amir_taxon_refinement_class_compatible(subject, refined):
         return "", confidence
 
     if confidence < int(_amir_subject_os.getenv("AMIR_TAXON_CANDIDATE_MIN_CONFIDENCE", "65") or "65"):
@@ -7580,9 +7977,18 @@ def _amir_aircraft_detail_subject_from_image(image_path, model, base_raw="", bas
         return "", ""
 
     subject_from_existing = _amir_aircraft_subject_from_text(base_raw, base_subject, hints, current_subject)
-    if subject_from_existing and (
-        _amir_aircraft_registration_from_text(subject_from_existing)
-        or _amir_aircraft_model_from_text(subject_from_existing)
+    existing_registration = _amir_aircraft_registration_from_text(subject_from_existing)
+    existing_model = _amir_aircraft_model_from_text(subject_from_existing)
+    existing_model_score = _amir_aircraft_model_specificity_score(existing_model) if existing_model else 0
+
+    if subject_from_existing and existing_registration and existing_model:
+        return subject_from_existing, str(base_raw or "")
+
+    if (
+        subject_from_existing
+        and not _amir_subject_identifier_mode()
+        and existing_model_score >= 4
+        and _amir_aircraft_subject_specificity_score(subject_from_existing) >= 8
     ):
         return subject_from_existing, str(base_raw or "")
 
@@ -7602,6 +8008,9 @@ Return JSON only:
 Rules:
 - Use only text, markings, livery, registration, and model details visible in the image.
 - Read tail, fuselage, wing, and engine markings carefully.
+- Inspect small type markings near the nose/front fuselage, such as A320neo, A321neo, 737-800, or similar.
+- Do not infer A320, A321, A220, or another type from shape alone. Use an exact subtype only when readable in the image.
+- If the visible type text says A321neo, return Airbus A321neo, not Airbus A320.
 - If airline, aircraft model, and registration are visible, return all three in subject.
 - If model text is visible as Boeing 737-800, keep it as Boeing 737-800.
 - If registration is visible as PH-HSF style text, keep that registration.
@@ -7868,6 +8277,19 @@ Rules:
                 if "_amir_taxon_subject_candidate" in globals():
                     taxon_subject, taxon_score, taxon_label = _amir_taxon_subject_candidate(image_path)
 
+                signature_subject = ""
+                signature_confidence = 0
+                if _amir_subject_identifier_mode() and "_amir_taxon_signature_from_evidence" in globals():
+                    signature_subject = _amir_taxon_signature_from_evidence(
+                        _amir_taxon_evidence_from_raw(raw_text),
+                        subject,
+                    )
+                    if signature_subject:
+                        signature_confidence = 88
+                        taxon_subject = signature_subject
+                        taxon_score = max(taxon_score, 0.88)
+                        taxon_label = _amir_subject_norm(signature_subject)
+
                 strong_specific_taxon = bool(
                     taxon_subject
                     and "_amir_taxon_is_specific_label" in globals()
@@ -7916,15 +8338,17 @@ Rules:
 
                         subject = taxon_subject
                     else:
+                        fallback_subject = clean_text(taxon_subject) or clean_text(subject)
                         try:
                             log(
-                                "[SUBJECT AI TAXON] rejected underidentified subject "
-                                f"| subject={subject!r} | top={taxon_label!r} | score={taxon_score:.3f}"
+                                "[SUBJECT AI TAXON] kept best available living subject "
+                                f"| subject={subject!r} | kept={fallback_subject!r} "
+                                f"| top={taxon_label!r} | score={taxon_score:.3f}"
                             )
                         except Exception:
                             pass
 
-                        subject = ""
+                        subject = fallback_subject
                 elif taxon_subject and taxon_score >= float(_amir_subject_os.getenv("AMIR_TAXON_GROUP_NOTE_MIN_SCORE", "0.60") or "0.60"):
                     try:
                         log(
@@ -8125,6 +8549,10 @@ def analyze_one_image(*args, **kwargs):
                                 "_amir_taxon_is_broad" in globals()
                                 and _amir_taxon_is_broad(existing_subject)
                             )
+                            or (
+                                "_amir_identifier_subject_is_descriptive_living_phrase" in globals()
+                                and _amir_identifier_subject_is_descriptive_living_phrase(existing_subject, row_evidence)
+                            )
                         )
                     )
                     if (
@@ -8141,8 +8569,19 @@ def analyze_one_image(*args, **kwargs):
                         refined_subject = ""
                         refined_confidence = 0
 
+                        if _amir_subject_identifier_mode() and "_amir_taxon_signature_from_evidence" in globals():
+                            refined_subject = _amir_taxon_signature_from_evidence(
+                                row_evidence,
+                                existing_subject,
+                            )
+                            if refined_subject:
+                                refined_confidence = 88
+
                         if "_amir_taxon_refine_from_image" in globals():
-                            refined_subject, refined_confidence = _amir_taxon_refine_from_image(image_path, existing_subject, str(row.get("model") or "qwen2.5vl:3b"))
+                            image_refined_subject, image_refined_confidence = _amir_taxon_refine_from_image(image_path, existing_subject, str(row.get("model") or "qwen2.5vl:3b"))
+                            if image_refined_subject and image_refined_confidence > refined_confidence:
+                                refined_subject = image_refined_subject
+                                refined_confidence = image_refined_confidence
 
                         if refined_subject:
                             row = dict(row)
@@ -8945,6 +9384,32 @@ def _amir_set_row_support_roots(row):
     return roots
 
 
+def _amir_set_group_mixed_macro_support_ok(row_root_sets, subject_roots, coverage, max_root_support):
+    if not _amir_subject_identifier_mode():
+        return False
+
+    plant_roots = _AMIR_TAXON_CLASS_ROOTS.get("plant", set())
+    insect_roots = _AMIR_TAXON_CLASS_ROOTS.get("insect", set())
+
+    if not (subject_roots & plant_roots and subject_roots & insect_roots):
+        return False
+
+    row_count = len(row_root_sets)
+
+    if row_count < 2:
+        return False
+
+    plant_rows = sum(1 for roots in row_root_sets if roots & plant_roots)
+    insect_rows = sum(1 for roots in row_root_sets if roots & insect_roots)
+
+    return (
+        coverage >= 0.67
+        and max_root_support >= 0.67
+        and (plant_rows * 3) >= (row_count * 2)
+        and insect_rows >= 1
+    )
+
+
 def _amir_set_group_support(rows, subject):
     subject_roots = _amir_set_roots_from_value(subject)
     row_root_sets = []
@@ -9000,7 +9465,13 @@ def _amir_set_group_support(rows, subject):
         # another word is a one-frame detail. This is topic-neutral and blocks
         # minority details from becoming the whole batch subject.
         every_root_repeated = min_root_count >= 2
-        ok = support_ok and strong_ok and every_root_repeated
+        mixed_macro_ok = _amir_set_group_mixed_macro_support_ok(
+            row_root_sets,
+            subject_roots,
+            coverage,
+            max_root_support,
+        )
+        ok = (support_ok and strong_ok and every_root_repeated) or mixed_macro_ok
 
     return {
         "ok": ok,
@@ -9008,6 +9479,7 @@ def _amir_set_group_support(rows, subject):
         "max_root_support": max_root_support,
         "min_root_support": min_root_support,
         "cohesion": cohesion,
+        "mixed_macro_support": mixed_macro_ok if row_count > 2 else False,
         "rows": row_count,
     }
 
@@ -9568,6 +10040,19 @@ def _amir_set_group_subject_from_contact_sheet(rows):
     if aircraft_group_subject:
         return aircraft_group_subject
 
+    if _amir_subject_identifier_mode():
+        label_subject = _amir_set_shared_subject_from_labels(
+            rows,
+            current_subject=current_subject,
+            hints=hints,
+        )
+        if label_subject:
+            try:
+                log(f"[SUBJECT AI] set group repeated label subject | subject={label_subject!r}")
+            except Exception:
+                pass
+            return label_subject
+
     sheet_path = _amir_set_contact_sheet(rows)
 
     if sheet_path is None:
@@ -9931,6 +10416,10 @@ def combine_subjects(rows):
                     "_amir_taxon_is_broad" in globals()
                     and _amir_taxon_is_broad(subject)
                 )
+                or (
+                    "_amir_identifier_subject_is_descriptive_living_phrase" in globals()
+                    and _amir_identifier_subject_is_descriptive_living_phrase(subject, "")
+                )
             )
         )
 
@@ -9960,20 +10449,20 @@ def combine_subjects(rows):
 
             try:
                 log(
-                    "[SUBJECT AI] set taxon guard | blocked broad living subject "
+                    "[SUBJECT AI] set taxon guard | kept best available living subject "
                     f"| subject={subject!r}"
                 )
             except Exception:
                 pass
 
             return SubjectSuggestion(
-                subject="",
-                confidence=0,
-                category="underidentified_taxon",
-                error="Living/macro subject was too broad. Use a narrower visible type or split the set.",
+                subject=subject,
+                confidence=max(65, int(getattr(result, "confidence", 0) or 0)),
+                category="underidentified_taxon_best_available",
+                error="",
                 details={
                     "rows": rows,
-                    "mode": "set_taxon_guard_blocked",
+                    "mode": "set_taxon_guard_best_available_no_reject",
                     "original_subject": subject,
                 },
             )

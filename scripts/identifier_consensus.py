@@ -105,6 +105,39 @@ def _normalize_subject(subject: str, *, location: str = "") -> str:
     return subject
 
 
+def _refine_bird_subject(subject: str, candidates: list[dict[str, Any]], *, location: str = "") -> str:
+    lower = subject.lower()
+    loc = (location or "").lower()
+
+    if "parrot" not in lower and "parakeet" not in lower:
+        return subject
+    if "israel" not in loc:
+        return subject
+
+    evidence_blob = " ".join(
+        " ".join(
+            [
+            str(candidate.get("subject", "")),
+            str(candidate.get("label", "")),
+            str(candidate.get("evidence", "")),
+            " ".join(str(item) for item in candidate.get("alternatives", []) if item),
+            ]
+        )
+        for candidate in candidates
+    ).lower()
+
+    has_green_parrot = "green" in evidence_blob and ("parrot" in evidence_blob or "parakeet" in evidence_blob)
+    has_ringneck_traits = any(
+        trait in evidence_blob
+        for trait in ["red beak", "red bill", "eye ring", "ring neck", "ringneck", "rose ring"]
+    )
+
+    if has_green_parrot and has_ringneck_traits:
+        return "Rose Ringed Parakeet"
+
+    return subject
+
+
 def _category_key(value: object) -> str:
     text = str(value or "").strip().lower()
 
@@ -234,6 +267,7 @@ def build_subject_consensus(
         # Keep the real action/context from the model where possible.
         best_subject = _merge_hint_with_subject(hinted, best_subject, top_category)
 
+    best_subject = _refine_bird_subject(best_subject, usable, location=location)
     best_subject = _normalize_subject(best_subject, location=location)
 
     confidence_values = [int(candidate.get("confidence", 0) or 0) for candidate in usable]

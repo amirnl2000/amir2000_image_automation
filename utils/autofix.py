@@ -22,7 +22,7 @@ from typing import Dict, Iterable, List, Set, Tuple
 _WORD = re.compile(r"[A-Za-z][A-Za-z']*")
 _MAX_SPELL_TOKEN_LEN = 24
 _MAX_SPELL_CORRECTIONS_PER_CALL = 64
-_SPELL_SUGGESTIONS_ENABLED = os.getenv("AMIR_SPELL_SUGGEST", "0").strip().lower() in (
+_SPELL_SUGGESTIONS_ENABLED = os.getenv("AMIR_SPELL_SUGGEST", "1").strip().lower() in (
     "1", "true", "yes", "on"
 )
 
@@ -212,6 +212,38 @@ def _apply_case(original: str, corrected: str) -> str:
     return corrected
 
 
+def _safe_spell_suggestion(sp, word: str) -> str:
+    wl = str(word or "").strip().lower()
+
+    if not wl:
+        return ""
+
+    try:
+        candidates = []
+        corrected = sp.correction(wl) or ""
+        if corrected:
+            candidates.append(corrected)
+        try:
+            candidates.extend(sorted(sp.candidates(wl) or []))
+        except Exception:
+            pass
+    except Exception:
+        return ""
+
+    max_dist = 1 if len(wl) <= 4 else (2 if len(wl) <= 8 else 3)
+    seen = set()
+
+    for cand in candidates:
+        cand = str(cand or "").strip().lower()
+        if not cand or cand in seen or cand == wl:
+            continue
+        seen.add(cand)
+        if _levenshtein(wl, cand) <= max_dist:
+            return cand
+
+    return ""
+
+
 def _skip_spell_token(word: str) -> bool:
     w = str(word or "")
     if not w:
@@ -274,19 +306,9 @@ def spellcheck_text(text: str, data_dir: str) -> Tuple[str, bool]:
         if corrections_used >= _MAX_SPELL_CORRECTIONS_PER_CALL:
             return w
 
-        # attempt correction
-        try:
-            cand = sp.correction(wl)
-        except Exception:
-            return w
+        cand = _safe_spell_suggestion(sp, wl)
         corrections_used += 1
-        if not cand or cand == wl:
-            return w
-
-        # safety: do not allow big jumps
-        dist = _levenshtein(wl, cand.lower())
-        max_dist = 1 if len(wl) <= 4 else (2 if len(wl) <= 8 else 3)
-        if dist > max_dist:
+        if not cand:
             return w
 
         changed = True
@@ -333,22 +355,14 @@ def find_misspellings(text: str, data_dir: str) -> List[dict]:
         if _SPELL_SUGGESTIONS_ENABLED:
             if corrections_used >= _MAX_SPELL_CORRECTIONS_PER_CALL:
                 break
-            try:
-                cand = sp.correction(wl) or ""
-            except Exception:
-                cand = ""
+            cand = _safe_spell_suggestion(sp, wl)
             corrections_used += 1
-            if cand and cand != wl:
-                dist = _levenshtein(wl, cand.lower())
-                max_dist = 1 if len(wl) <= 4 else (2 if len(wl) <= 8 else 3)
-                if dist > max_dist:
-                    cand = ""
 
         out.append({
             "start": m.start(),
             "end": m.end(),
             "word": w,
-            "suggestion": cand
+            "suggestion": _apply_case(w, cand) if cand else ""
         })
 
     return out
