@@ -147,7 +147,7 @@ Important rules:
 2. If it is a bird, mammal, insect, plant, fungus, aircraft, vehicle, boat, building, street scene, landscape, sky, or night scene, say that.
 3. For birds and mammals, use the common species name only when visually supported. Otherwise use a safe group such as gull, goose, duck, raptor, horse, deer, dog.
 4. For plants, use the common plant or genus only when visually supported. Otherwise use a visible plant part such as white spring blossoms, flowering branch, seed heads, leaves.
-5. For aircraft, use airline or model only when visible or strongly supported. Otherwise use passenger jet, commercial aircraft, airplane, helicopter.
+5. For aircraft, read visible airline or livery text, model markings, and registration when available. Use airline plus model plus registration only when those details are visible or strongly supported. Otherwise use passenger jet, commercial aircraft, airplane, helicopter.
 6. For cars and motorcycles, use make or model only when visible or strongly supported. Otherwise use classic car, sports car, motorcycle.
 7. Do not include location in subject_line. Location is handled elsewhere.
 8. Do not use the words photo, image, picture, shot, macro, photography, Canon, EOS, lens.
@@ -204,7 +204,10 @@ Return JSON only:
     evidence = _ascii_clean(str(parsed.get("evidence", "")))
 
     try:
-        confidence = int(float(parsed.get("confidence", 0)))
+        raw_confidence = float(parsed.get("confidence", 0))
+        if 0 < raw_confidence <= 1:
+            raw_confidence *= 100
+        confidence = int(round(raw_confidence))
     except Exception:
         confidence = 0
 
@@ -236,7 +239,7 @@ Return JSON only:
 def _guess_type_from_subject(subject: str, label: str) -> str:
     lower = f"{subject} {label}".lower()
 
-    if any(word in lower for word in ["gull", "goose", "duck", "swan", "bird", "kite", "heron", "stork"]):
+    if any(word in lower for word in ["flamingo", "gull", "goose", "duck", "swan", "bird", "kite", "heron", "stork"]):
         return "bird"
 
     if any(word in lower for word in ["horse", "cow", "sheep", "dog", "cat", "deer", "lion", "monkey"]):

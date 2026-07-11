@@ -43,6 +43,35 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".bmp"}
 
 CATEGORY_MENU_LEAK = "aircraft | vehicle | boat | train"
 
+AIRLINE_ALIASES = [
+    ("airHaifa", ["airhaifa", "air haifa"]),
+    ("airBaltic", ["airbaltic", "air baltic"]),
+    ("TUS Air", ["tus air"]),
+    ("Aegean Airlines", ["aegean airlines", "aegean"]),
+    ("Cyprus Airways", ["cyprus airways"]),
+    ("Austrian Airlines", ["austrian airlines", "austrian"]),
+    ("Arkia", ["arkia"]),
+    ("Lauda Europe", ["lauda europe", "lauda"]),
+    ("World2Fly", ["world2fly", "world 2 fly"]),
+    ("Singapore Airlines Cargo", ["singapore airlines cargo"]),
+    ("Singapore Airlines", ["singapore airlines"]),
+    ("Transavia", ["transavia"]),
+    ("KLM", ["klm"]),
+    ("EasyJet", ["easyjet", "easy jet"]),
+    ("Air Canada", ["air canada"]),
+    ("Air France", ["air france", "airfrance"]),
+    ("British Airways", ["british airways"]),
+    ("Lufthansa", ["lufthansa"]),
+    ("Ryanair", ["ryanair"]),
+    ("Wizz Air", ["wizz air", "wizzair"]),
+    ("TUI", ["tui"]),
+    ("Emirates", ["emirates"]),
+    ("Qatar Airways", ["qatar airways"]),
+    ("Turkish Airlines", ["turkish airlines"]),
+    ("DHL", ["dhl"]),
+    ("UPS", ["ups"]),
+]
+
 
 def log(message: str) -> None:
     print(message, flush=True)
@@ -147,11 +176,23 @@ def normalize_airline(value: Any, context_values: list[str]) -> str:
 
     upper = text.upper()
     context = " ".join(context_values).upper()
+    haystack = clean_text(f"{text} {' '.join(context_values)}").lower()
+    haystack_words = re.sub(r"[^a-z0-9]+", " ", haystack).strip()
+    haystack_compact = re.sub(r"[^a-z0-9]+", "", haystack)
 
     if "CHINA SOUTHERN" in upper or "CHINA SOUTHERN" in context or "\u4e2d\u56fd\u5357\u65b9" in text:
         if "CARGO" in context:
             return "China Southern Cargo"
         return "China Southern Airlines"
+
+    for display, aliases in AIRLINE_ALIASES:
+        for alias in aliases:
+            alias_words = re.sub(r"[^a-z0-9]+", " ", alias.lower()).strip()
+            alias_compact = re.sub(r"[^a-z0-9]+", "", alias.lower())
+            if alias_words and re.search(rf"(?<![a-z0-9]){re.escape(alias_words)}(?![a-z0-9])", haystack_words):
+                return display
+            if alias_compact and alias_compact in haystack_compact:
+                return display
 
     if "AIRFRANCE" in upper or "AIR FRANCE" in upper:
         return "Air France"
@@ -205,7 +246,7 @@ def normalize_registration(value: Any) -> str:
     if text in reject:
         return ""
 
-    match = re.fullmatch(r"([A-Z]{1,2})-([A-Z0-9]{3,5})", text)
+    match = re.fullmatch(r"((?:[A-Z]{1,2}|4X))-([A-Z0-9]{3,5})", text)
     if not match:
         return ""
 
@@ -238,6 +279,15 @@ def normalize_aircraft_type(value: Any) -> str:
     if "787" in upper or "DREAMLINER" in upper:
         return "Boeing 787"
 
+    if "A321NEO" in upper or "A321 NEO" in upper or "A321-NEO" in upper:
+        return "Airbus A321NEO"
+
+    if "A321" in upper:
+        return "Airbus A321"
+
+    if "A320NEO" in upper or "A320 NEO" in upper or "A320-NEO" in upper:
+        return "Airbus A320NEO"
+
     if "A320" in upper:
         return "Airbus A320"
 
@@ -258,6 +308,14 @@ def normalize_aircraft_type(value: Any) -> str:
 
     if "EMBRAER" in upper:
         return "Embraer"
+
+    match = re.search(r"\bATR\s*[- ]?\s*(72|42)(?:[- ]?\s*(600|500|300))?\b", upper)
+    if match:
+        family = match.group(1)
+        variant = match.group(2)
+        if variant:
+            return f"ATR {family}-{variant}"
+        return f"ATR {family}"
 
     return ""
 
@@ -953,7 +1011,127 @@ def apply_subject_seed_policy(result: dict[str, Any]) -> dict[str, Any]:
 
     return result
 
+
+def trusted_aircraft_subject_hint(subject_hint: str) -> str:
+    subject = clean_text(subject_hint)
+    if not subject:
+        return ""
+
+    low = subject.lower()
+    if low in {"aircraft", "aviation", "airplane", "aeroplane", "plane"}:
+        return ""
+
+    words = [
+        word.lower()
+        for word in re.findall(r"[A-Za-z0-9]+", subject)
+        if len(word) >= 2
+    ]
+    if len(words) < 2:
+        return ""
+
+    has_aircraft_model = bool(
+        re.search(
+            r"\b(?:boeing|airbus|embraer|atr|bombardier|cessna|a\d{3}|7\d{2}|e\d{3})\b",
+            subject,
+            flags=re.IGNORECASE,
+        )
+    )
+    has_registration = bool(
+        re.search(
+            r"\b(?:PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS|4X|G|D|F|C|B|N)[-\s]?[A-Z0-9]{3,5}\b",
+            subject,
+            flags=re.IGNORECASE,
+        )
+    )
+
+    if not has_aircraft_model and not has_registration:
+        return ""
+
+    return subject
+
+
+def aircraft_type_from_subject_hint(subject: str) -> str:
+    normalized = normalize_aircraft_type(subject)
+    if normalized:
+        return normalized
+
+    match = re.search(r"\bBoeing\s+(7[0-9]{2})(?:[-\s]+([0-9]{1,4}))?\b", subject, flags=re.IGNORECASE)
+    if match:
+        if match.group(2):
+            return f"Boeing {match.group(1)}-{match.group(2)}"
+        return f"Boeing {match.group(1)}"
+
+    match = re.search(r"\b(7[0-9]{2})(?:[-\s]+([0-9]{1,4}))?\b", subject, flags=re.IGNORECASE)
+    if match:
+        if match.group(2):
+            return f"Boeing {match.group(1)}-{match.group(2)}"
+        return f"Boeing {match.group(1)}"
+
+    return ""
+
+
+def aircraft_registration_from_subject_hint(subject: str) -> str:
+    match = re.search(
+        r"\b((?:PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS|4X|G|D|F|C|B)[-\s]?[A-Z0-9]{3,5}|N[0-9][0-9A-Z]{2,5})\b",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+
+    return normalize_registration(match.group(1))
+
+
+def aircraft_airline_from_subject_hint(subject: str) -> str:
+    match = re.search(
+        r"\b(?:Boeing|Airbus|Embraer|ATR|Bombardier|Cessna|A\d{3}|7\d{2}|E\d{3})\b",
+        subject,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+
+    return clean_text(subject[:match.start()]).strip(" -_,.;:")
+
+
+def aircraft_subject_hint_result(args: argparse.Namespace, sample_paths: list[Path], subject: str) -> dict[str, Any]:
+    aircraft_type = aircraft_type_from_subject_hint(subject)
+    registration = aircraft_registration_from_subject_hint(subject)
+    airline = aircraft_airline_from_subject_hint(subject)
+
+    results = [
+        {
+            "image_name": path.name,
+            "route": "aircraft",
+            "category": "aircraft",
+            "subject": subject,
+            "confidence": 99,
+            "airline": airline,
+            "aircraft_type": aircraft_type,
+            "aircraft_registration": registration,
+            "raw_final_subject": subject,
+            "source": "trusted_aviation_subject_hint",
+        }
+        for path in sample_paths
+    ]
+
+    return {
+        "ok": True,
+        "route": "aircraft",
+        "mode": "single_subject",
+        "mixed_set": False,
+        "results": results,
+        "raw_count": len(results),
+        "source": "trusted_aviation_subject_hint",
+    }
+
+
 def run_aircraft_route(args: argparse.Namespace, sample_paths: list[Path]) -> dict[str, Any]:
+    trusted_subject = trusted_aircraft_subject_hint(args.subject_hint)
+    if trusted_subject:
+        log("[ROUTER] aviation subject hint trusted; skipping visual aircraft identification.")
+        return aircraft_subject_hint_result(args, sample_paths, trusted_subject)
+
     visual_args = [
         "--folder",
         str(args.folder),
@@ -1045,6 +1223,92 @@ def run_visual_route(args: argparse.Namespace, sample_paths: list[Path]) -> dict
     }
 
 
+def _biology_core_subject(subject: str) -> str:
+    text = clean_text(subject).lower()
+    if not text or text in {"bird", "birds", "bird in natural setting"}:
+        return ""
+    if any(word in text for word in ["parakeet", "parrot"]):
+        return "parakeet"
+    if any(word in text for word in ["dove", "pigeon"]):
+        return "dove_pigeon"
+    if any(word in text for word in ["raven", "crow"]):
+        return "crow_raven"
+    text = re.sub(r"\b(?:perched|perch|flying|flight|on|in|at|over|natural|setting|rail)\b", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _biology_per_image_results(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    details = raw.get("details")
+    if not isinstance(details, list):
+        return []
+
+    best_visual_by_image: dict[str, dict[str, Any]] = {}
+    best_species_by_image: dict[str, dict[str, Any]] = {}
+    for item in details:
+        if not isinstance(item, dict) or not item.get("ok"):
+            continue
+        image_path = clean_text(item.get("image_path"))
+        subject = clean_text(item.get("subject"))
+        if not image_path or not subject:
+            continue
+        confidence = int(item.get("confidence", 0) or 0)
+        is_bioclip = "bioclip" in str(item.get("source", "")).lower()
+        if is_bioclip:
+            generic_species = {
+                "animal",
+                "bird",
+                "birds",
+                "bird in natural setting",
+                "parakeet",
+                "parrot",
+                "dove",
+                "pigeon",
+            }
+            if confidence >= 85 and subject.lower() not in generic_species:
+                current = best_species_by_image.get(image_path)
+                if current is None or confidence > int(current.get("confidence", 0) or 0):
+                    best_species_by_image[image_path] = item
+            continue
+
+        current = best_visual_by_image.get(image_path)
+        if current is None or confidence > int(current.get("confidence", 0) or 0):
+            best_visual_by_image[image_path] = item
+
+    results = []
+    for image_path, visual_item in sorted(best_visual_by_image.items()):
+        species_item = best_species_by_image.get(image_path)
+        item = visual_item
+        if species_item:
+            visual_subject = clean_text(visual_item.get("subject"))
+            species_subject = clean_text(species_item.get("subject"))
+            visual_core = _biology_core_subject(visual_subject)
+            species_core = _biology_core_subject(species_subject)
+            generic_biology_tokens = {
+                "animal", "bird", "birds", "parakeet", "parrot", "dove", "pigeon",
+                "crow", "raven", "duck", "goose", "swan", "heron", "stork", "raptor",
+                "mammal", "horse", "cow", "sheep", "goat", "deer", "dog", "cat",
+                "rabbit", "fox", "monkey", "lion", "insect", "butterfly", "fly",
+                "bee", "bumblebee", "wasp", "dragonfly", "damselfly", "beetle",
+                "spider", "flower", "flowers", "blossom", "blossoms", "branch",
+                "plant", "mushroom", "fungus", "lichen", "moss",
+            }
+            visual_tokens = set(re.findall(r"[a-z]+", visual_subject.lower()))
+            generic_visual = bool(visual_tokens & generic_biology_tokens)
+            if visual_core in {"parakeet", "dove_pigeon", "crow_raven"} or visual_core == species_core or generic_visual:
+                item = species_item
+        results.append(
+            {
+                "image_name": Path(image_path).name,
+                "route": "biology",
+                "category": clean_text(visual_item.get("category") or raw.get("category")),
+                "subject": clean_text(item.get("subject")),
+                "confidence": int(item.get("confidence", 0) or 0),
+            }
+        )
+    return results
+
+
 def run_biology_route(args: argparse.Namespace, sample_paths: list[Path]) -> dict[str, Any]:
     biology_args = [
         "--folder",
@@ -1062,6 +1326,24 @@ def run_biology_route(args: argparse.Namespace, sample_paths: list[Path]) -> dic
 
     if not isinstance(raw, dict):
         raise SystemExit("[ERROR] Expected dict result from biology route.")
+
+    per_image = _biology_per_image_results(raw)
+    core_subjects = {
+        core
+        for core in (_biology_core_subject(item.get("subject", "")) for item in per_image)
+        if core
+    }
+    mixed_set = len(core_subjects) > 1
+
+    if mixed_set and per_image:
+        return {
+            "ok": True,
+            "route": "biology",
+            "mode": "per_image",
+            "mixed_set": True,
+            "results": per_image,
+            "raw": raw,
+        }
 
     return {
         "ok": True,

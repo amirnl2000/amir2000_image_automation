@@ -106,10 +106,28 @@ def save_used_filenames(used: set[str], path: str | None = None):
             pass
 
 
+_AIRCRAFT_HYPHEN_TOKEN_RE = re.compile(
+    r"(?<![A-Z0-9])(?:ATR[-\s]+(?:72|42)-[0-9A-Z]{2,5}|Fokker[-\s]+[0-9]{2,3}|[A-Z]{1,3}-[A-Z0-9]{2,5}|[0-9][A-Z]-[A-Z0-9]{2,5}|[A-Z]?\d{3,4}[A-Z]?-[0-9A-Z]{2,5}|7\d{2}[A-Z]?-[0-9A-Z]{2,5})(?![A-Z0-9])",
+    re.IGNORECASE,
+)
+_AIRCRAFT_HYPHEN_MARKER = "AMIRKEEPHYPHEN"
+
+
+def _protect_aircraft_hyphen_tokens(text: str) -> str:
+    return _AIRCRAFT_HYPHEN_TOKEN_RE.sub(
+        lambda match: match.group(0).replace("-", _AIRCRAFT_HYPHEN_MARKER),
+        text or "",
+    )
+
+
+def _restore_aircraft_hyphen_tokens(text: str) -> str:
+    return re.sub(_AIRCRAFT_HYPHEN_MARKER, "-", text or "", flags=re.IGNORECASE)
+
+
 def slugify(text: str) -> str:
     if text is None:
         return ""
-    s = str(text).strip()
+    s = _protect_aircraft_hyphen_tokens(str(text).strip())
 
     # keep case, just sanitize
     s = s.replace("&", "and")
@@ -117,7 +135,7 @@ def slugify(text: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()                 # collapse spaces
     s = s.replace(" ", "_")
     s = re.sub(r"_+", "_", s).strip("_")
-    return s
+    return _restore_aircraft_hyphen_tokens(s)
 
 
 def _title_case_token(t: str) -> str:

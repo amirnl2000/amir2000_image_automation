@@ -27,6 +27,14 @@ V1.0 adds the identifier and metadata-quality layers needed for a reproducible w
 - Review and publish control through `review_editor.py` and `db_uploader.py`.
 - Color-managed website export through `utils/image_processor.py`: tagged source ICC profiles are converted to sRGB, and the generated web JPG plus thumbnail embed an sRGB ICC profile.
 
+## Workflow Safeguards
+
+- Identifier routing uses image evidence and separate biological and aircraft refinement paths; it does not treat broad labels as a final species or aircraft result when stronger evidence is available.
+- Metadata-quality repair is limited to captions, alt text, and keywords. It preserves the selected subject, location, and folder/category.
+- For aviation sets, the selected aircraft subject is retained while each image receives scene-specific metadata from its own composition.
+- Filename formatting preserves meaningful aircraft-registration hyphens, and spellcheck offers close correction suggestions without changing accepted terms automatically.
+- Runtime script copies, operational databases, logs, model caches, and full local JSON data remain local-only and are not part of the public workflow repository.
+
 ## Metadata Quality and ML Readiness
 
 `metadata_quality` is the proof and audit table for generated captions, alt text, and keywords.

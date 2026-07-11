@@ -56,6 +56,11 @@ BIOLOGY_LABELS: list[str] = [
     "pigeon",
     "crow",
     "magpie",
+    "rose-ringed parakeet",
+    "alexandrine parakeet",
+    "monk parakeet",
+    "parakeet",
+    "parrot",
     "songbird",
     "bird",
 

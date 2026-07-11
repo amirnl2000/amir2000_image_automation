@@ -243,16 +243,38 @@ _KIND_BANNED_KEYWORDS = {
 
 _PRECISION_TERMS: List[Tuple[str, int]] = []
 
+_AVIATION_HYPHEN_SENTINEL = "__AMIR_AVIATION_HYPHEN__"
+_AVIATION_HYPHEN_TOKEN_RE = re.compile(
+    r"\b(?:[A-Z]{1,3}-[A-Z0-9]{2,5}|[A-Z]?\d{3,4}[A-Z]?-[0-9A-Z]{2,5}|7\d{2}[A-Z]?-[0-9A-Z]{2,5})\b",
+    re.I,
+)
+
+
+def _protect_aviation_hyphens(s: str) -> str:
+    return _AVIATION_HYPHEN_TOKEN_RE.sub(
+        lambda match: match.group(0).replace("-", _AVIATION_HYPHEN_SENTINEL),
+        str(s or ""),
+    )
+
+
+def _restore_aviation_hyphens(s: str) -> str:
+    return str(s or "").replace(_AVIATION_HYPHEN_SENTINEL, "-")
+
+
+def _aviation_token_words(value: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", str(value or "").lower())
+
 
 def _metadata_no_dash_text(s: str) -> str:
     s = str(s or "").replace("\r", " ").replace("\n", " ").strip()
     if not s:
         return ""
+    s = _protect_aviation_hyphens(s)
     s = re.sub(r"\s+[\u2010-\u2015\u2212-]\s+", ", ", s)
     s = re.sub(r"[\u2010-\u2015\u2212-]", " ", s)
     s = re.sub(r"\s+([,.;:])", r"\1", s)
     s = re.sub(r",\s*,+", ",", s)
-    return _WS_RE.sub(" ", s).strip(" ,;:")
+    return _restore_aviation_hyphens(_WS_RE.sub(" ", s).strip(" ,;:"))
 
 
 def _norm_text(s: str) -> str:
@@ -337,12 +359,14 @@ _KW_VISUAL_CONTEXT_TERMS: Set[str] = set()
 
 
 def _normalize_keyword(k: str) -> str:
-    k = _clean_phrase(k).replace("_", " ").replace("-", " ")
+    k = _metadata_no_dash_text(_clean_phrase(k).replace("_", " "))
     k = _WS_RE.sub(" ", k).strip()
-    kn = _norm_text_strict(k)
+    kn = _norm_text(k)
+    kn = re.sub(r"[^a-z0-9 -]+", "", kn, flags=re.I)
+    kn = _WS_RE.sub(" ", kn).strip()
     if not kn:
         return ""
-    parts = kn.split()
+    parts = _aviation_token_words(kn)
     if _looks_like_context_noise(kn) and not any(p in _KW_VISUAL_CONTEXT_TERMS for p in parts):
         return ""
     if len(parts) > 3:
@@ -1378,6 +1402,219 @@ def _simple_metadata_prompt(*, kind: str, subject: str, sequence_no: int = 1, se
     )
 
 
+def _aviation_scene_prompt(*, subject: str, location: str, sequence_no: int, series_size: int, make_it_different: bool) -> str:
+    series_line = ""
+    if int(series_size or 1) > 1:
+        series_line = (
+            f"This is image {int(sequence_no or 1)} of {int(series_size)} in the same-aircraft set. "
+            "Use the visible angle, movement, background, light, crop, foreground, or aircraft position to make this row distinct.\n"
+        )
+    different_line = ""
+    if make_it_different:
+        different_line = (
+            "Previous rows in this set may already mention takeoff or sky. "
+            "Choose a different visible angle, aircraft part, crop, lighting, foreground, or background detail for this image.\n"
+        )
+    return (
+        "Return JSON only. No markdown. No prose outside JSON.\n"
+        f"Known aircraft identity: {subject}\n"
+        f"Known location: {location}\n"
+        "Do NOT identify the aircraft, airline, model, or registration. Those are already known.\n"
+        "Look only at this image for movement, angle, scenery, aircraft parts, background, light, and composition.\n"
+        "Do not invent location, airline, model, registration, route, airport, or unreadable text.\n"
+        "Do not write phrases like appears behind, captured mid flight, visual detail, main subject, scene shows, or image shows.\n"
+        f"{series_line}"
+        f"{different_line}"
+        "Required JSON keys:\n"
+        '{"caption_scene":"","alt_scene":"","movement":"","angle":"","background":"","lighting":"","visible_parts":[],"keywords":[]}\n'
+        "caption_scene: 5 to 13 words that can follow the known aircraft identity, e.g. climbs after takeoff against a clear sky.\n"
+        "alt_scene: different 5 to 13 words that can follow the known aircraft identity plus the word aircraft.\n"
+        "movement: short visible movement such as taking off, climbing, landing approach, banking, taxiing, parked, in flight.\n"
+        "angle: short visible viewpoint such as underside view, side view, rear view, front view, distant view, close crop.\n"
+        "background: short visible background such as clear blue sky, clouds, runway, grass, terminal, trees.\n"
+        "visible_parts: 2 to 5 visible aircraft/scene parts, e.g. wing, landing gear, engine detail, tail, runway, sky.\n"
+        "keywords: 3 to 6 concrete visible phrases from this image only.\n"
+    )
+
+
+def _aviation_scene_fragment(value: str, *, label: str = "", airline: str = "", model: str = "", registration: str = "") -> str:
+    text = _clean_phrase(str(value or ""))
+    if not text:
+        return ""
+    for drop in (label, airline, model, registration):
+        drop = _clean_phrase(drop)
+        if drop:
+            text = re.sub(re.escape(drop), " ", text, flags=re.I)
+    text = re.sub(r"\b(?:a|an|the)\s+(?:aircraft|airplane|plane|jet)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:aircraft|airplane|plane|jet)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:appears?\s+behind|captured\s+mid\s+flight|image\s+shows|scene\s+shows|main\s+subject|visual\s+detail)\b", " ", text, flags=re.I)
+    text = re.sub(r"\b(?:for|with|and|against|at|near|from|in|on)\s*$", "", text, flags=re.I)
+    return _clean_phrase(text)
+
+
+def _aviation_scene_from_parts(data: dict) -> str:
+    movement = _clean_phrase(data.get("movement", ""))
+    angle = _clean_phrase(data.get("angle", ""))
+    background = _clean_phrase(data.get("background", ""))
+    lighting = _clean_phrase(data.get("lighting", ""))
+    parts = [_clean_phrase(x) for x in _facts_list(data.get("visible_parts") or [])]
+    blob = _norm_text_strict(" ".join([movement, angle, background, lighting, " ".join(parts)]))
+
+    if re.search(r"\b(takeoff|taking off|climb|climbing|depart|departure|leav(?:e|ing))\b", blob):
+        base = "climbing after takeoff"
+    elif re.search(r"\b(landing|approach|descending|final)\b", blob):
+        base = "on landing approach"
+    elif re.search(r"\b(taxi|taxiing)\b", blob):
+        base = "taxiing"
+    elif re.search(r"\b(parked|apron|stand)\b", blob):
+        base = "parked on the ground"
+    elif movement:
+        base = movement
+    else:
+        base = "in flight"
+
+    extras: List[str] = []
+    if "underside" in blob or "below" in blob:
+        extras.append("seen from below")
+    elif "side" in blob:
+        extras.append("in side view")
+    elif "rear" in blob:
+        extras.append("from the rear angle")
+    elif "front" in blob:
+        extras.append("from the front angle")
+    elif angle:
+        extras.append(angle)
+
+    if background and not _looks_like_context_noise(background):
+        extras.append(f"against {background}")
+    elif "clear blue sky" in blob or ("blue" in blob and "sky" in blob):
+        extras.append("against a clear blue sky")
+    elif "cloud" in blob:
+        extras.append("against clouds")
+    elif "runway" in blob:
+        extras.append("near the runway")
+
+    for part in parts:
+        part_low = part.lower()
+        if part_low in {"engine", "engines"}:
+            part = "engine detail"
+        if part_low in {"wing", "wings"}:
+            part = "wing detail"
+        if part and part.lower() not in {"aircraft", "plane", "jet", "sky"}:
+            extras.append(f"with {part}")
+            break
+
+    return _clean_phrase(" ".join([base, *extras[:2]]))
+
+
+def _aviation_metadata_from_scene_model(
+    *,
+    endpoint: str,
+    model: str,
+    timeout: int,
+    options: Optional[dict],
+    image_b64: str,
+    folder: str,
+    subject: str,
+    location: str,
+    file_name: str,
+    keywords_n: int,
+    sequence_no: int,
+    series_size: int,
+    make_it_different: bool,
+) -> Optional[Tuple[str, str, List[str]]]:
+    source = _aviation_source_text(subject, file_name, location, folder)
+    airline = _aviation_airline_from_text(source)
+    aircraft_model = _aviation_model_from_text(source)
+    registration = _aviation_registration_from_text(source)
+    if not (aircraft_model or registration):
+        return None
+    label = _aviation_label_from_parts(airline, aircraft_model, registration) or aircraft_model or registration
+    if not label:
+        return None
+
+    raw = _ollama_generate(
+        endpoint=endpoint,
+        model=model,
+        timeout=timeout,
+        options=options,
+        prompt=_aviation_scene_prompt(
+            subject=label,
+            location=_clean_phrase(location.replace("_", " ")),
+            sequence_no=sequence_no,
+            series_size=series_size,
+            make_it_different=make_it_different,
+        ),
+        image_b64=image_b64,
+    )
+    data = _extract_json_object(raw) or {}
+    if not isinstance(data, dict):
+        return None
+
+    cap_scene = _aviation_scene_fragment(
+        data.get("caption_scene", ""),
+        label=label,
+        airline=airline,
+        model=aircraft_model,
+        registration=registration,
+    )
+    alt_scene = _aviation_scene_fragment(
+        data.get("alt_scene", ""),
+        label=label,
+        airline=airline,
+        model=aircraft_model,
+        registration=registration,
+    )
+    if not cap_scene:
+        cap_scene = _aviation_scene_from_parts(data)
+    if not alt_scene or _norm_text_strict(alt_scene) == _norm_text_strict(cap_scene):
+        alt_scene = _aviation_scene_from_parts({**data, "caption_scene": "", "movement": data.get("movement", "")})
+
+    loc = _clean_phrase(location.replace("_", " "))
+    loc_phrase = f" at {loc}" if loc and loc.lower() not in cap_scene.lower() else ""
+    caption = _sanitize_sentence(f"{label} {cap_scene}{loc_phrase}")
+    alt_text = _sanitize_sentence(f"{label} aircraft {alt_scene}")
+
+    keyword_items: List[str] = [label, airline, aircraft_model, registration]
+    action = _aviation_state_from_text(" ".join([subject, str(data.get("movement", "")), cap_scene, alt_scene]))
+    if action == "takes off":
+        keyword_items.extend(["take off", "takeoff"])
+    elif action:
+        keyword_items.append(action)
+    if loc:
+        keyword_items.append(loc)
+    for item in _facts_list(data.get("keywords") or []):
+        keyword_items.append(item)
+    for item in _facts_list(data.get("visible_parts") or []):
+        low = item.lower()
+        if low in {"engine", "engines"}:
+            item = "engine detail"
+        elif low in {"wing", "wings"}:
+            item = "wing detail"
+        keyword_items.append(item)
+    for item in (data.get("angle", ""), data.get("background", ""), data.get("lighting", "")):
+        keyword_items.append(str(item or ""))
+    kw_list = _clean_keywords_list(keyword_items)
+    kw_list = [kw for kw in kw_list if kw not in {"aircraft", "airplane", "plane", "jet", "aviation"}]
+    grounded_blob = _norm_text_strict(" ".join([caption, alt_text, label, loc]))
+    identity_keys = {
+        _normalize_keyword(value)
+        for value in (label, airline, aircraft_model, registration, loc)
+        if _normalize_keyword(value)
+    }
+    filtered_keywords: List[str] = []
+    for kw in kw_list:
+        key = _normalize_keyword(kw)
+        tokens = [token for token in key.split() if token and token not in _KW_STOPWORDS]
+        if key in identity_keys or (tokens and all(token in grounded_blob for token in tokens)):
+            filtered_keywords.append(kw)
+    kw_list = _clean_keywords_list(filtered_keywords)
+    if len(kw_list) < max(5, min(keywords_n, 8)):
+        kw_list.extend(_keywords_fallback_from_visible_text(caption, alt_text, n=keywords_n))
+        kw_list = _clean_keywords_list(kw_list)
+    return caption, alt_text, kw_list[:keywords_n]
+
+
 def _metadata_from_model_simple(
     *,
     endpoint: str,
@@ -1396,6 +1633,22 @@ def _metadata_from_model_simple(
     make_it_different: bool = False,
 ) -> Optional[Tuple[str, str, List[str]]]:
     kind = _infer_subject_kind(folder, subject)
+    if kind == "aviation":
+        return _aviation_metadata_from_scene_model(
+            endpoint=endpoint,
+            model=model,
+            timeout=timeout,
+            options=options,
+            image_b64=image_b64,
+            folder=folder,
+            subject=subject,
+            location=location,
+            file_name=file_name,
+            keywords_n=keywords_n,
+            sequence_no=sequence_no,
+            series_size=series_size,
+            make_it_different=make_it_different,
+        )
     prompt = _simple_metadata_prompt(
         kind=kind,
         subject=subject,
@@ -1480,6 +1733,112 @@ def _safe_text(value: str, max_words: int = 8) -> str:
     return " ".join(s.split()[:max_words]).strip()
 
 
+def _aviation_registration_from_text(text: str) -> str:
+    value = _restore_aviation_hyphens(_protect_aviation_hyphens(str(text or "").replace("_", " "))).upper()
+    if not value:
+        return ""
+
+    patterns = [
+        r"\b(PH|OO|EI|EC|LN|SE|OY|TF|HB|CS|SP|TC|YU|9H|A6|JA|HL|VH|ZK|LX|OK|OM|OE|RA|VP|VQ|XA|PT|PR|PP|LV|CC|ZS)[-\s]?([A-Z0-9]{3,5})\b",
+        r"\b(G|D|F|C)[-\s]([A-Z]{3,5})\b",
+        r"\b(B)[-\s]?([0-9A-Z]{4,5})\b",
+        r"\b(N[0-9][0-9A-Z]{2,5})\b",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if not match:
+            continue
+        if len(match.groups()) == 1:
+            return match.group(1)
+        return f"{match.group(1)}-{match.group(2)}"
+
+    return ""
+
+
+def _aviation_model_from_text(text: str) -> str:
+    value = _restore_aviation_hyphens(_protect_aviation_hyphens(str(text or "").replace("_", " ")))
+    if not value:
+        return ""
+
+    patterns = [
+        (r"\bBoeing\s+(7\d{2}[A-Z]?(?:[-\s]?[0-9]{2,4})?)\b", "Boeing"),
+        (r"\b(7\d{2}[A-Z]?(?:[-\s]?[0-9]{2,4})?)\b", "Boeing"),
+        (r"\bAirbus\s+(A\d{3}(?:[-\s]?[0-9]{2,4})?)\b", "Airbus"),
+        (r"\b(A\d{3}(?:[-\s]?[0-9]{2,4})?)\b", "Airbus"),
+        (r"\bEmbraer\s+((?:E|ERJ)[-\s]?[0-9]{3,4})\b", "Embraer"),
+        (r"\bATR\s+([0-9]{2}(?:[-\s]?[0-9]{3})?)\b", "ATR"),
+        (r"\bBombardier\s+([A-Z]{2,4}[-\s]?[0-9]{3,4})\b", "Bombardier"),
+        (r"\bCessna\s+([0-9]{3,4}[A-Z]?)\b", "Cessna"),
+    ]
+
+    for pattern, maker in patterns:
+        match = re.search(pattern, value, flags=re.I)
+        if not match:
+            continue
+        token = re.sub(r"\s+", " ", match.group(1).upper()).strip()
+        token = re.sub(r"\b(7\d{2}[A-Z]?|A\d{3})[-\s]+([0-9]{2,4})\b", r"\1-\2", token)
+        compact = re.sub(r"\s+", "", token)
+        split_match = re.fullmatch(r"(7\d{2}[A-Z]?|A\d{3})(\d{2,4})", compact)
+        token = f"{split_match.group(1)}-{split_match.group(2)}" if split_match else compact
+        return _clean_phrase(f"{maker} {token}")
+
+    return ""
+
+
+def _aviation_airline_from_text(text: str) -> str:
+    blob = _restore_aviation_hyphens(_protect_aviation_hyphens(str(text or "").replace("_", " ")))
+    if not blob:
+        return ""
+
+    model_pattern = r"(?:Boeing|Airbus|Embraer|ATR|Bombardier|Cessna|A\d{3}|7\d{2})"
+    match = re.search(
+        rf"\b([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){{0,4}}?)\s+{model_pattern}\b",
+        blob,
+        flags=re.I,
+    )
+    if not match:
+        match = re.search(
+            r"\b([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,3}\s+Airlines?)\b",
+            blob,
+            flags=re.I,
+        )
+    if not match:
+        return ""
+
+    airline = _clean_phrase(match.group(1))
+    airline = re.sub(
+        r"\b(?:aircraft|airplane|plane|jet|takes?|taking|off|from|landing|approach|taxiing|parked)\b",
+        " ",
+        airline,
+        flags=re.I,
+    )
+    airline = _WS_RE.sub(" ", airline).strip()
+    if _norm_text_strict(airline) in {"airbus", "boeing", "aircraft", "airplane"}:
+        return ""
+    return airline
+
+
+def _aviation_state_from_text(text: str) -> str:
+    blob = _norm_text(str(text or "").replace("_", " "))
+    if re.search(
+        r"\btak(?:e|es|ing)?\s+off\b|\btakeoff\b|"
+        r"\bleav(?:e|es|ing)\b|\bdepart(?:s|ing|ure)?\b|"
+        r"\bclimb(?:s|ing)?\b",
+        blob,
+    ):
+        return "takes off"
+    if re.search(r"\bland(?:s|ing)?\b|\bapproach(?:es|ing)?\b", blob):
+        return "landing"
+    if re.search(r"\btaxi(?:s|ing)?\b", blob):
+        return "taxiing"
+    if re.search(r"\bpark(?:ed|ing)?\b", blob):
+        return "parked"
+    if re.search(r"\bfly(?:ing)?\b|\bin\s+flight\b", blob):
+        return "in flight"
+    return ""
+
+
 def _clean_aviation_subject(s: str, visible_text: str, subject_hint: str = "") -> str:
     blob = " ".join(
         [
@@ -1489,37 +1848,13 @@ def _clean_aviation_subject(s: str, visible_text: str, subject_hint: str = "") -
         ]
     ).strip()
 
-    airline = ""
-    m_air = re.search(
-        r"\b([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,2}\s+Airlines?)\b",
-        blob,
-        flags=re.I,
-    )
-    if m_air:
-        airline = _clean_phrase(m_air.group(1))
-
-    family = ""
-    m_family = re.search(
-        r"\b(Boeing\s+\d{3}(?:\s+\d{3})?|Airbus\s+[A-Za-z]?\d{3,4}[A-Za-z]?)\b",
-        blob,
-        flags=re.I,
-    )
-    if m_family:
-        family = _clean_phrase(m_family.group(1))
-
-    registration = ""
-    m_reg = re.search(
-        r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9-]{4,6}\b",
-        blob,
-        flags=re.I,
-    )
-    if m_reg:
-        reg = _clean_phrase(m_reg.group(0)).upper().replace("-", "")
-        if reg not in {"BOEING", "AIRBUS"} and reg != "747":
-            registration = reg
+    airline = _aviation_airline_from_text(blob)
+    family = _aviation_model_from_text(blob)
+    registration = _aviation_registration_from_text(blob)
+    state = _aviation_state_from_text(blob)
 
     parts: List[str] = []
-    for value in (airline, family, registration):
+    for value in (airline, family, registration, state):
         value = _clean_phrase(value)
         if value and value.lower() not in " ".join(parts).lower():
             parts.append(value)
@@ -1531,6 +1866,160 @@ def _clean_aviation_subject(s: str, visible_text: str, subject_hint: str = "") -
     if _norm_text_strict(s).startswith("aircraft "):
         s = s.split(" ", 1)[1]
     return _clean_phrase(s)
+
+
+def _aviation_source_text(*values: str) -> str:
+    chunks: list[str] = []
+    for value in values:
+        text = _restore_aviation_hyphens(_protect_aviation_hyphens(str(value or "").replace("_", " ")))
+        text = re.sub(r"\.(?:jpe?g|jpeg|png|tiff?)\b", " ", text, flags=re.I)
+        text = re.sub(
+            r"\b(?:Canon|EOS|R5|Mark\s+II|Aviation\s+Photography|Photography|Nature|Photo|Image)\b",
+            " ",
+            text,
+            flags=re.I,
+        )
+        text = re.sub(r"\b20\d{2}\b", " ", text)
+        chunks.append(text)
+    return _clean_phrase(" ".join(chunks))
+
+
+def _aviation_compact_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _aviation_label_from_parts(airline: str, model: str, registration: str) -> str:
+    parts: list[str] = []
+    compact = ""
+    for value in (airline, model, registration):
+        clean = _clean_phrase(value)
+        marker = _aviation_compact_text(clean)
+        if clean and marker and marker not in compact:
+            parts.append(clean)
+            compact += " " + marker
+    return _clean_phrase(" ".join(parts))
+
+
+def _aviation_prefill_variant(sequence_no: int) -> int:
+    try:
+        seq = int(sequence_no)
+    except Exception:
+        seq = 1
+    return max(0, seq - 1)
+
+
+def _aviation_sentence_pair(
+    *,
+    label: str,
+    action: str,
+    loc: str,
+    sequence_no: int,
+) -> tuple[str, str, list[str]]:
+    at_loc = f" at {loc}" if loc else ""
+    from_loc = f" from {loc}" if loc else ""
+    near_loc = f" near {loc}" if loc else ""
+    variant = _aviation_prefill_variant(sequence_no)
+
+    if action == "takes off":
+        choices = [
+            (f"{label} takes off{from_loc} under a clear sky.", f"{label} aircraft taking off{from_loc}.", "takeoff"),
+            (f"{label} climbs away after takeoff{from_loc}.", f"{label} aircraft climbing after departure{from_loc}.", "takeoff climb"),
+            (f"{label} departs {loc} in a clear sky view." if loc else f"{label} departs in a clear sky view.", f"{label} aircraft departing{from_loc}.", "departure"),
+            (f"{label} continues its takeoff climb{from_loc}.", f"{label} aircraft in the takeoff climb{from_loc}.", "departure climb"),
+            (f"{label} leaves {loc} during departure." if loc else f"{label} leaves during departure.", f"{label} aircraft leaving after departure.", "airport departure"),
+            (f"{label} is airborne after departing {loc}." if loc else f"{label} is airborne after departure.", f"{label} aircraft airborne after takeoff.", "airborne departure"),
+            (f"{label} climbs above {loc} after takeoff." if loc else f"{label} climbs after takeoff.", f"{label} aircraft climbing in a departure view.", "climbing aircraft"),
+            (f"{label} lifts away in the departure sequence{from_loc}.", f"{label} aircraft lifting away{from_loc}.", "departure sequence"),
+        ]
+    elif action == "landing":
+        choices = [
+            (f"{label} approaches {loc} for landing." if loc else f"{label} approaches for landing.", f"{label} aircraft on landing approach{at_loc}.", "landing approach"),
+            (f"{label} descends toward {loc}." if loc else f"{label} descends on approach.", f"{label} aircraft descending on approach.", "descent"),
+            (f"{label} lines up on approach to {loc}." if loc else f"{label} lines up on approach.", f"{label} aircraft lined up for landing.", "final approach"),
+            (f"{label} continues the landing approach{at_loc}.", f"{label} aircraft continuing its approach{at_loc}.", "approach"),
+            (f"{label} arrives over {loc} on final approach." if loc else f"{label} arrives on final approach.", f"{label} aircraft arriving on final approach.", "arrival"),
+            (f"{label} flies the approach into {loc}." if loc else f"{label} flies the landing approach.", f"{label} aircraft flying the approach.", "airport arrival"),
+        ]
+    elif action == "taxiing":
+        choices = [
+            (f"{label} taxis{at_loc}.", f"{label} aircraft taxiing{at_loc}.", "taxiing"),
+            (f"{label} moves on the airport taxiway{at_loc}.", f"{label} aircraft moving on the taxiway.", "taxiway"),
+            (f"{label} continues taxiing{at_loc}.", f"{label} aircraft during taxi{at_loc}.", "ground movement"),
+        ]
+    elif action == "parked":
+        choices = [
+            (f"{label} parked{at_loc}.", f"{label} aircraft parked{at_loc}.", "parked aircraft"),
+            (f"{label} stands on the apron{at_loc}.", f"{label} aircraft on the apron.", "airport apron"),
+            (f"{label} is stationary on the ground{at_loc}.", f"{label} aircraft stationary on the ground.", "grounded aircraft"),
+        ]
+    else:
+        choices = [
+            (f"{label} in flight{near_loc} under a clear sky.", f"{label} aircraft in flight{near_loc}.", "in flight"),
+            (f"{label} airborne{near_loc} in a sky view.", f"{label} aircraft airborne{near_loc}.", "airborne"),
+            (f"{label} passes{near_loc} against the sky.", f"{label} aircraft passing through the sky.", "sky view"),
+            (f"{label} flies{near_loc} in clear conditions.", f"{label} aircraft flying in clear conditions.", "clear sky aviation"),
+        ]
+
+    return choices[variant % len(choices)]
+
+
+def _deterministic_aviation_prefill(
+    *,
+    folder: str,
+    subject: str,
+    location: str,
+    file_name: str,
+    keywords_n: int,
+    sequence_no: int = 1,
+) -> Optional[tuple[str, str, str]]:
+    source = _aviation_source_text(subject, file_name, location, folder)
+    folder_norm = _norm_text(folder)
+    aviation_signal = bool(
+        re.search(r"\b(?:boeing|airbus|embraer|atr|bombardier|cessna|airlines?|airways|jet|aviation)\b", source, re.I)
+        or "aviation" in folder_norm
+        or _aviation_registration_from_text(source)
+    )
+    if not aviation_signal:
+        return None
+
+    model = _aviation_model_from_text(source)
+    registration = _aviation_registration_from_text(source)
+    if not model and not registration:
+        return None
+
+    airline = _aviation_airline_from_text(source)
+    action = _aviation_state_from_text(source)
+    loc = _clean_phrase(location.replace("_", " "))
+    label = _aviation_label_from_parts(airline, model, registration) or model or registration or "Aircraft"
+    caption, alt, variant_keywords = _aviation_sentence_pair(
+        label=label,
+        action=action,
+        loc=loc,
+        sequence_no=sequence_no,
+    )
+    if isinstance(variant_keywords, str):
+        variant_keywords = [variant_keywords]
+
+    keyword_items = [
+        label,
+        airline,
+        model,
+        registration,
+        action,
+        loc,
+        *variant_keywords,
+        "aviation",
+        "aircraft",
+        "airliner",
+        "aviation photography",
+    ]
+    keywords = _clean_keywords_list(keyword_items)
+    for fallback in ("aviation", "aircraft", "airliner", "plane"):
+        if len(keywords) >= max(6, min(keywords_n, 10)):
+            break
+        if fallback not in keywords:
+            keywords.append(fallback)
+    return _sanitize_sentence(caption), ", ".join(keywords[: max(keywords_n, len(keywords))]), _sanitize_sentence(alt)
 
 
 def _facts_to_core(*, facts: dict, folder: str, subject: str, location: str, file_name: str, sequence_no: int = 1, series_size: int = 1) -> dict:
@@ -1958,29 +2447,15 @@ def _build_keywords(core: dict, *, folder: str, subject: str, location: str, key
             if kn:
                 kws.append(kn)
 
-        m_air = re.search(
-            r"\b([A-Za-z0-9]+(?:\s+[A-Za-z0-9]+){0,2}\s+Airlines?)\b",
-            subject_blob,
-            flags=re.I,
-        )
-        if m_air:
-            add(m_air.group(1))
-
-        m_family = re.search(
-            r"\b(Boeing\s+\d{3}(?:\s+\d{3})?|Airbus\s+[A-Za-z]?\d{3,4}[A-Za-z]?)\b",
-            subject_blob,
-            flags=re.I,
-        )
-        if m_family:
-            add(m_family.group(1))
-
-        m_reg = re.search(
-            r"\b(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9-]{4,6}\b",
-            subject_blob,
-            flags=re.I,
-        )
-        if m_reg:
-            add(m_reg.group(0).upper().replace("-", ""))
+        structured_subject = _clean_aviation_subject(subject_blob, "", "")
+        for value in [
+            structured_subject,
+            _aviation_airline_from_text(subject_blob),
+            _aviation_model_from_text(subject_blob),
+            _aviation_registration_from_text(subject_blob),
+            _aviation_state_from_text(subject_blob),
+        ]:
+            add(value)
 
         add("airliner")
         if "aviation" in _norm_text_strict(folder):
@@ -2328,9 +2803,9 @@ def _repair_impossible_or_internal_metadata(*, caption: str, alt_text: str, keyw
         if re.search(r"\b(ocean|sea|water|wave|waves|shore|beach|horizon|sunset)\b", norm):
             new_caption = "Serene sunset light reflects over calm ocean water."
         else:
-            new_caption = _clean_visible_sentence(new_caption).rstrip(".") + " with clear visible detail."
+            new_caption = _clean_visible_sentence(new_caption).rstrip(".") + "."
     if len(_norm_text_strict(new_alt).split()) < 7 and new_alt:
-        new_alt = _clean_visible_sentence(new_alt).rstrip(".") + " with visible detail in the scene."
+        new_alt = _clean_visible_sentence(new_alt).rstrip(".") + "."
 
     clean_kws: List[str] = []
     internal_keyword_tokens = {"sequence", "frame", "variant", "image"}
@@ -3572,7 +4047,12 @@ def main() -> int:
             file_name = str(r[args.file_col] or "")
             primary_path = str(r[args.path_col] or "").strip()
             fallback_path = str(r[args.fallback_path_col] or "").strip()
-            pth = primary_path if primary_path else fallback_path
+            if primary_path and Path(primary_path).exists():
+                pth = primary_path
+            elif fallback_path and Path(fallback_path).exists():
+                pth = fallback_path
+            else:
+                pth = primary_path if primary_path else fallback_path
             image_path = Path(pth) if pth else Path()
             folder = str(r[args.folder_col] or "")
             subject, router_seed_used = _effective_subject_for_caption(
